@@ -87,7 +87,8 @@ jobs:
             | bash -s stable
 
           bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-          bash $GITHUB_WORKSPACE/Baseband/setup.sh
+          curl -LSs "https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh" | bash
+          echo "CONFIG_BBG=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
           echo "CONFIG_LSM=lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard" \
