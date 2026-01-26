@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  TZ: Asia/Shanghai
+  TZ: Asia/Kolkata
 
 jobs:
   build:
