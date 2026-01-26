@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  TZ: Asia/Shanghai
+  TZ: Asia/Kolkata
 
 jobs:
   build:
@@ -76,10 +76,12 @@ jobs:
           https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    - name: Setup KernelSU
+    - name: Setup KernelSU-Next
       run: |
         cd kernel_workspace/android-kernel
         curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+        curl -LSs "https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh" | bash -s wild
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         KSU_VERSION=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
@@ -91,6 +93,7 @@ jobs:
         cd kernel_workspace/android-kernel
         export ARCH=arm64
         export SUBARCH=arm64
+    
         export BRAND_SHOW_FLAG=oneplus
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
         export KBUILD_BUILD_HOST=Github-Action
@@ -138,33 +141,3 @@ jobs:
         path: |
           Image.zip
           AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip
-
-    - name: Upload to Google Drive
-      if: env.CHECK_IMAGE == 'true'
-      env:
-        GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
-        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      run: |
-        sudo pip3 install google-api-python-client google-auth google-auth-httplib2
-        cat > upload.py << 'EOF'
-        import json, os
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload
-
-        creds = Credentials.from_service_account_info(
-            json.loads(os.environ["GDRIVE_SERVICE_ACCOUNT_JSON"]),
-            scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        service = build("drive", "v3", credentials=creds)
-        folder = os.environ["GDRIVE_FOLDER_ID"]
-
-        for f in ["Image.zip",
-                  "AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip"]:
-            media = MediaFileUpload(f, resumable=True)
-            service.files().create(
-                body={"name": f, "parents": [folder]},
-                media_body=media
-            ).execute()
-        EOF
-        python3 upload.py
