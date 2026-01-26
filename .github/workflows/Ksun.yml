@@ -1,72 +1,175 @@
-name: Build LineageOS OPlus SM8250 Kernel-Test
+name: Build LineageOS OPlus SM8250 Kernel (KSU-Next + BBG)
 
 on:
   workflow_dispatch:
 
 env:
   TZ: Asia/Shanghai
+  ARCH: arm64
+  SUBARCH: arm64
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v6
+    # -------------------------------------------------
+    # Checkout
+    # -------------------------------------------------
+    - name: Checkout
+      uses: actions/checkout@v4
 
+    # -------------------------------------------------
+    # Swap (kernel builds need RAM)
+    # -------------------------------------------------
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    # -------------------------------------------------
+    # Dependencies
+    # -------------------------------------------------
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          git bc bison flex libssl-dev make \
-          libc6-dev libncurses5-dev ccache \
-          python3 jq curl
+          bc bison flex libssl-dev \
+          make libc6-dev libncurses5-dev \
+          ccache python3 git curl jq zip \
+          clang lld llvm
 
-    - name: Download Clang
+    # -------------------------------------------------
+    # AOSP Clang
+    # -------------------------------------------------
+    - name: Setup AOSP Clang
       run: |
         mkdir -p toolchain
         cd toolchain
-        wget -qO clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz
-        mkdir clang && tar -xf clang.tar.gz -C clang
+        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz
+        mkdir clang
+        tar -xf clang-r547379.tar.gz -C clang
 
-    - name: Clone kernel
+    # -------------------------------------------------
+    # Kernel Source
+    # -------------------------------------------------
+    - name: Clone kernel source
       run: |
-        git clone --depth=1 -b lineage-23.0 \
+        git clone --depth=1 \
           https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           kernel
 
-    - name: Setup KernelSU-Next + Baseband-guard
+    # -------------------------------------------------
+    # KernelSU-Next
+    # -------------------------------------------------
+    - name: Setup KernelSU-Next
       run: |
         cd kernel
-        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s stable
-        curl -LSs https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        curl -LSs \
+          https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+          | bash -s stable
 
-    - name: Build kernel (FIXED Baseband-guard integration)
+        KSU_VER=$(cd KernelSU-Next && git rev-list --count HEAD)
+        echo "KSUVER=$((KSU_VER + 30000))" >> $GITHUB_ENV
+
+    # -------------------------------------------------
+    # Baseband-guard
+    # -------------------------------------------------
+    - name: Setup Baseband-guard
+      run: |
+        cd kernel
+        curl -LSs \
+          https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh \
+          | bash
+
+    # -------------------------------------------------
+    # Build Kernel (FIXED ORDER)
+    # -------------------------------------------------
+    - name: Build kernel
       run: |
         cd kernel
 
-        export ARCH=arm64
-        export SUBARCH=arm64
         export PATH=$PWD/../toolchain/clang/bin:$PATH
         export CC=clang
         export LLVM=1
         export LLVM_IAS=1
+        export KBUILD_BUILD_HOST=GitHub
+        export KBUILD_BUILD_USER=${{ github.actor }}
 
-        # 1️⃣ Apply defconfig + fragments
-        make O=out vendor/kona_defconfig \
+        rm -rf out
+        mkdir out
+
+        # 1) Apply defconfig + vendor fragments (UNCHANGED)
+        make O=out \
+          vendor/kona-perf_defconfig \
           vendor/debugfs.config \
           vendor/oplus.config
 
-        # 2️⃣ Enforce Baseband-guard properly (AFTER fragments)
+        # 2) FORCE Baseband-guard into CONFIG_LSM
         ./scripts/config --file out/.config \
           -e CONFIG_BBG \
-          --set-str CONFIG_LSM "lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
+          --set-str CONFIG_LSM \
+          "lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
 
-        # 3️⃣ Sync config
+        # 3) Sync config
         make O=out olddefconfig
 
-        # 4️⃣ Build
+        # 4) Build
         make -j$(nproc) O=out
 
-    - name: Verify Image
+    # -------------------------------------------------
+    # Verify output
+    # -------------------------------------------------
+    - name: Check kernel image
       run: |
-        test -f kernel/out/arch/arm64/boot/Image
+        if [ ! -f kernel/out/arch/arm64/boot/Image ]; then
+          echo "❌ Kernel Image not found"
+          exit 1
+        fi
+        echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+        echo "KERNEL_VERSION=$(cat kernel/out/include/config/kernel.release)" >> $GITHUB_ENV
+
+    # -------------------------------------------------
+    # AnyKernel3
+    # -------------------------------------------------
+    - name: Make AnyKernel3
+      if: env.CHECK_IMAGE == 'true'
+      run: |
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+
+        # Disable device checks
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+        sed -i 's/BLOCK=.*/BLOCK=auto;/g' AnyKernel3/anykernel.sh
+
+        # Copy kernel
+        cp kernel/out/arch/arm64/boot/Image AnyKernel3/
+
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+
+    # -------------------------------------------------
+    # Zip AnyKernel3
+    # -------------------------------------------------
+    - name: Zip AnyKernel3
+      if: env.CHECK_IMAGE == 'true'
+      run: |
+        zip -r \
+          AK3-LineageOS-SM8250-KSU_${{ env.KSUVER }}.zip \
+          AnyKernel3
+
+    # -------------------------------------------------
+    # Upload artifacts
+    # -------------------------------------------------
+    - name: Upload Image
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: Image
+        path: kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: AK3-SM8250-KSU_${{ env.KSUVER }}
+        path: AK3-LineageOS-SM8250-KSU_${{ env.KSUVER }}.zip
