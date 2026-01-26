@@ -78,7 +78,7 @@ jobs:
             android-kernel \
             --depth=1
 
-      - name: Set up rsuntk KernelSU
+      - name: Set up KernelSU-Next + Baseband-guard
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
 
@@ -87,12 +87,9 @@ jobs:
             | bash -s stable
 
           bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-          curl -LSs "https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh" | bash
-          
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/landlock/landlock,baseband_guard/ } }' security/Kconfig
+          curl -LSs https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          echo "CONFIG_LSM=lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard" \
-            >> arch/arm64/configs/vendor/kona-perf_defconfig
 
           KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
@@ -100,19 +97,27 @@ jobs:
           cd scripts
           sed -i 's/ -dirty//g' setlocalversion
 
-      - name: Build kernel with rsuntk KernelSU
+      - name: Build kernel with enforced CONFIG_LSM
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
           export ARCH=arm64
           export SUBARCH=arm64
           export BRAND_SHOW_FLAG=oneplus
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
           export KBUILD_BUILD_HOST=Github-Action
           export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
           BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android-"
           EX_CMD="LD=ld.lld LLVM=1 LLVM_IAS=1"
           DEFCONFIG="vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config"
+
           make O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+
+          scripts/config --file out/.config \
+            --set-str LSM "lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
+
+          make O=out olddefconfig
           make -j$(nproc --all) O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD
 
       - name: Check kernel output files
@@ -120,8 +125,7 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
           if [ -f arch/arm64/boot/Image ]; then
             echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-            KERNEL_VERSION=$(cat include/config/kernel.release)
-            echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+            echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
           else
             echo "Kernel output file is empty"
             exit 1
@@ -133,7 +137,7 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1
           sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
-          sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+          sed -i 's!BLOCK=.*!BLOCK=auto;!g' AnyKernel3/anykernel.sh
           sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
           cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
           rm -rf AnyKernel3/.git* AnyKernel3/README.md
@@ -151,10 +155,3 @@ jobs:
         with:
           name: AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/AnyKernel3/*
-
-      - name: Zip files
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot
-          zip $GITHUB_WORKSPACE/Image.zip Image
-          cd $GITHUB_WORKSPACE/kernel_workspace/AnyKernel3
-          zip -r $GITHUB_WORKSPACE/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip ./*
