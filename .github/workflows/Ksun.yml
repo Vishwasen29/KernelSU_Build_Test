@@ -81,14 +81,21 @@ jobs:
       - name: Set up rsuntk KernelSU
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
           curl -LSs \
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s stable
+
           bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
           bash $GITHUB_WORKSPACE/Baseband/setup.sh
+
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          KSU_VERSION=$(cd KernelSU && expr $(/usr/bin/git rev-list --count HEAD) + 30000)
+          echo "CONFIG_LSM=lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard" \
+            >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+          KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+
           cd scripts
           sed -i 's/ -dirty//g' setlocalversion
 
