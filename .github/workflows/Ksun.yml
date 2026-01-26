@@ -1,140 +1,72 @@
-name: Build LineageOS OPlus SM8250 KSUN
+name: Build LineageOS OPlus SM8250 Kernel-Test
 
 on:
   workflow_dispatch:
 
 env:
-  TZ: Asia/Kolkata
+  TZ: Asia/Shanghai
 
 jobs:
   build:
-    name: Build Kernel by ${{ github.actor }}
     runs-on: ubuntu-latest
 
-    env:
-      CLANG_VERSION: clang-r547379
-      GCC_TAG: android-12.1.0_r27
-      LINEAGE_VERSION: lineage-23.0
-
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
-      - name: Set swap to 10G
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 10
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git bc bison flex libssl-dev make \
+          libc6-dev libncurses5-dev ccache \
+          python3 jq curl
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git ccache automake flex lzop bison gperf build-essential \
-            zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev \
-            liblz4-tool make squashfs-tools dpkg-dev libssl-dev \
-            python3 bc libc6-dev-i386 libncurses5-dev
+    - name: Download Clang
+      run: |
+        mkdir -p toolchain
+        cd toolchain
+        wget -qO clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz
+        mkdir clang && tar -xf clang.tar.gz -C clang
 
-      - name: Prepare workspace
-        run: mkdir -p kernel_workspace
+    - name: Clone kernel
+      run: |
+        git clone --depth=1 -b lineage-23.0 \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+          kernel
 
-      - name: Cache Clang
-        uses: actions/cache@v4
-        with:
-          path: kernel_workspace/clang-aosp
-          key: clang-${{ env.CLANG_VERSION }}
+    - name: Setup KernelSU-Next + Baseband-guard
+      run: |
+        cd kernel
+        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s stable
+        curl -LSs https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
-      - name: Download Clang
-        if: steps.cache-clang.outputs.cache-hit != 'true'
-        run: |
-          cd kernel_workspace
-          mkdir clang-aosp
-          wget -O clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
-          tar -C clang-aosp -xzf clang.tar.gz
+    - name: Build kernel (FIXED Baseband-guard integration)
+      run: |
+        cd kernel
 
-      - name: Cache GCC
-        uses: actions/cache@v4
-        with:
-          path: kernel_workspace/gcc-64
-          key: gcc-${{ env.GCC_TAG }}
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export PATH=$PWD/../toolchain/clang/bin:$PATH
+        export CC=clang
+        export LLVM=1
+        export LLVM_IAS=1
 
-      - name: Download GCC
-        if: steps.cache-gcc.outputs.cache-hit != 'true'
-        run: |
-          cd kernel_workspace
-          mkdir gcc-64
-          wget -O gcc.tar.gz https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
-          tar -C gcc-64 -xzf gcc.tar.gz
+        # 1️⃣ Apply defconfig + fragments
+        make O=out vendor/kona_defconfig \
+          vendor/debugfs.config \
+          vendor/oplus.config
 
-      - name: Clone kernel source
-        run: |
-          cd kernel_workspace
-          git clone --depth=1 -b $LINEAGE_VERSION \
-            https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-            android-kernel
+        # 2️⃣ Enforce Baseband-guard properly (AFTER fragments)
+        ./scripts/config --file out/.config \
+          -e CONFIG_BBG \
+          --set-str CONFIG_LSM "lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
 
-      - name: Setup KernelSU + Baseband-guard
-        run: |
-          cd kernel_workspace/android-kernel
+        # 3️⃣ Sync config
+        make O=out olddefconfig
 
-          curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s stable
-          curl -LSs https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        # 4️⃣ Build
+        make -j$(nproc) O=out
 
-          bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-
-          sed -i 's/ -dirty//g' scripts/setlocalversion
-
-      - name: Patch defconfig (CRITICAL FIX)
-        run: |
-          DEFCONFIG=arch/arm64/configs/vendor/kona-perf_defconfig
-
-          sed -i 's/^CONFIG_LSM=.*/CONFIG_LSM="lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"/' $DEFCONFIG
-
-          grep -q '^CONFIG_BBG=' $DEFCONFIG || echo 'CONFIG_BBG=y' >> $DEFCONFIG
-          grep -q '^CONFIG_KSU_MANUAL_HOOK=' $DEFCONFIG || echo 'CONFIG_KSU_MANUAL_HOOK=y' >> $DEFCONFIG
-
-          echo "---- Patched defconfig ----"
-          grep -E 'CONFIG_LSM|CONFIG_BBG|CONFIG_KSU' $DEFCONFIG
-
-      - name: Build kernel
-        run: |
-          cd kernel_workspace/android-kernel
-
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export PATH=$PWD/../clang-aosp/bin:$PWD/../gcc-64/bin:$PATH
-          export KBUILD_BUILD_USER=${{ github.actor }}
-          export KBUILD_BUILD_HOST=GitHub-Actions
-
-          make O=out ARCH=arm64 vendor/kona-perf_defconfig
-          make O=out ARCH=arm64 olddefconfig
-
-          make -j$(nproc) O=out \
-            ARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-android-
-
-      - name: Verify build output
-        run: |
-          test -f kernel_workspace/android-kernel/out/arch/arm64/boot/Image
-
-      - name: Package AnyKernel3
-        run: |
-          cd kernel_workspace
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-          cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
-          rm -rf AnyKernel3/.git*
-
-      - name: Upload Image
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image
-          path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
-
-      - name: Upload AnyKernel3
-        uses: actions/upload-artifact@v4
-        with:
-          name: AnyKernel3-KSU
-          path: kernel_workspace/AnyKernel3
+    - name: Verify Image
+      run: |
+        test -f kernel/out/arch/arm64/boot/Image
