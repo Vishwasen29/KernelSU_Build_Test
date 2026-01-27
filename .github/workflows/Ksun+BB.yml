@@ -1,213 +1,114 @@
-name: Build LineageOS OPlus SM8250 KSU + BBG - Test
+name: Kernel Build with KSUN + Baseband Guard
 
 on:
   workflow_dispatch:
 
-env:
-  TZ: Asia/Kolkata
-
 jobs:
   build:
-    name: Build Kernel by ${{ github.actor }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     env:
-      CLANG_VERSION: clang-r547379
-      GCC_TAG: android-12.1.0_r27
-      LINEAGE_VERSION: lineage-23.0
+      ARCH: arm64
+      SUBARCH: arm64
+      KBUILD_BUILD_USER: github
+      KBUILD_BUILD_HOST: actions
+      CCACHE_COMPRESS: 1
+      CCACHE_SIZE: 10G
+      USE_CCACHE: 1
+
+      DEVICE: kona
+      DEFCONFIG: vendor/kona-perf_defconfig
+      EXTRA_CONFIGS: vendor/debugfs.config vendor/oplus.config vendor/baseband_guard.config
+
+      CLANG_PATH: ${{ github.workspace }}/clang
+      CLANG_BIN: ${{ github.workspace }}/clang/bin
+      PATH: ${{ github.workspace }}/clang/bin:${{ github.workspace }}/gcc/bin:${{ github.workspace }}/gcc64/bin:/usr/lib/ccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
     steps:
-    # --------------------------------------------------
-    # CHECKOUT
-    # --------------------------------------------------
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-    # --------------------------------------------------
-    # SWAP
-    # --------------------------------------------------
-    - name: Set swap to 10G
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 10
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev python3
 
-    # --------------------------------------------------
-    # DEPENDENCIES
-    # --------------------------------------------------
-    - name: Setup build environment
-      run: |
-        echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
-        echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
+      - name: Setup ccache
+        run: |
+          mkdir -p ~/.ccache
+          ccache -M 10G
+          ccache -z
 
-        sudo apt-get update
-        sudo apt-get install -y \
-          git ccache automake flex lzop bison gperf build-essential \
-          zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev \
-          liblz4-tool make squashfs-tools dpkg-dev libssl-dev \
-          python3 bc libc6-dev-i386 libncurses5-dev
+      - name: Download Clang
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
 
-        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+      - name: Download GCC toolchains
+        run: |
+          git clone --depth=1 https://github.com/mvaisakh/gcc-arm64 gcc64
+          git clone --depth=1 https://github.com/mvaisakh/gcc-arm gcc
 
-    # --------------------------------------------------
-    # CLANG
-    # --------------------------------------------------
-    - name: Cache Clang
-      uses: actions/cache@v4
-      with:
-        path: kernel_workspace/clang-aosp
-        key: clang-${{ env.CLANG_VERSION }}
+      - name: KSUN + Baseband Guard setup
+        run: |
+          set -e
 
-    - name: Download Clang
-      if: steps.cache-clang.outputs.cache-hit != 'true'
-      run: |
-        cd kernel_workspace
-        mkdir -p clang-aosp
-        wget -qO clang.tar.gz \
-          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
-        tar -C clang-aosp -xzf clang.tar.gz
+          # KSUN
+          curl -s https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -
 
-    # --------------------------------------------------
-    # GCC
-    # --------------------------------------------------
-    - name: Cache GCC
-      uses: actions/cache@v4
-      with:
-        path: kernel_workspace/gcc-64
-        key: gcc-${{ env.GCC_TAG }}
+          # Baseband Guard
+          curl -L https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
-    - name: Download GCC
-      if: steps.cache-gcc.outputs.cache-hit != 'true'
-      run: |
-        cd kernel_workspace
-        mkdir -p gcc-64
-        wget -qO gcc.tar.gz \
-          https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
-        tar -C gcc-64 -xzf gcc.tar.gz
+          # Safe LSM injection
+          if ! grep -q baseband_guard security/Kconfig; then
+            sed -i 's/default "\(.*\)"/default "\1,baseband_guard"/' security/Kconfig
+          fi
 
-    # --------------------------------------------------
-    # KERNEL SOURCE
-    # --------------------------------------------------
-    - name: Clone kernel source
-      run: |
-        cd kernel_workspace
-        git clone --recursive --depth=1 \
-          -b ${{ env.LINEAGE_VERSION }} \
-          https://github.com/LineageOS/android_kernel_oneplus_sm8250 android-kernel
+          # BBG config fragment
+          mkdir -p arch/arm64/configs/vendor
+          cat <<EOF > arch/arm64/configs/vendor/baseband_guard.config
+          CONFIG_BBG=y
+          EOF
 
-    # --------------------------------------------------
-    # KERNELSU + BASEBAND GUARD
-    # --------------------------------------------------
-    - name: Setup KernelSU-Next & Baseband-Guard
-      run: |
-        cd kernel_workspace/android-kernel
+      - name: Kernel defconfig
+        run: |
+          make O=out ARCH=arm64 \
+            ${DEFCONFIG} \
+            vendor/debugfs.config \
+            vendor/oplus.config \
+            vendor/baseband_guard.config
 
-        # KernelSU-Next
-        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -
+      - name: Verify BBG enabled
+        run: |
+          grep CONFIG_BBG out/.config || (echo "❌ Baseband Guard NOT enabled" && exit 1)
 
-        # Baseband Guard
-        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+      - name: Build kernel
+        run: |
+          make -j$(nproc) O=out \
+            ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-        # Safe LSM injection
-        grep -q baseband_guard security/Kconfig || \
-          sed -i 's/default "\(.*\)"/default "\1,baseband_guard"/' security/Kconfig
+      - name: Package Image
+        run: |
+          mkdir -p artifacts
+          cp out/arch/arm64/boot/Image artifacts/
 
-        # BBG config fragment
-        cat <<EOF > arch/arm64/configs/vendor/baseband_guard.config
-CONFIG_BBG=y
-EOF
-
-        # KernelSU config
-        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-
-        # KernelSU version
-        KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
-        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-
-        # Fix localversion
-        sed -i 's/ -dirty//g' scripts/setlocalversion
-
-    # --------------------------------------------------
-    # BUILD
-    # --------------------------------------------------
-    - name: Build kernel
-      run: |
-        cd kernel_workspace/android-kernel
-
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export BRAND_SHOW_FLAG=oneplus
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
-        export KBUILD_BUILD_HOST=Github-Action
-        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
-
-        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android-"
-        EX_CMD="LD=ld.lld LLVM=1 LLVM_IAS=1"
-
-        DEFCONFIG="vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config vendor/baseband_guard.config"
-
-        make O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD $DEFCONFIG
-
-        grep CONFIG_BBG out/.config || (echo "BBG NOT ENABLED" && exit 1)
-
-        make -j$(nproc --all) O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD
-
-    # --------------------------------------------------
-    # CHECK OUTPUT
-    # --------------------------------------------------
-    - name: Check kernel output
-      run: |
-        cd kernel_workspace/android-kernel/out
-        if [ -f arch/arm64/boot/Image ]; then
-          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-          KERNEL_VERSION=$(cat include/config/kernel.release)
-          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
-        else
-          echo "Kernel Image not found"
-          exit 1
-        fi
-
-    # --------------------------------------------------
-    # ANYKERNEL3
-    # --------------------------------------------------
-    - name: Make AnyKernel3
-      if: ${{ env.CHECK_IMAGE == 'true' }}
-      run: |
-        cd kernel_workspace
-        git clone https://github.com/osm0sis/AnyKernel3 --depth=1 AnyKernel3
-
-        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
-        sed -i 's!BLOCK=.*!BLOCK=auto;!g' AnyKernel3/anykernel.sh
-        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
-
-        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
-
-        rm -rf AnyKernel3/.git* AnyKernel3/README.md
-
-    # --------------------------------------------------
-    # UPLOAD
-    # --------------------------------------------------
-    - name: Upload Image
-      if: ${{ env.CHECK_IMAGE == 'true' }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: Image
-        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
-
-    - name: Upload AnyKernel3
-      if: ${{ env.CHECK_IMAGE == 'true' }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: AK3-${{ env.LINEAGE_VERSION }}-OPlus-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}
-        path: kernel_workspace/AnyKernel3/*
-
-    # --------------------------------------------------
-    # ZIP
-    # --------------------------------------------------
-    - name: Zip outputs
-      if: ${{ env.CHECK_IMAGE == 'true' }}
-      run: |
-        cd kernel_workspace/android-kernel/out/arch/arm64/boot
-        zip $GITHUB_WORKSPACE/Image.zip Image
-
-        cd $GITHUB_WORKSPACE/kernel_workspace/AnyKernel3
-        zip -r $GITHUB_WORKSPACE/AK3-${{ env.LINEAGE_VERSION }}-OPlus-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip ./*
+      - name: Upload kernel Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-Image
+          path: artifacts/Image
