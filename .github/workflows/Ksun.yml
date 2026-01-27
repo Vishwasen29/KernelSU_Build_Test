@@ -1,4 +1,4 @@
-name: Build LineageOS OPlus SM8250 KSUN+BB
+name: Build LineageOS OPlus SM8250 Kernel with KSUN
 
 on:
   workflow_dispatch:
@@ -25,8 +25,8 @@ jobs:
     
     - name: Setup build kernel environment
       run: |
-        echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
-        echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
+        echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date "+%Y-%m-%d")" >> $GITHUB_ENV
         sudo apt-get update
         sudo apt-get install git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
@@ -68,21 +68,19 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace
         git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    - name: Set up rsuntk KernelSU
+    - name: Set up KSUN
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+        #curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s main
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s stable
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-        #sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/landlock/landlock,baseband_guard/ } }' security/Kconfig
-        echo "CONFIG_BBG=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         KSU_VERSION=$(cd KernelSU-Next && expr $(/usr/bin/git rev-list --count HEAD) + 30000)
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
 
-    - name: Build kernel with rsuntk KernelSU-Next
+    - name: Build kernel with KSUN
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         export ARCH=arm64
@@ -109,7 +107,7 @@ jobs:
            exit 1
        fi
       
-    - name: Make AnyKernel3 with rsuntk KernelSU
+    - name: Make AnyKernel3 with KSUN
       if: ${{ env.CHECK_IMAGE == 'true' }}
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
@@ -140,5 +138,3 @@ jobs:
         zip $GITHUB_WORKSPACE/Image.zip Image
         cd $GITHUB_WORKSPACE/kernel_workspace/AnyKernel3
         zip -r $GITHUB_WORKSPACE/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip ./*
-
-    
