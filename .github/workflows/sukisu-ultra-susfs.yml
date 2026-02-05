@@ -61,7 +61,7 @@ jobs:
           set -e
 
           # SUKISU-ULTRA
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-{{crowdin}}
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-crowdwin
 
           # Baseband Guard
           curl -L https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
