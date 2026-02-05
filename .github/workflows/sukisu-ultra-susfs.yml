@@ -56,12 +56,12 @@ jobs:
           git clone --depth=1 https://github.com/mvaisakh/gcc-arm64 gcc64
           git clone --depth=1 https://github.com/mvaisakh/gcc-arm gcc
 
-      - name: KSUN + Baseband Guard setup
+      - name: SUKIU + Baseband Guard setup
         run: |
           set -e
 
           # SUKISU-ULTRA
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-crowdwin
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
 
           # Baseband Guard
           curl -L https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
