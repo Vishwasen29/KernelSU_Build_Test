@@ -60,18 +60,23 @@ jobs:
           set -e
 
           echo "🔍 Locating kernel source root..."
-          KERNEL_ROOT=$(find . -maxdepth 3 -type d -name drivers | head -n1 | xargs dirname)
 
-          if [ -z "$KERNEL_ROOT" ]; then
+          DRIVERS_DIR=$(find . -maxdepth 4 -type d -name drivers | head -n1)
+
+          if [ -z "$DRIVERS_DIR" ]; then
             echo "❌ Kernel source root not found (drivers/ missing)"
             exit 1
           fi
+
+          KERNEL_ROOT=$(dirname "$DRIVERS_DIR")
 
           echo "✅ Kernel root detected at: $KERNEL_ROOT"
           cd "$KERNEL_ROOT"
 
           # Sanity check
-          test -d drivers && test -d security && test -d arch
+          test -d drivers
+          test -d security
+          test -d arch
 
           # SUKISU-ULTRA
           curl -LSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh \
