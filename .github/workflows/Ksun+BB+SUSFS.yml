@@ -1,146 +1,109 @@
-name: Kernel Build with KernelSU-Next + SUSFS + Baseband Guard
+name: Build LineageOS OPlus SM8250 Kernel with KSUN + SUSFS
 
 on:
   workflow_dispatch:
 
+env:
+  TZ: Asia/Kolkata
+
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    name: Build Kernel by ${{ github.actor }}
+    runs-on: ubuntu-latest
 
     env:
-      ARCH: arm64
-      SUBARCH: arm64
-      KBUILD_BUILD_USER: github
-      KBUILD_BUILD_HOST: actions
-      CCACHE_COMPRESS: 1
-      CCACHE_SIZE: 10G
-      USE_CCACHE: 1
-
-      DEVICE: kona
-      DEFCONFIG: vendor/kona-perf_defconfig
-
-      CLANG_PATH: ${{ github.workspace }}/clang
-      CLANG_BIN: ${{ github.workspace }}/clang/bin
-      PATH: ${{ github.workspace }}/clang/bin:${{ github.workspace }}/gcc/bin:${{ github.workspace }}/gcc64/bin:/usr/lib/ccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      CLANG_VERSION: clang-r547379
+      GCC_TAG: android-12.1.0_r27
+      Lineage_VERSION: lineage-23.0
 
     steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+    - uses: actions/checkout@v6
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
-            git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
-            lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libsdl1.2-dev \
-            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-            squashfs-tools xsltproc zip zlib1g-dev python3
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
 
-      - name: Setup ccache
-        run: |
-          mkdir -p ~/.ccache
-          ccache -M 10G
-          ccache -z
+    - name: Setup build environment
+      run: |
+        echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
+        sudo apt-get update
+        sudo apt-get install -y \
+          git ccache automake flex lzop bison gperf build-essential \
+          zip curl zlib1g-dev g++-multilib libssl-dev python3 bc \
+          libc6-dev-i386 libncurses5-dev liblz4-tool
 
-      - name: Download Clang
-        run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+    - name: Download Clang
+      run: |
+        cd $GITHUB_WORKSPACE
+        mkdir -p kernel_workspace
+        cd kernel_workspace
+        wget -O clang.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        mkdir clang-aosp
+        tar -C clang-aosp -zxvf clang.tar.gz
 
-      - name: Download GCC toolchains
-        run: |
-          git clone --depth=1 https://github.com/mvaisakh/gcc-arm64 gcc64
-          git clone --depth=1 https://github.com/mvaisakh/gcc-arm gcc
+    - name: Download GCC
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        wget -O gcc.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
+        mkdir gcc-64
+        tar -C gcc-64 -zxvf gcc.tar.gz
 
-      - name: KernelSU-Next setup
-        run: |
-          set -e
-          curl -s https://raw.githubusercontent.com/tiann/KernelSU-Next/main/kernel/setup.sh | bash -
+    - name: Clone kernel source
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+          -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-      - name: Baseband Guard setup
-        run: |
-          set -e
-          curl -L https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+    - name: Setup KernelSU-Next (DO NOT CHANGE)
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s legacy
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
-          if ! grep -q baseband_guard security/Kconfig; then
-            sed -i 's/default "\(.*\)"/default "\1,baseband_guard"/' security/Kconfig
-          fi
+        KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
 
-          mkdir -p arch/arm64/configs/vendor
-          cat <<EOF > arch/arm64/configs/vendor/baseband_guard.config
-          CONFIG_BBG=y
-          EOF
+    - name: Setup Baseband Guard
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        sed -i '/^config LSM$/,/^help$/{/default/ s/selinux/selinux,baseband_guard/}' security/Kconfig
+        echo "CONFIG_BBG=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
-      - name: Apply SUSFS (susfs4ksu kernel-4.19)
-        run: |
-          set -e
-          git clone --depth=1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git susfs
+    - name: Apply SUSFS (kernel-4.19)
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        git clone --depth=1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git susfs
 
-          echo "📂 Copying SUSFS sources"
-          cp -r susfs/fs/* fs/
-          cp -r susfs/security/* security/
-          cp -r susfs/include/linux/* include/linux/
+        cp -r susfs/fs/* fs/
+        cp -r susfs/security/* security/
+        cp -r susfs/include/linux/* include/linux/
 
-          echo "🧩 Injecting Kconfig entries"
-          grep -q 'fs/susfs/Kconfig' fs/Kconfig || \
-            sed -i '/endmenu/i source "fs/susfs/Kconfig"' fs/Kconfig
+        grep -q fs/susfs/Kconfig fs/Kconfig || \
+          sed -i '/endmenu/i source "fs/susfs/Kconfig"' fs/Kconfig
+        grep -q security/susfs/Kconfig security/Kconfig || \
+          echo 'source "security/susfs/Kconfig"' >> security/Kconfig
 
-          grep -q 'security/susfs/Kconfig' security/Kconfig || \
-            echo 'source "security/susfs/Kconfig"' >> security/Kconfig
+        grep -q susfs fs/Makefile || echo 'obj-$(CONFIG_SUSFS) += susfs/' >> fs/Makefile
+        grep -q susfs security/Makefile || echo 'obj-$(CONFIG_SUSFS) += susfs/' >> security/Makefile
 
-          echo "🧱 Injecting Makefile entries"
-          grep -q susfs fs/Makefile || echo 'obj-$(CONFIG_SUSFS) += susfs/' >> fs/Makefile
-          grep -q susfs security/Makefile || echo 'obj-$(CONFIG_SUSFS) += susfs/' >> security/Makefile
+        echo "CONFIG_SUSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_SUSFS_PROC=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_SUSFS_SYSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_SUSFS_MAGIC_MOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_SUSFS_HIDE_KSU=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
-      - name: Add SUSFS config
-        run: |
-          mkdir -p arch/arm64/configs/vendor
-          cat <<EOF > arch/arm64/configs/vendor/susfs.config
-          CONFIG_SUSFS=y
-          CONFIG_SUSFS_PROC=y
-          CONFIG_SUSFS_SYSFS=y
-          CONFIG_SUSFS_MAGIC_MOUNT=y
-          CONFIG_SUSFS_HIDE_KSU=y
-          EOF
+    - name: Build kernel
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        export ARCH=arm64 SUBARCH=arm64
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
+        make O=out vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config
+        make -j$(nproc) O=out
 
-      - name: Kernel defconfig
-        run: |
-          make O=out ARCH=arm64 \
-            ${DEFCONFIG} \
-            vendor/debugfs.config \
-            vendor/oplus.config \
-            vendor/baseband_guard.config \
-            vendor/susfs.config
-
-      - name: Verify configs
-        run: |
-          grep CONFIG_KSU=y out/.config || (echo "❌ KernelSU-Next missing" && exit 1)
-          grep CONFIG_SUSFS=y out/.config || (echo "❌ SUSFS missing" && exit 1)
-          grep CONFIG_BBG=y out/.config || (echo "❌ Baseband Guard missing" && exit 1)
-
-      - name: Build kernel
-        run: |
-          make -j$(nproc) O=out \
-            ARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-
-      - name: Package Image
-        run: |
-          mkdir -p artifacts
-          cp out/arch/arm64/boot/Image artifacts/
-
-      - name: Upload kernel Image
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kernel-Image
-          path: artifacts/Image
+    - name: Verify Image
+      run: |
+        test -f kernel_workspace/android-kernel/out/arch/arm64/boot/Image
