@@ -1,4 +1,4 @@
-name: Build LineageOS OPlus SM8250 Kernel with KSUN + SUSFS
+name: Build LineageOS OPlus SM8250 Kernel with KSUN + BasebandGuard + SUSFS
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
 
     steps:
     # --------------------------------------------------
-    # Checkout repo (your workflow repo)
+    # Checkout workflow repo
     # --------------------------------------------------
     - uses: actions/checkout@v4
 
@@ -86,7 +86,7 @@ jobs:
           android-kernel
 
     # --------------------------------------------------
-    # KernelSU-Next (LEGACY MODE – REQUIRED)
+    # KernelSU-Next (LEGACY MODE)
     # --------------------------------------------------
     - name: Setup KernelSU-Next (legacy)
       run: |
@@ -103,9 +103,22 @@ jobs:
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
     # --------------------------------------------------
-    # SUSFS (manual reproduction of patch logic ONLY)
+    # Baseband Guard (UNCHANGED)
     # --------------------------------------------------
-    - name: Integrate SUSFS (no kernel logic changes)
+    - name: Setup Baseband Guard
+      run: |
+        cd kernel_workspace/android-kernel
+        curl -LSs \
+          https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+
+        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+
+        echo "CONFIG_BBG=y" >> arch/arm64/configs/vendor/baseband_guard.config
+
+    # --------------------------------------------------
+    # SUSFS (manual patch reproduction ONLY)
+    # --------------------------------------------------
+    - name: Integrate SUSFS
       run: |
         set -e
         cd kernel_workspace/android-kernel
@@ -118,7 +131,7 @@ jobs:
         cp susfs/include/linux/susfs.h include/linux/
         cp susfs/include/linux/susfs_def.h include/linux/
 
-        # Makefile hook added by patch
+        # Makefile hook from patch
         grep -q 'CONFIG_KSU_SUSFS' fs/Makefile || \
           echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
 
@@ -130,14 +143,24 @@ jobs:
         echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $DEF
 
     # --------------------------------------------------
+    # Kernel config
+    # --------------------------------------------------
+    - name: Make defconfig
+      run: |
+        cd kernel_workspace/android-kernel
+        make O=out ARCH=arm64 \
+          vendor/kona-perf_defconfig \
+          vendor/debugfs.config \
+          vendor/oplus.config \
+          vendor/baseband_guard.config
+
+    # --------------------------------------------------
     # Build kernel
     # --------------------------------------------------
     - name: Build kernel
       run: |
         cd kernel_workspace/android-kernel
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
-        make O=out ARCH=arm64 \
-          vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config
         make -j$(nproc) O=out ARCH=arm64 \
           CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1
 
