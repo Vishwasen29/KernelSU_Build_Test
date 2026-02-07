@@ -1,174 +1,151 @@
-name: 8250:Kernel Build with KernelSU-Next (legacy) + SUSFS
+name: Build LineageOS OPlus SM8250 Kernel with KSUN + SUSFS
 
 on:
   workflow_dispatch:
 
+env:
+  TZ: Asia/Kolkata
+
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    name: Build Kernel by ${{ github.actor }}
+    runs-on: ubuntu-latest
 
     env:
-      ARCH: arm64
-      SUBARCH: arm64
-      KBUILD_BUILD_USER: github
-      KBUILD_BUILD_HOST: actions
-      USE_CCACHE: 1
-      CCACHE_SIZE: 10G
-      DEVICE: kona
-      DEFCONFIG: vendor/kona-perf_defconfig
-      TZ: Asia/Kolkata
+      CLANG_VERSION: clang-r547379
+      GCC_TAG: android-12.1.0_r27
+      Lineage_VERSION: lineage-23.0
 
     steps:
     # --------------------------------------------------
-    # Kernel source
+    # Checkout repo (your workflow repo)
     # --------------------------------------------------
-    - name: Checkout kernel
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+
+    # --------------------------------------------------
+    # Swap
+    # --------------------------------------------------
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
       with:
-        fetch-depth: 1
+        swap-size-gb: 10
 
     # --------------------------------------------------
     # Dependencies
     # --------------------------------------------------
-    - name: Install build dependencies
+    - name: Setup build environment
       run: |
-        sudo apt update
-        sudo apt install -y \
-          bc bison build-essential ccache curl flex \
-          gcc-multilib g++-multilib git gperf \
-          lib32ncurses5-dev lib32readline-dev lib32z1-dev \
-          libelf-dev liblz4-tool libncurses5-dev \
-          libssl-dev lzop rsync unzip zip python3
-
-    - name: Setup ccache
-      run: |
-        ccache -M 10G
-        ccache -z
+        echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
+        sudo apt-get update
+        sudo apt-get install -y \
+          git ccache automake flex lzop bison gperf build-essential \
+          zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev \
+          liblz4-tool make squashfs-tools dpkg-dev libssl-dev \
+          python3 bc libc6-dev-i386 libncurses5-dev
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
     # --------------------------------------------------
     # Toolchains
     # --------------------------------------------------
-    - name: Clone Proton Clang
-      run: |
-        git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+    - name: Cache Clang
+      uses: actions/cache@v4
+      with:
+        path: kernel_workspace/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
 
-    - name: Clone GCC toolchains
+    - name: Download Clang
       run: |
-        git clone --depth=1 https://github.com/mvaisakh/gcc-arm64 gcc64
-        git clone --depth=1 https://github.com/mvaisakh/gcc-arm gcc
+        cd kernel_workspace
+        mkdir -p clang-aosp
+        wget -O clang.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -C clang-aosp -xf clang.tar.gz
 
-    - name: Export toolchain paths
+    - name: Cache GCC
+      uses: actions/cache@v4
+      with:
+        path: kernel_workspace/gcc-64
+        key: gcc-${{ env.GCC_TAG }}
+
+    - name: Download GCC
       run: |
-        echo "PATH=$GITHUB_WORKSPACE/clang/bin:$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc/bin:$PATH" >> $GITHUB_ENV
+        cd kernel_workspace
+        mkdir -p gcc-64
+        wget -O gcc.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
+        tar -C gcc-64 -xf gcc.tar.gz
 
     # --------------------------------------------------
-    # KernelSU-Next (LEGACY MODE)
+    # Kernel source
+    # --------------------------------------------------
+    - name: Clone kernel source
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 -b ${{ env.Lineage_VERSION }} \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+          android-kernel
+
+    # --------------------------------------------------
+    # KernelSU-Next (LEGACY MODE – REQUIRED)
     # --------------------------------------------------
     - name: Setup KernelSU-Next (legacy)
       run: |
-        set -e
-        cd $GITHUB_WORKSPACE
+        cd kernel_workspace/android-kernel
         curl -LSs \
           https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh \
           | bash -s legacy
 
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
     # --------------------------------------------------
-    # SUSFS (manual implementation of patches)
+    # SUSFS (manual reproduction of patch logic ONLY)
     # --------------------------------------------------
-    - name: Integrate SUSFS
+    - name: Integrate SUSFS (no kernel logic changes)
       run: |
         set -e
-        cd $GITHUB_WORKSPACE
+        cd kernel_workspace/android-kernel
 
         git clone --depth=1 -b kernel-4.19 \
           https://gitlab.com/simonpunk/susfs4ksu.git susfs
 
-        echo "[SUSFS] Copy core source"
+        # Files added by 50_add_susfs_in_kernel-4.19.patch
         cp susfs/susfs.c fs/susfs.c
         cp susfs/include/linux/susfs.h include/linux/
         cp susfs/include/linux/susfs_def.h include/linux/
 
-        echo "[SUSFS] fs/Makefile hook"
-        grep -q CONFIG_KSU_SUSFS fs/Makefile || \
+        # Makefile hook added by patch
+        grep -q 'CONFIG_KSU_SUSFS' fs/Makefile || \
           echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
 
-        echo "[SUSFS] KernelSU Kconfig"
-        if ! grep -q "KernelSU - SUSFS" kernel/Kconfig; then
-          cat >> kernel/Kconfig <<'EOF'
-
-menu "KernelSU - SUSFS"
-
-config KSU_SUSFS
-	bool "Enable SUSFS"
-	depends on KSU
-	default y
-
-config KSU_SUSFS_HAS_MAGIC_MOUNT
-	bool "Magic mount support"
-	depends on KSU_SUSFS
-	default y
-
-config KSU_SUSFS_SUS_PATH
-	bool "Hide suspicious paths"
-	depends on KSU_SUSFS
-	default y
-
-config KSU_SUSFS_SUS_MOUNT
-	bool "Hide suspicious mounts"
-	depends on KSU_SUSFS
-	default y
-
-endmenu
-EOF
-        fi
-
-    # --------------------------------------------------
-    # Enable configs
-    # --------------------------------------------------
-    - name: Enable KernelSU + SUSFS configs
-      run: |
+        # Enable existing KernelSU SUSFS configs
         DEF=arch/arm64/configs/vendor/kona-perf_defconfig
-
-        echo "CONFIG_KSU=y" >> $DEF
-        echo "CONFIG_KSU_MANUAL_HOOK=y" >> $DEF
         echo "CONFIG_KSU_SUSFS=y" >> $DEF
         echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEF
         echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEF
         echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $DEF
 
     # --------------------------------------------------
-    # Configure kernel
-    # --------------------------------------------------
-    - name: Make defconfig
-      run: |
-        make O=out ARCH=arm64 $DEFCONFIG
-
-    # --------------------------------------------------
     # Build kernel
     # --------------------------------------------------
     - name: Build kernel
       run: |
-        make -j$(nproc) O=out \
-          ARCH=arm64 \
-          CC=clang \
-          LD=ld.lld \
-          AR=llvm-ar \
-          NM=llvm-nm \
-          OBJCOPY=llvm-objcopy \
-          OBJDUMP=llvm-objdump \
-          STRIP=llvm-strip \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+        cd kernel_workspace/android-kernel
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
+        make O=out ARCH=arm64 \
+          vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config
+        make -j$(nproc) O=out ARCH=arm64 \
+          CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1
 
     # --------------------------------------------------
-    # Package
+    # Artifacts
     # --------------------------------------------------
     - name: Upload Image
-      run: |
-        mkdir -p artifacts
-        cp out/arch/arm64/boot/Image artifacts/
-
-    - uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v4
       with:
-        name: kona-kernel-KSUN-SUSFS
-        path: artifacts/Image
+        name: Image
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
