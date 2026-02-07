@@ -1,4 +1,4 @@
-name: Kernel Build with KernelSU-Next (legacy) + SUSFS
+name: 8250:Kernel Build with KernelSU-Next (legacy) + SUSFS
 
 on:
   workflow_dispatch:
