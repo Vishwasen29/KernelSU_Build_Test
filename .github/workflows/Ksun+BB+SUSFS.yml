@@ -1,4 +1,4 @@
-name: Build LineageOS OPlus SM8250 Kernel with KSUN + SUSFS
+name: Build LineageOS OPlus SM8250 Kernel with KSUN + susfs
 
 on:
   workflow_dispatch:
@@ -28,9 +28,9 @@ jobs:
         echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
         echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date "+%Y-%m-%d")" >> $GITHUB_ENV
         sudo apt-get update
-        sudo apt-get install git ccache automake flex lzop bison gperf build-essential zip curl \
-          zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev \
-          libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl \
+          zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools \
+          dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
     - name: Cache Clang toolchain
@@ -71,48 +71,43 @@ jobs:
         git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
+    # ==================================
+    # KernelSU-Next + Baseband Guard
+    # ==================================
     - name: Set up KSUN + Baseband Guard
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
 
+        # KernelSU-Next
         curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s legacy
 
+        # Baseband Guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
+        # Enable baseband_guard LSM
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
-        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-
-        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-
-        KSU_VERSION=$(cd KernelSU-Next && expr $(/usr/bin/git rev-list --count HEAD) + 30000)
-        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-
+        # Non-GKI: disable kprobe hooks
         find KernelSU-Next -type f \( -name "*.c" -o -name "*.h" \) \
           -exec sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g' {} +
+
+        # Manual hook
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # SUSFS configs (vendored in-tree)
+        echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # KernelSU version
+        KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
 
         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
 
-    - name: Apply SUSFS patches (kernel-4.19)
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19
-
-        cd android-kernel
-
-        cp -r ../susfs4ksu/kernel_patches/fs/* fs/
-        cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
-
-        cd KernelSU-Next
-        patch -p1 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
-
-        cd ..
-        patch -p1 < ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
-
-        echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-        echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-
+    # ==================================
+    # Build
+    # ==================================
     - name: Build kernel with KSUN
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
@@ -135,8 +130,7 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
         if [ -f arch/arm64/boot/Image ]; then
           echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-          KERNEL_VERSION=$(cat include/config/kernel.release)
-          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
         else
           exit 1
         fi
