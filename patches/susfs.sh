@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -e
 
-# ========= CONFIG =========
 KERNEL_ROOT="$(pwd)"
 SUSFS_BRANCH="kernel-4.19"
 SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
@@ -9,41 +8,34 @@ DEFCONFIG_PATH="arch/arm64/configs/vendor/kona-perf_defconfig"
 
 echo "[+] Kernel root: $KERNEL_ROOT"
 
-# ========= CLONE SUSFS =========
-if [ -d "susfs4ksu" ]; then
-  echo "[*] Removing existing susfs4ksu directory"
-  rm -rf susfs4ksu
-fi
-
-echo "[+] Cloning susfs4ksu ($SUSFS_BRANCH)"
+# ---- Clone SUSFS ----
+rm -rf susfs4ksu
 git clone "$SUSFS_REPO" -b "$SUSFS_BRANCH" susfs4ksu
 
-# ========= COPY KERNEL FILES =========
-echo "[+] Copying SUSFS kernel sources"
+# ---- Copy kernel source files ----
+echo "[+] Copying SUSFS kernel files"
 
+# fs
 cp -v susfs4ksu/kernel_patches/fs/susfs.c fs/
 cp -v susfs4ksu/kernel_patches/fs/sus_su.c fs/
 
+# headers (IMPORTANT: include all)
 cp -v susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+cp -v susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/
 cp -v susfs4ksu/kernel_patches/include/linux/sus_su.h include/linux/
 
-# ========= APPLY KERNELSU PATCH =========
-if [ ! -d "KernelSU-Next" ]; then
-  echo "[!] KernelSU-Next directory not found!"
-  exit 1
-fi
-
-echo "[+] Applying SUSFS patch to KernelSU-Next"
+# ---- Patch KernelSU-Next ----
+echo "[+] Applying SUSFS → KernelSU patch"
 cd KernelSU-Next
 patch -p1 -f -F 3 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
 cd ..
 
-# ========= APPLY KERNEL PATCH =========
-echo "[+] Applying SUSFS kernel patch (4.19)"
+# ---- Patch kernel ----
+echo "[+] Applying SUSFS → kernel 4.19 patch"
 patch -p1 -f -F 3 < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
 
-# ========= ENABLE CONFIGS =========
-echo "[+] Enabling SUSFS configs in defconfig"
+# ---- Enable configs ----
+echo "[+] Enabling SUSFS configs"
 
 {
   echo "CONFIG_KSU=y"
@@ -60,4 +52,4 @@ echo "[+] Enabling SUSFS configs in defconfig"
   echo "CONFIG_KSU_SUSFS_SUS_SU=y"
 } >> "$DEFCONFIG_PATH"
 
-echo "[✓] SUSFS integration completed successfully"
+echo "[✓] SUSFS integration complete"
