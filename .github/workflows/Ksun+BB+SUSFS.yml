@@ -1,4 +1,4 @@
-name: Build LineageOS OPlus SM8250 Kernel with KSUN + susfs
+name: Build LineageOS OPlus SM8250 Kernel with KSUN
 
 on:
   workflow_dispatch:
@@ -13,24 +13,22 @@ jobs:
     env:
       CLANG_VERSION: clang-r547379
       GCC_TAG: android-12.1.0_r27
-      Lineage_VERSION: lineage-23.0
+      Lineage_VERSION: lineage-23.2
 
     steps:
     - uses: actions/checkout@v6
-
+    
     - name: Set swap to 10G
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 10
-
+    
     - name: Setup build kernel environment
       run: |
         echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
         echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date "+%Y-%m-%d")" >> $GITHUB_ENV
         sudo apt-get update
-        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl \
-          zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools \
-          dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
+        sudo apt-get install git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
     - name: Cache Clang toolchain
@@ -64,50 +62,26 @@ jobs:
         wget -O gcc-aarch64.tar.gz \
           https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
         tar -C gcc-64 -zxvf gcc-aarch64.tar.gz
-
+    
     - name: Download kernel source
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-          -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
+        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    # ==================================
-    # KernelSU-Next + Baseband Guard
-    # ==================================
-    - name: Set up KSUN + Baseband Guard
+    - name: Set up KSUN
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-
-        # KernelSU-Next
-        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s legacy
-
-        # Baseband Guard
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-
-        # Enable baseband_guard LSM
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-
-        # Non-GKI: disable kprobe hooks
-        find KernelSU-Next -type f \( -name "*.c" -o -name "*.h" \) \
-          -exec sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g' {} +
-
-        # Manual hook
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
+        bash $GITHUB_WORKSPACE/patches/susfs.sh
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-
-        # SUSFS configs (vendored in-tree)
-        echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-        echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-
-        # KernelSU version
-        KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+        KSU_VERSION=$(cd KernelSU-Next && expr $(/usr/bin/git rev-list --count HEAD) + 30000)
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-
         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
 
-    # ==================================
-    # Build
-    # ==================================
     - name: Build kernel with KSUN
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
@@ -117,51 +91,49 @@ jobs:
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
         export KBUILD_BUILD_HOST=Github-Action
         export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
-
         BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android-"
         EX_CMD="LD=ld.lld LLVM=1 LLVM_IAS=1"
-        # DEFCONFIG="vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config"
-        DEFCONFIG="vendor/kona-perf_defconfig vendor/debugfs.config"
-        
-
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config"
         make O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD $DEFCONFIG
         make -j$(nproc --all) O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD
-
+    
     - name: Check a kernel output files with rsuntk KernelSU
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
-        if [ -f arch/arm64/boot/Image ]; then
-          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
-        else
-          exit 1
-        fi
-
+       cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+       if [ -f arch/arm64/boot/Image ]; then
+           echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+           KERNEL_VERSION=$(cat include/config/kernel.release)
+           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+       else
+           echo "Kernel output file is empty"
+           exit 1
+       fi
+      
     - name: Make AnyKernel3 with KSUN
-      if: env.CHECK_IMAGE == 'true'
+      if: ${{ env.CHECK_IMAGE == 'true' }}
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+        git clone https://github.com/osm0sis/AnyKernel3 --depth=1 AnyKernel3
         sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
-        sed -i 's!BLOCK=.*!BLOCK=auto;!g' AnyKernel3/anykernel.sh
-        sed -i 's/IS_SLOT_DEVICE=0/IS_SLOT_DEVICE=auto/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
         cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
     - name: Upload Image
-      if: env.CHECK_IMAGE == 'true'
+      if: ${{ env.CHECK_IMAGE == 'true' }}
       uses: actions/upload-artifact@v6
       with:
         name: Image
         path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
 
     - name: Upload AnyKernel3
-      if: env.CHECK_IMAGE == 'true'
+      if: ${{ env.CHECK_IMAGE == 'true' }}
       uses: actions/upload-artifact@v6
       with:
         name: AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}
         path: kernel_workspace/AnyKernel3/*
-
+    
     - name: Zip files
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot
