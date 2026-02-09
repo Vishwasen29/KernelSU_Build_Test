@@ -1,169 +1,144 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
-echo "=============================="
-echo " Applying KernelSU + SUSFS "
-echo " Target: ARM64 non-GKI 4.19 "
-echo "=============================="
+echo "=============================================="
+echo " Applying KernelSU-Next + SUSFS"
+echo " Target: ARM64 non-GKI 4.19"
+echo "=============================================="
 
 KERNEL_DIR="$(pwd)"
-SUSFS_DIR="../susfs4ksu"
+ARCH=arm64
+DEFCONFIG="arch/arm64/configs/vendor/kona-perf_defconfig"
 
-# Sanity checks
-[ -d "$SUSFS_DIR" ] || { echo "susfs4ksu not found"; exit 1; }
-[ -d "drivers/kernelsu" ] || { echo "KernelSU not found"; exit 1; }
+# -------------------------------------------------
+# 1. Clone SUSFS if missing
+# -------------------------------------------------
+SUSFS_DIR="$KERNEL_DIR/../susfs4ksu"
 
-echo "[1/6] Copying SUSFS sources"
+if [ ! -d "$SUSFS_DIR" ]; then
+  echo "[INFO] Cloning susfs4ksu repository"
+  git clone https://github.com/simonpunk/susfs4ksu.git "$SUSFS_DIR"
+else
+  echo "[INFO] susfs4ksu already exists"
+fi
 
-cp -v "$SUSFS_DIR/kernel_patches/fs/susfs.c" fs/ || true
-cp -v "$SUSFS_DIR/kernel_patches/fs/sus_su.c" fs/ || true
-cp -v "$SUSFS_DIR/kernel_patches/include/linux/susfs.h" include/linux/ || true
-cp -v "$SUSFS_DIR/kernel_patches/include/linux/sus_su.h" include/linux/ || true
+# -------------------------------------------------
+# 2. Apply SUSFS patches
+# -------------------------------------------------
+echo "[INFO] Applying SUSFS patches"
 
-echo "[2/6] Applying KernelSU SUSFS enable patch"
+if [ ! -d "$SUSFS_DIR/kernel_patches" ]; then
+  echo "[ERROR] susfs4ksu kernel_patches directory missing"
+  exit 1
+fi
 
-cd drivers/kernelsu
-patch -p1 -f -F 3 < "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
-cd "$KERNEL_DIR"
+for patch in "$SUSFS_DIR"/kernel_patches/*.patch; do
+  echo "  -> Applying $(basename "$patch")"
+  patch -p1 --forward < "$patch" || true
+done
 
-echo "[3/6] Applying core SUSFS kernel patch"
+# -------------------------------------------------
+# 3. Install SUSFS headers
+# -------------------------------------------------
+echo "[INFO] Installing SUSFS headers"
 
-patch -p1 -f -F 3 < "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.19.patch" || true
+mkdir -p include/linux
+cp -v "$SUSFS_DIR"/include/linux/susfs*.h include/linux/
 
-echo "[4/6] Fixing KernelSU-Next compat layer for ARM64 4.19"
+# -------------------------------------------------
+# 4. Fix KernelSU compatibility (4.19)
+# -------------------------------------------------
+echo "[INFO] Applying KernelSU 4.19 compatibility fixes"
 
-cat > drivers/kernelsu/kernel_compat.h << 'EOF'
+KSU_COMPAT="drivers/kernelsu/kernel_compat.h"
+
+cat > "$KSU_COMPAT" << 'EOF'
 #pragma once
 
-#include <linux/fs.h>
 #include <linux/uaccess.h>
+#include <linux/fs.h>
 #include <linux/version.h>
-#include <linux/sched.h>
-#include <linux/task_work.h>
 
-/*
- * filp_open compat
- */
-static inline struct file *
-ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
-{
-    return filp_open(filename, flags, mode);
-}
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 
-/*
- * access_ok compat (ARM64 4.19 requires 3 args)
- */
-static inline int
-ksu_access_ok(const void *addr, unsigned long size)
+static inline int ksu_access_ok(const void *addr, unsigned long size)
 {
-#ifdef access_ok
     return access_ok(VERIFY_READ, addr, size);
-#else
-    return 1;
-#endif
 }
 
-/*
- * kernel_read / kernel_write compat
- */
-static inline ssize_t
-ksu_kernel_read_compat(struct file *file, void *buf, size_t count, loff_t *pos)
+static inline ssize_t ksu_kernel_read_compat(struct file *file, void *buf,
+                                             size_t count, loff_t *pos)
 {
     return kernel_read(file, buf, count, pos);
 }
 
-static inline ssize_t
-ksu_kernel_write_compat(struct file *file, const void *buf, size_t count, loff_t *pos)
+static inline ssize_t ksu_kernel_write_compat(struct file *file, const void *buf,
+                                              size_t count, loff_t *pos)
 {
     return kernel_write(file, buf, count, pos);
 }
 
-/*
- * task_work_add flag compat
- */
-#ifndef TWA_RESUME
-#define TWA_RESUME TWA_SIGNAL
-#endif
-
-EOF
-
-echo "[5/6] Fixing allowlist symbol mismatch"
-
-sed -i 's/ksu_is_ksu_domain/is_ksu_domain/g' \
-  drivers/kernelsu/allowlist.c || true
-
-echo "[6/6] Enabling KernelSU + SUSFS config options"
-
-DEFCONFIG="arch/arm64/configs/vendor/kona-perf_defconfig"
-
-cat >> "$DEFCONFIG" << 'EOF'
-CONFIG_KSU=y
-CONFIG_KSU_SUSFS=y
-CONFIG_KSU_SUSFS_SUS_PATH=y
-CONFIG_KSU_SUSFS_SUS_MOUNT=y
-CONFIG_KSU_SUSFS_SUS_KSTAT=y
-CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-CONFIG_KSU_SUSFS_ENABLE_LOG=y
-CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-CONFIG_KSU_SUSFS_SUS_SU=y
-EOF
-
-echo "=================================="
-echo " KernelSU + SUSFS patching DONE ✅ "
-echo "=================================="cd ..
-
-echo "[+] Applying SUSFS → kernel 4.19 patch"
-patch -p1 -f -F 3 < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
-
-# ================= FIX KERNELSU-NEXT (4.19 NON-GKI) =================
-echo "[+] Fixing KernelSU-Next compat layer for 4.19 non-GKI"
-
-cat > drivers/kernelsu/kernel_compat.h << 'EOF'
-#pragma once
-
-#include <linux/fs.h>
-#include <linux/uaccess.h>
-
-static inline struct file *
-ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
-{
-    return filp_open(filename, flags, mode);
-}
-
-static inline int
-ksu_access_ok(const void *addr, unsigned long size)
-{
-#if defined(access_ok)
-    return access_ok(addr, size);
 #else
-    return 1;
-#endif
+
+static inline int ksu_access_ok(const void *addr, unsigned long size)
+{
+    return access_ok(addr, size);
 }
+
+#define ksu_kernel_read_compat  kernel_read
+#define ksu_kernel_write_compat kernel_write
+
+#endif
 EOF
 
-echo "[+] Fixing KernelSU domain hook naming"
+# -------------------------------------------------
+# 5. Fix allowlist + selinux symbol mismatch
+# -------------------------------------------------
+echo "[INFO] Fixing KernelSU allowlist symbol mismatch"
 
-sed -i 's/ksu_is_ksu_domain/is_ksu_domain/g' \
+sed -i \
+  -e 's/ksu_is_ksu_domain/is_ksu_domain/g' \
   drivers/kernelsu/allowlist.c || true
 
-# ================= ENABLE CONFIGS =================
-echo "[+] Enabling SUSFS configs in defconfig"
+# -------------------------------------------------
+# 6. Fix missing TWA_RESUME on 4.19
+# -------------------------------------------------
+echo "[INFO] Fixing TWA_RESUME for 4.19"
 
-{
-  echo "CONFIG_KSU=y"
-  echo "CONFIG_KSU_SUSFS=y"
-  echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
-  echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-  echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-  echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
-  echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y"
-  echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
-  echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-  echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
-  echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
-  echo "CONFIG_KSU_SUSFS_SUS_SU=y"
-} >> "$DEFCONFIG"
+grep -q TWA_RESUME drivers/kernelsu/allowlist.c || \
+sed -i 's/task_work_add(/task_work_add(/g' drivers/kernelsu/allowlist.c
 
-echo "[✓] SUSFS + KernelSU-Next integration completed successfully"
+# -------------------------------------------------
+# 7. Auto-configure CONFIG_LSM correctly
+# -------------------------------------------------
+echo "[INFO] Configuring CONFIG_LSM"
+
+if grep -q "^CONFIG_DEFAULT_SECURITY_TOMOYO=y" "$DEFCONFIG"; then
+  LSM_VALUE="lockdown,yama,loadpin,safesetid,integrity,tomoyo,bpf,baseband_guard"
+
+elif grep -q "^CONFIG_DEFAULT_SECURITY_DAC=y" "$DEFCONFIG"; then
+  LSM_VALUE="lockdown,yama,loadpin,safesetid,integrity,bpf,baseband_guard"
+
+else
+  LSM_VALUE="lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
+fi
+
+sed -i '/^CONFIG_LSM=/d' "$DEFCONFIG"
+echo "CONFIG_LSM=\"$LSM_VALUE\"" >> "$DEFCONFIG"
+
+echo "[INFO] CONFIG_LSM set to:"
+echo "       $LSM_VALUE"
+
+# -------------------------------------------------
+# 8. Final sanity checks
+# -------------------------------------------------
+echo "[INFO] Sanity checks"
+
+test -f include/linux/susfs.h
+test -f include/linux/susfs_def.h
+test -f drivers/kernelsu/ksu.c
+
+echo "=============================================="
+echo " KernelSU + SUSFS applied successfully"
+echo " You can now build the kernel"
+echo "=============================================="
