@@ -1,40 +1,118 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -e
 
-# ================= CONFIG =================
-SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
-SUSFS_BRANCH="kernel-4.19"
+echo "=============================="
+echo " Applying KernelSU + SUSFS "
+echo " Target: ARM64 non-GKI 4.19 "
+echo "=============================="
+
+KERNEL_DIR="$(pwd)"
+SUSFS_DIR="../susfs4ksu"
+
+# Sanity checks
+[ -d "$SUSFS_DIR" ] || { echo "susfs4ksu not found"; exit 1; }
+[ -d "drivers/kernelsu" ] || { echo "KernelSU not found"; exit 1; }
+
+echo "[1/6] Copying SUSFS sources"
+
+cp -v "$SUSFS_DIR/kernel_patches/fs/susfs.c" fs/ || true
+cp -v "$SUSFS_DIR/kernel_patches/fs/sus_su.c" fs/ || true
+cp -v "$SUSFS_DIR/kernel_patches/include/linux/susfs.h" include/linux/ || true
+cp -v "$SUSFS_DIR/kernel_patches/include/linux/sus_su.h" include/linux/ || true
+
+echo "[2/6] Applying KernelSU SUSFS enable patch"
+
+cd drivers/kernelsu
+patch -p1 -f -F 3 < "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
+cd "$KERNEL_DIR"
+
+echo "[3/6] Applying core SUSFS kernel patch"
+
+patch -p1 -f -F 3 < "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.19.patch" || true
+
+echo "[4/6] Fixing KernelSU-Next compat layer for ARM64 4.19"
+
+cat > drivers/kernelsu/kernel_compat.h << 'EOF'
+#pragma once
+
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+#include <linux/version.h>
+#include <linux/sched.h>
+#include <linux/task_work.h>
+
+/*
+ * filp_open compat
+ */
+static inline struct file *
+ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
+{
+    return filp_open(filename, flags, mode);
+}
+
+/*
+ * access_ok compat (ARM64 4.19 requires 3 args)
+ */
+static inline int
+ksu_access_ok(const void *addr, unsigned long size)
+{
+#ifdef access_ok
+    return access_ok(VERIFY_READ, addr, size);
+#else
+    return 1;
+#endif
+}
+
+/*
+ * kernel_read / kernel_write compat
+ */
+static inline ssize_t
+ksu_kernel_read_compat(struct file *file, void *buf, size_t count, loff_t *pos)
+{
+    return kernel_read(file, buf, count, pos);
+}
+
+static inline ssize_t
+ksu_kernel_write_compat(struct file *file, const void *buf, size_t count, loff_t *pos)
+{
+    return kernel_write(file, buf, count, pos);
+}
+
+/*
+ * task_work_add flag compat
+ */
+#ifndef TWA_RESUME
+#define TWA_RESUME TWA_SIGNAL
+#endif
+
+EOF
+
+echo "[5/6] Fixing allowlist symbol mismatch"
+
+sed -i 's/ksu_is_ksu_domain/is_ksu_domain/g' \
+  drivers/kernelsu/allowlist.c || true
+
+echo "[6/6] Enabling KernelSU + SUSFS config options"
+
 DEFCONFIG="arch/arm64/configs/vendor/kona-perf_defconfig"
 
-echo "[+] Kernel root: $(pwd)"
+cat >> "$DEFCONFIG" << 'EOF'
+CONFIG_KSU=y
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_SUS_SU=y
+EOF
 
-# ================= CLONE SUSFS =================
-rm -rf susfs4ksu
-echo "[+] Cloning susfs4ksu ($SUSFS_BRANCH)"
-git clone "$SUSFS_REPO" -b "$SUSFS_BRANCH" susfs4ksu
-
-# ================= COPY SUSFS FILES =================
-echo "[+] Copying SUSFS kernel sources"
-
-# fs
-cp -v susfs4ksu/kernel_patches/fs/susfs.c fs/
-cp -v susfs4ksu/kernel_patches/fs/sus_su.c fs/
-
-# headers (ALL required)
-cp -v susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-cp -v susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/
-cp -v susfs4ksu/kernel_patches/include/linux/sus_su.h include/linux/
-
-# ================= PATCH KERNELSU-NEXT =================
-if [ ! -d KernelSU-Next ]; then
-  echo "[!] KernelSU-Next directory not found"
-  exit 1
-fi
-
-echo "[+] Applying SUSFS → KernelSU patch"
-cd KernelSU-Next
-patch -p1 -f -F 3 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
-cd ..
+echo "=================================="
+echo " KernelSU + SUSFS patching DONE ✅ "
+echo "=================================="cd ..
 
 echo "[+] Applying SUSFS → kernel 4.19 patch"
 patch -p1 -f -F 3 < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
