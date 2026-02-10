@@ -10,207 +10,123 @@ jobs:
   build:
     name: Build Kernel by ${{ github.actor }}
     runs-on: ubuntu-latest
-
     env:
       CLANG_VERSION: clang-r547379
       GCC_TAG: android-12.1.0_r27
       Lineage_VERSION: lineage-23.2
 
     steps:
-    # ------------------------------------------------------------
-    # Checkout
-    # ------------------------------------------------------------
-    - name: Checkout repository
-      uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
-    # ------------------------------------------------------------
-    # Swap
-    # ------------------------------------------------------------
-    - name: Set swap to 10G
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 10
+      - name: Set swap to 10G
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
 
-    # ------------------------------------------------------------
-    # Build environment
-    # ------------------------------------------------------------
-    - name: Setup build environment
-      run: |
-        echo "BUILD_TIME=$(TZ=Asia/Kolkata date '+%y%m%d')" >> $GITHUB_ENV
-        echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date '+%Y-%m-%d')" >> $GITHUB_ENV
+      - name: Setup environment
+        run: |
+          echo "BUILD_TIME=$(TZ=Asia/Kolkata date '+%y%m%d')" >> $GITHUB_ENV
+          echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date '+%Y-%m-%d')" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential \
+            zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make \
+            squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev dos2unix
+          mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-        sudo apt-get update
-        sudo apt-get install -y \
-          git ccache automake flex lzop bison gperf build-essential \
-          zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev \
-          liblz4-tool make squashfs-tools dpkg-dev libssl-dev \
-          python3 bc libc6-dev-i386 libncurses5-dev
+      - name: Cache Clang
+        uses: actions/cache@v5
+        id: cache-clang
+        with:
+          path: kernel_workspace/clang-aosp
+          key: ${{ env.CLANG_VERSION }}
 
-        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+      - name: Download Clang
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          cd kernel_workspace
+          mkdir -p clang-aosp
+          wget -O ${CLANG_VERSION}.tar.gz \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+          tar -C clang-aosp -xzf ${CLANG_VERSION}.tar.gz
 
-    # ------------------------------------------------------------
-    # Toolchains
-    # ------------------------------------------------------------
-    - name: Cache Clang
-      uses: actions/cache@v5
-      id: cache-clang
-      with:
-        path: kernel_workspace/clang-aosp
-        key: ${{ env.CLANG_VERSION }}
+      - name: Cache GCC
+        uses: actions/cache@v4
+        id: cache-gcc
+        with:
+          path: kernel_workspace/gcc-64
+          key: gcc-aarch64-${{ env.GCC_TAG }}
 
-    - name: Download Clang
-      if: steps.cache-clang.outputs.cache-hit != 'true'
-      run: |
-        cd kernel_workspace
-        mkdir -p clang-aosp
-        wget -O ${CLANG_VERSION}.tar.gz \
-          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
-        tar -C clang-aosp -xzf ${CLANG_VERSION}.tar.gz
+      - name: Download GCC
+        if: steps.cache-gcc.outputs.cache-hit != 'true'
+        run: |
+          cd kernel_workspace
+          mkdir -p gcc-64
+          wget -O gcc-aarch64.tar.gz \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
+          tar -C gcc-64 -xzf gcc-aarch64.tar.gz
 
-    - name: Cache GCC
-      uses: actions/cache@v4
-      id: cache-gcc
-      with:
-        path: kernel_workspace/gcc-64
-        key: gcc-aarch64-${{ env.GCC_TAG }}
+      - name: Clone kernel
+        run: |
+          cd kernel_workspace
+          git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+            -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    - name: Download GCC
-      if: steps.cache-gcc.outputs.cache-hit != 'true'
-      run: |
-        cd kernel_workspace
-        mkdir -p gcc-64
-        wget -O gcc-aarch64.tar.gz \
-          https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
-        tar -C gcc-64 -xzf gcc-aarch64.tar.gz
+      - name: Setup KernelSU-Next
+        run: |
+          cd kernel_workspace/android-kernel
+          curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s legacy
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+          bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
 
-    # ------------------------------------------------------------
-    # Kernel source
-    # ------------------------------------------------------------
-    - name: Clone LineageOS kernel
-      run: |
-        cd kernel_workspace
-        git clone --recursive \
-          https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-          -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
+          echo "CONFIG_KSU_MANUAL_HOOK=y
+                CONFIG_KSU_SUSFS=y
+                CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+                CONFIG_KSU_SUSFS_SUS_PATH=y
+                CONFIG_KSU_SUSFS_SUS_MOUNT=y
+                CONFIG_KSU_SUSFS_SUS_KSTAT=y
+                CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+                CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+                CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+                CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+                CONFIG_KSU_SUSFS_ENABLE_LOG=y
+                CONFIG_KSU_SUSFS_SUS_SU=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
-    # ------------------------------------------------------------
-    # KernelSU + Baseband Guard
-    # ------------------------------------------------------------
-    - name: Setup KernelSU-Next and Baseband Guard
-      run: |
-        cd kernel_workspace/android-kernel
+          KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          cd scripts && sed -i 's/ -dirty//g' setlocalversion
 
-        curl -LSs \
-          https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-          | bash -s legacy
+      - name: Apply SUSFS + KernelSU-Next patches
+        run: |
+          cd kernel_workspace/android-kernel
+          mkdir -p fs/susfs drivers/KernelSU-Next
+          dos2unix $GITHUB_WORKSPACE/patches/50_patch.patch
+          dos2unix $GITHUB_WORKSPACE/patches/10_patch.patch
+          patch -p1 --binary < $GITHUB_WORKSPACE/patches/50_patch.patch
+          patch -p1 --binary < $GITHUB_WORKSPACE/patches/10_patch.patch
+          cp -v $GITHUB_WORKSPACE/patches/susfs/* fs/susfs/
 
-        wget -O- \
-          https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh \
-          | bash
+      - name: Build kernel
+        run: |
+          cd kernel_workspace/android-kernel
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
+          export KBUILD_BUILD_HOST=GitHub-Actions
+          export KBUILD_BUILD_USER=$(echo "${{ github.actor }}" | tr A-Z a-z)
+          BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android-"
+          EX_CMD="LD=ld.lld LLVM=1 LLVM_IAS=1"
+          DEFCONFIG="vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config"
+          make O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+          make -j$(nproc --all) O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD
 
-        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-
-        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-
-        echo "CONFIG_KSU_MANUAL_HOOK=y
-        CONFIG_KSU_SUSFS=y
-        CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-        CONFIG_KSU_SUSFS_SUS_PATH=y
-        CONFIG_KSU_SUSFS_SUS_MOUNT=y
-        CONFIG_KSU_SUSFS_SUS_KSTAT=y
-        CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-        CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-        CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-        CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-        CONFIG_KSU_SUSFS_ENABLE_LOG=y
-        CONFIG_KSU_SUSFS_SUS_SU=y" \
-        >> arch/arm64/configs/vendor/kona-perf_defconfig
-
-        KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
-        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-
-        cd scripts
-        sed -i 's/ -dirty//g' setlocalversion
-
-    # ------------------------------------------------------------
-    # STEP 1 + 2: Apply patches
-    # ------------------------------------------------------------
-    - name: Apply SUSFS + KernelSU patches
-      run: |
-        cd kernel_workspace/android-kernel
-        mkdir -p fs/susfs
-
-        patch -p1 < $GITHUB_WORKSPACE/patches/50_patch.patch
-        patch -p1 < $GITHUB_WORKSPACE/patches/10_patch.patch
-
-    # ------------------------------------------------------------
-    # STEP 3: Install SUSFS source files
-    # ------------------------------------------------------------
-    - name: Install SUSFS source files
-      run: |
-        cd kernel_workspace/android-kernel
-        cp -v $GITHUB_WORKSPACE/patches/susfs/* fs/susfs/
-
-    # ------------------------------------------------------------
-    # STEP 4: Verify SUSFS + KernelSU integration
-    # ------------------------------------------------------------
-    - name: Verify SUSFS & KernelSU integration
-      run: |
-        cd kernel_workspace/android-kernel
-
-        echo "Checking CONFIG_SUSFS..."
-        grep -R "CONFIG_SUSFS" fs/Kconfig
-
-        echo "Checking SUSFS source..."
-        test -f fs/susfs/susfs.c
-
-        echo "Checking KernelSU SUSFS symbol..."
-        grep -R "ksu_access_ok" KernelSU-Next/kernel/drivers/kernelsu
-
-    # ------------------------------------------------------------
-    # Build
-    # ------------------------------------------------------------
-    - name: Build kernel
-      run: |
-        cd kernel_workspace/android-kernel
-
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
-        export KBUILD_BUILD_HOST=GitHub-Actions
-        export KBUILD_BUILD_USER=$(echo "${{ github.actor }}" | tr A-Z a-z)
-
-        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android-"
-        EX_CMD="LD=ld.lld LLVM=1 LLVM_IAS=1"
-        DEFCONFIG="vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config"
-
-        make O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD $DEFCONFIG
-        make -j$(nproc) O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD
-
-    # ------------------------------------------------------------
-    # AnyKernel3 packaging
-    # ------------------------------------------------------------
-    - name: Package AnyKernel3
-      run: |
-        cd kernel_workspace
-        git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-        sed -i 's/do.devicecheck=1/do.devicecheck=0/' AnyKernel3/anykernel.sh
-        sed -i 's|BLOCK=.*|BLOCK=auto;|' AnyKernel3/anykernel.sh
-        sed -i 's/IS_SLOT_DEVICE=0/IS_SLOT_DEVICE=auto/' AnyKernel3/anykernel.sh
-        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
-        rm -rf AnyKernel3/.git*
-
-    # ------------------------------------------------------------
-    # Artifacts
-    # ------------------------------------------------------------
-    - name: Upload kernel Image
-      uses: actions/upload-artifact@v6
-      with:
-        name: Image
-        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
-
-    - name: Upload AnyKernel3 zip
-      uses: actions/upload-artifact@v6
-      with:
-        name: AK3-${{ env.Lineage_VERSION }}-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}
-        path: kernel_workspace/AnyKernel3/*
+      - name: Package AnyKernel3
+        run: |
+          cd kernel_workspace
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+          sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+          sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+          cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+          rm -rf AnyKernel3/.git* AnyKernel3/README.md
+          zip -r $GITHUB_WORKSPACE/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip AnyKernel3/*
