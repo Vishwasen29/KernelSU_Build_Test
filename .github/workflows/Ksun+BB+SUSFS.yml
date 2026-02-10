@@ -77,7 +77,26 @@ jobs:
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
         
         # bash $GITHUB_WORKSPACE/patches/susfs_fix.sh
-        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KSU_MANUAL_HOOK=y
+              CONFIG_KSU_SUSFS=y
+              CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+              CONFIG_KSU_SUSFS_SUS_PATH=y
+              CONFIG_KSU_SUSFS_SUS_MOUNT=y
+              CONFIG_KSU_SUSFS_SUS_KSTAT=y
+              CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+              CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+              CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+              CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+              CONFIG_KSU_SUSFS_ENABLE_LOG=y
+              CONFIG_KSU_SUSFS_SUS_SU=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        echo "[+] Enabling SUSFS configs in defconfig"
+
+        echo "======================================"
+        echo "[✓] KernelSU + SUSFS integration DONE"
+        echo "======================================"
+
+        
         KSU_VERSION=$(cd KernelSU-Next && expr $(/usr/bin/git rev-list --count HEAD) + 30000)
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
         cd scripts
