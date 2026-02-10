@@ -34,6 +34,11 @@ cd ..
 echo "[+] Applying SUSFS → kernel 4.19 patch"
 patch -p1 -f -F 3 < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
 
+
+echo "Fixing SUSFS alloc_vfsmnt call sites..."
+    sed -i 's/alloc_vfsmnt(\(fc->source[^)]*\))/alloc_vfsmnt(\1, false, -1)/' fs/namespace.c
+    sed -i 's/alloc_vfsmnt(\(old->mnt_devname[^)]*\))/alloc_vfsmnt(\1, false, -1)/' fs/namespace.c
+    
 # ---- Enable configs ----
 echo "[+] Enabling SUSFS configs"
 
