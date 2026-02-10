@@ -102,8 +102,9 @@ jobs:
         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
     - name: Apply SUSFS + KernelSU patch
-      run: patch -p1 --forward --fuzz=3 < patches/k_patch.patch || true
-      
+      #run: patch -p1 --forward --fuzz=3 < patches/k_patch.patch || true
+      run: cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+           git apply --reject --whitespace=fix patches/k_patch.patch
     - name: Build kernel with KSUN
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
