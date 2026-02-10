@@ -83,7 +83,7 @@ jobs:
         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
     - name: Apply SUSFS + KernelSU patch
-      run: git apply patches/k_patch.patch
+      run: patch -p1 --forward --fuzz=3 < patches/k_patch.patch || true
       
     - name: Build kernel with KSUN
       run: |
