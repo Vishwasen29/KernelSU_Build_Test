@@ -1,0 +1,40 @@
+diff --git a/drivers/kernelsu/kernel_compat.h b/drivers/kernelsu/kernel_compat.h
+index 1b9f0a1..9fcd0d3 100644
+--- a/drivers/kernelsu/kernel_compat.h
++++ b/drivers/kernelsu/kernel_compat.h
+@@ -28,6 +28,20 @@
+ extern void ksu_android_ns_fs_check(void);
+
+ extern struct file *ksu_filp_open_compat(
+-	const char *filename, int flags, umode_t mode);
++	const char *filename, int flags, umode_t mode);
++
++static inline int ksu_access_ok(const void *addr, unsigned long size)
++{
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
++	return access_ok(VERIFY_READ, addr, size);
++#else
++	return access_ok(addr, size);
++#endif
++}
+
+diff --git a/drivers/kernelsu/kernel_compat.c b/drivers/kernelsu/kernel_compat.c
+index 5e2d901..2b07f44 100644
+--- a/drivers/kernelsu/kernel_compat.c
++++ b/drivers/kernelsu/kernel_compat.c
+@@ -1,15 +1,6 @@
+ #include "kernel_compat.h"
+
+-int ksu_access_ok(const void *addr, unsigned long size)
+-{
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+-	return access_ok(VERIFY_READ, addr, size);
+-#else
+-	return access_ok(addr, size);
+-#endif
+-}
+-
+ struct file *ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
+ {
+ 	return filp_open(filename, flags, mode);
+ }
