@@ -1,0 +1,92 @@
+diff --git a/fs/Kconfig b/fs/Kconfig
+index 2c8d7f9..c1e55de 100644
+--- a/fs/Kconfig
++++ b/fs/Kconfig
+@@ -302,6 +302,13 @@ config ANDROID_BINDERFS
+ 	  Android Binder filesystem support.
+
++config SUSFS
++	bool "SUSFS (Super User Space File System)"
++	default y
++	help
++	  SUSFS provides filesystem hiding and mount namespace
++	  filtering support for root solutions.
++
+ endmenu
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 3f1c7c1..a6d1c44 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -132,6 +132,7 @@ obj-$(CONFIG_FHANDLE)    += fhandle.o
+ obj-$(CONFIG_OVERLAY_FS) += overlayfs/
+ obj-$(CONFIG_SHIFT_FS)   += shiftfs/
+ obj-$(CONFIG_ANDROID_BINDERFS) += binderfs/
++obj-$(CONFIG_SUSFS)      += susfs/
+
+diff --git a/fs/susfs/Makefile b/fs/susfs/Makefile
+new file mode 100644
+index 0000000..5a2e3fa
+--- /dev/null
++++ b/fs/susfs/Makefile
+@@ -0,0 +1 @@
++obj-y := susfs.o
+
+diff --git a/fs/susfs/susfs.c b/fs/susfs/susfs.c
+new file mode 100644
+index 0000000..b1f84c2
+--- /dev/null
++++ b/fs/susfs/susfs.c
+@@ -0,0 +1,29 @@
++#include <linux/init.h>
++#include <linux/module.h>
++
++static int __init susfs_init(void)
++{
++	pr_info("susfs: initialized\n");
++	return 0;
++}
++
++late_initcall(susfs_init);
++
++MODULE_LICENSE("GPL");
+
+diff --git a/drivers/kernelsu/kernel_compat.h b/drivers/kernelsu/kernel_compat.h
+index 1b9f0a1..9fcd0d3 100644
+--- a/drivers/kernelsu/kernel_compat.h
++++ b/drivers/kernelsu/kernel_compat.h
+@@ -28,6 +28,20 @@
+ extern void ksu_android_ns_fs_check(void);
+
+ extern struct file *ksu_filp_open_compat(
+ 	const char *filename, int flags, umode_t mode);
++
++static inline int ksu_access_ok(const void *addr, unsigned long size)
++{
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
++	return access_ok(VERIFY_READ, addr, size);
++#else
++	return access_ok(addr, size);
++#endif
++}
+
+diff --git a/drivers/kernelsu/kernel_compat.c b/drivers/kernelsu/kernel_compat.c
+index 5e2d901..2b07f44 100644
+--- a/drivers/kernelsu/kernel_compat.c
++++ b/drivers/kernelsu/kernel_compat.c
+@@ -1,15 +1,6 @@
+ #include "kernel_compat.h"
+
+-int ksu_access_ok(const void *addr, unsigned long size)
+-{
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+-	return access_ok(VERIFY_READ, addr, size);
+-#else
+-	return access_ok(addr, size);
+-#endif
+-}
+-
+ struct file *ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
+ {
+ 	return filp_open(filename, flags, mode);
+ }
