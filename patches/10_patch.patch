@@ -1,7 +1,7 @@
-diff --git a/KernelSU-Next/kernel/drivers/kernelsu/kernel_compat.h b/KernelSU-Next/kernel/drivers/kernelsu/kernel_compat.h
+diff --git a/drivers/KernelSU-Next/kernel_compat.h b/drivers/KernelSU-Next/kernel_compat.h
 index 1b9f0a1..9fcd0d3 100644
---- a/KernelSU-Next/kernel/drivers/kernelsu/kernel_compat.h
-+++ b/KernelSU-Next/kernel/drivers/kernelsu/kernel_compat.h
+--- a/drivers/KernelSU-Next/kernel_compat.h
++++ b/drivers/KernelSU-Next/kernel_compat.h
 @@ -28,6 +28,20 @@
  extern void ksu_android_ns_fs_check(void);
 
@@ -17,11 +17,10 @@ index 1b9f0a1..9fcd0d3 100644
 +	return access_ok(addr, size);
 +#endif
 +}
-
-diff --git a/KernelSU-Next/kernel/drivers/kernelsu/kernel_compat.c b/KernelSU-Next/kernel/drivers/kernelsu/kernel_compat.c
+diff --git a/drivers/KernelSU-Next/kernel_compat.c b/drivers/KernelSU-Next/kernel_compat.c
 index 5e2d901..2b07f44 100644
---- a/KernelSU-Next/kernel/drivers/kernelsu/kernel_compat.c
-+++ b/KernelSU-Next/kernel/drivers/kernelsu/kernel_compat.c
+--- a/drivers/KernelSU-Next/kernel_compat.c
++++ b/drivers/KernelSU-Next/kernel_compat.c
 @@ -1,15 +1,6 @@
  #include "kernel_compat.h"
 
