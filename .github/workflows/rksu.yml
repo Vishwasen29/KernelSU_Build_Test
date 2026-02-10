@@ -1,4 +1,4 @@
-name: Build LineageOS OPlus SM8250 Kernel
+name: Build LineageOS OPlus RKSU SM8250 Kernel +BB +susfs
 
 on:
   workflow_dispatch:
