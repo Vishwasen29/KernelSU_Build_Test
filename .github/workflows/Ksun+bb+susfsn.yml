@@ -24,7 +24,7 @@ jobs:
       uses: actions/checkout@v6
 
     # ------------------------------------------------------------
-    # Swap (kernel builds are memory-hungry)
+    # Swap
     # ------------------------------------------------------------
     - name: Set swap to 10G
       uses: pierotofy/set-swap-space@master
@@ -133,23 +133,39 @@ jobs:
         sed -i 's/ -dirty//g' setlocalversion
 
     # ------------------------------------------------------------
-    # 🔥 SUSFS + KernelSU patches (FIXED)
+    # STEP 1 + 2: Apply patches
     # ------------------------------------------------------------
     - name: Apply SUSFS + KernelSU patches
       run: |
         cd kernel_workspace/android-kernel
-
-        echo "Creating SUSFS directory"
         mkdir -p fs/susfs
 
-        echo "Applying SUSFS kernel patch"
-        patch -p1 < $GITHUB_WORKSPACE/patches/50_add_susfs_in_kernel-4.19.patch
+        patch -p1 < $GITHUB_WORKSPACE/patches/50_patch.patch
+        patch -p1 < $GITHUB_WORKSPACE/patches/10_patch.patch
 
-        echo "Applying KernelSU SUSFS patch"
-        patch -p1 < $GITHUB_WORKSPACE/patches/10_enable_susfs_for_ksu.patch
-
-        echo "Installing SUSFS source files"
+    # ------------------------------------------------------------
+    # STEP 3: Install SUSFS source files
+    # ------------------------------------------------------------
+    - name: Install SUSFS source files
+      run: |
+        cd kernel_workspace/android-kernel
         cp -v $GITHUB_WORKSPACE/patches/susfs/* fs/susfs/
+
+    # ------------------------------------------------------------
+    # STEP 4: Verify SUSFS + KernelSU integration
+    # ------------------------------------------------------------
+    - name: Verify SUSFS & KernelSU integration
+      run: |
+        cd kernel_workspace/android-kernel
+
+        echo "Checking CONFIG_SUSFS..."
+        grep -R "CONFIG_SUSFS" fs/Kconfig
+
+        echo "Checking SUSFS source..."
+        test -f fs/susfs/susfs.c
+
+        echo "Checking KernelSU SUSFS symbol..."
+        grep -R "ksu_access_ok" KernelSU-Next/kernel/drivers/kernelsu
 
     # ------------------------------------------------------------
     # Build
@@ -172,6 +188,19 @@ jobs:
         make -j$(nproc) O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD
 
     # ------------------------------------------------------------
+    # AnyKernel3 packaging
+    # ------------------------------------------------------------
+    - name: Package AnyKernel3
+      run: |
+        cd kernel_workspace
+        git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/' AnyKernel3/anykernel.sh
+        sed -i 's|BLOCK=.*|BLOCK=auto;|' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0/IS_SLOT_DEVICE=auto/' AnyKernel3/anykernel.sh
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+        rm -rf AnyKernel3/.git*
+
+    # ------------------------------------------------------------
     # Artifacts
     # ------------------------------------------------------------
     - name: Upload kernel Image
@@ -179,3 +208,9 @@ jobs:
       with:
         name: Image
         path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3 zip
+      uses: actions/upload-artifact@v6
+      with:
+        name: AK3-${{ env.Lineage_VERSION }}-SM8250-KSU_${{ env.KSUVER }}-${{ env.BUILD_TIME }}
+        path: kernel_workspace/AnyKernel3/*
