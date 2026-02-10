@@ -1,4 +1,4 @@
-name: Tosted Build LineageOS OPlus SM8250 Kernel with KSUN BB susfs
+name: Tosted Build LineageOS OPlus SM8250 Kernel with KSUN + SUSFS
 
 on:
   workflow_dispatch:
@@ -17,66 +17,88 @@ jobs:
       Lineage_VERSION: lineage-23.2
 
     steps:
-    - name: Checkout source
+    # ------------------------------------------------------------
+    # Checkout
+    # ------------------------------------------------------------
+    - name: Checkout repository
       uses: actions/checkout@v6
 
+    # ------------------------------------------------------------
+    # Swap (kernel builds are memory-hungry)
+    # ------------------------------------------------------------
     - name: Set swap to 10G
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 10
 
-    - name: Setup build kernel environment
+    # ------------------------------------------------------------
+    # Build environment
+    # ------------------------------------------------------------
+    - name: Setup build environment
       run: |
         echo "BUILD_TIME=$(TZ=Asia/Kolkata date '+%y%m%d')" >> $GITHUB_ENV
         echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date '+%Y-%m-%d')" >> $GITHUB_ENV
+
         sudo apt-get update
         sudo apt-get install -y \
-          git ccache automake flex lzop bison gperf build-essential zip curl \
-          zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make \
-          squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 \
-          libncurses5-dev
+          git ccache automake flex lzop bison gperf build-essential \
+          zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev \
+          liblz4-tool make squashfs-tools dpkg-dev libssl-dev \
+          python3 bc libc6-dev-i386 libncurses5-dev
+
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-    - name: Cache Clang toolchain
+    # ------------------------------------------------------------
+    # Toolchains
+    # ------------------------------------------------------------
+    - name: Cache Clang
       uses: actions/cache@v5
+      id: cache-clang
       with:
-        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        path: kernel_workspace/clang-aosp
         key: ${{ env.CLANG_VERSION }}
 
-    - name: Download & extract Clang
+    - name: Download Clang
       if: steps.cache-clang.outputs.cache-hit != 'true'
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
+        cd kernel_workspace
         mkdir -p clang-aosp
         wget -O ${CLANG_VERSION}.tar.gz \
           https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
-        tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
+        tar -C clang-aosp -xzf ${CLANG_VERSION}.tar.gz
 
-    - name: Cache GCC toolchain
+    - name: Cache GCC
       uses: actions/cache@v4
+      id: cache-gcc
       with:
-        path: ${{ github.workspace }}/kernel_workspace/gcc-64
+        path: kernel_workspace/gcc-64
         key: gcc-aarch64-${{ env.GCC_TAG }}
 
-    - name: Download & extract GCC
+    - name: Download GCC
       if: steps.cache-gcc.outputs.cache-hit != 'true'
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
+        cd kernel_workspace
         mkdir -p gcc-64
         wget -O gcc-aarch64.tar.gz \
           https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
-        tar -C gcc-64 -zxvf gcc-aarch64.tar.gz
+        tar -C gcc-64 -xzf gcc-aarch64.tar.gz
 
-    - name: Clone kernel source
+    # ------------------------------------------------------------
+    # Kernel source
+    # ------------------------------------------------------------
+    - name: Clone LineageOS kernel
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
+        cd kernel_workspace
         git clone --recursive \
           https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    - name: Setup KernelSU + Baseband Guard
+    # ------------------------------------------------------------
+    # KernelSU + Baseband Guard
+    # ------------------------------------------------------------
+    - name: Setup KernelSU-Next and Baseband Guard
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        cd kernel_workspace/android-kernel
 
         curl -LSs \
           https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
@@ -110,65 +132,49 @@ jobs:
         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
 
-    # 🔥 REPLACED PATCH STEP (your request)
-    - name: Apply SUSFS + KernelSU patch
+    # ------------------------------------------------------------
+    # 🔥 SUSFS + KernelSU patches (FIXED)
+    # ------------------------------------------------------------
+    - name: Apply SUSFS + KernelSU patches
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        cd kernel_workspace/android-kernel
 
-        echo "Applying main SUSFS kernel patch..."
-        patch -p1 < $GITHUB_WORKSPACE/patches/50_add_susfs_in_kernel-4.19.patch \
-          2>&1 | tail -20 || true
+        echo "Creating SUSFS directory"
+        mkdir -p fs/susfs
 
-        echo "Applying KernelSU SUSFS patch (strip level 2)..."
-        patch -p2 < $GITHUB_WORKSPACE/patches/10_enable_susfs_for_ksu.patch \
-          2>&1 | tail -20 || true
+        echo "Applying SUSFS kernel patch"
+        patch -p1 < $GITHUB_WORKSPACE/patches/50_add_susfs_in_kernel-4.19.patch
 
-        echo "Trying alternative KernelSU patch path rewrite..."
-        cp $GITHUB_WORKSPACE/patches/10_enable_susfs_for_ksu.patch .
-        sed -i 's|a/drivers/kernelsu/|a/KernelSU-Next/kernel/drivers/kernelsu/|g' 10_enable_susfs_for_ksu.patch
-        sed -i 's|b/drivers/kernelsu/|b/KernelSU-Next/kernel/drivers/kernelsu/|g' 10_enable_susfs_for_ksu.patch
-        patch -p1 < 10_enable_susfs_for_ksu.patch \
-          2>&1 | tail -20 || true
+        echo "Applying KernelSU SUSFS patch"
+        patch -p1 < $GITHUB_WORKSPACE/patches/10_enable_susfs_for_ksu.patch
 
-        if [ -d "$GITHUB_WORKSPACE/patches/fs" ]; then
-          echo "Copying fs patches..."
-          cp -rp $GITHUB_WORKSPACE/patches/fs/* fs/ || true
-        fi
+        echo "Installing SUSFS source files"
+        cp -v $GITHUB_WORKSPACE/patches/susfs/* fs/susfs/
 
-        if [ -d "$GITHUB_WORKSPACE/patches/include/linux" ]; then
-          echo "Copying include/linux patches..."
-          cp -rp $GITHUB_WORKSPACE/patches/include/linux/* include/linux/ || true
-        fi
-
-        echo "Checking for rejected hunks..."
-        find . -name "*.rej" -type f -print || true
-
-        echo "Patch application completed"
-
+    # ------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------
     - name: Build kernel
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        cd kernel_workspace/android-kernel
+
         export ARCH=arm64
         export SUBARCH=arm64
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
-        export KBUILD_BUILD_HOST=Github-Action
-        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+        export KBUILD_BUILD_HOST=GitHub-Actions
+        export KBUILD_BUILD_USER=$(echo "${{ github.actor }}" | tr A-Z a-z)
 
         BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android-"
         EX_CMD="LD=ld.lld LLVM=1 LLVM_IAS=1"
         DEFCONFIG="vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config"
 
         make O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD $DEFCONFIG
-        make -j$(nproc --all) O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD
+        make -j$(nproc) O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD
 
-    - name: Check kernel output
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
-        test -f arch/arm64/boot/Image || exit 1
-        echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-
-    - name: Upload Image
-      if: env.CHECK_IMAGE == 'true'
+    # ------------------------------------------------------------
+    # Artifacts
+    # ------------------------------------------------------------
+    - name: Upload kernel Image
       uses: actions/upload-artifact@v6
       with:
         name: Image
