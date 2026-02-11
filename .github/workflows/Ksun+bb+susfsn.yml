@@ -1,4 +1,4 @@
-name: Toast Build LineageOS OPlus SM8250 Kernel with KSUN + SUSFS
+name: Toasted Build LineageOS OPlus SM8250 Kernel with KSUN + SUSFS
 
 on:
   workflow_dispatch:
@@ -24,162 +24,193 @@ jobs:
       with:
         swap-size-gb: 10
 
-    - name: Setup build environment
+    - name: Setup build kernel environment
       run: |
         echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
         echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date "+%Y-%m-%d")" >> $GITHUB_ENV
-        
+
         sudo apt-get update
-        sudo apt-get install -y \
-          git ccache automake flex lzop bison gperf build-essential zip curl \
-          zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make \
-          squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 \
-          libncurses5-dev
-        
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl \
+        zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools \
+        dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
+
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-    # ================= TOOLCHAIN =================
+    # ------------------------------------------------------------
+    # Cache Clang
+    # ------------------------------------------------------------
 
-    - name: Cache Clang
+    - name: Cache Clang toolchain
       id: cache-clang
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/kernel_workspace/clang-aosp
-        key: clang-${{ env.CLANG_VERSION }}
+        key: ${{ env.CLANG_VERSION }}
 
-    - name: Download Clang
+    - name: Download & extract Clang
       if: steps.cache-clang.outputs.cache-hit != 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        mkdir clang-aosp
+        mkdir -p clang-aosp
         wget -O clang.tar.gz \
-          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
         tar -C clang-aosp -zxvf clang.tar.gz
 
-    - name: Cache GCC
+    # ------------------------------------------------------------
+    # Cache GCC
+    # ------------------------------------------------------------
+
+    - name: Cache GCC toolchain
       id: cache-gcc
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/kernel_workspace/gcc-64
-        key: gcc-${{ env.GCC_TAG }}
+        key: gcc-aarch64-${{ env.GCC_TAG }}
 
-    - name: Download GCC
+    - name: Download & extract GCC
       if: steps.cache-gcc.outputs.cache-hit != 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        mkdir gcc-64
+        mkdir -p gcc-64
         wget -O gcc.tar.gz \
-          https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
+        https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/${GCC_TAG}.tar.gz
         tar -C gcc-64 -zxvf gcc.tar.gz
 
-    # ================= KERNEL SOURCE =================
+    # ------------------------------------------------------------
+    # Clone Kernel (removed depth=1 for patch safety)
+    # ------------------------------------------------------------
 
-    - name: Clone Kernel Source
+    - name: Download kernel source
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         git clone --recursive \
-          https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-          -b ${{ env.Lineage_VERSION }} android-kernel
+        https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+        -b ${{ env.Lineage_VERSION }} android-kernel
 
-    # ================= KERNELSU NEXT =================
+    # ------------------------------------------------------------
+    # Setup KSUN + Baseband Guard
+    # ------------------------------------------------------------
 
-    - name: Setup KernelSU-Next
+    - name: Set up KSUN
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-        
+
+        curl -LSs \
+        "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+        | bash -s legacy
+
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-        
+
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-        
-        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-        echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-        
+
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
+
         KSU_VERSION=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-        
-        sed -i 's/ -dirty//g' scripts/setlocalversion
 
-    # ================= APPLY SUSFS PATCH =================
+        cd scripts
+        sed -i 's/ -dirty//g' setlocalversion
 
-    - name: Apply SUSFS 2.0 Patch
+    # ------------------------------------------------------------
+    # Apply SUSFS Patch (PROPER METHOD)
+    # ------------------------------------------------------------
+
+    - name: Apply SUSFS Patch
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        
-        echo "Applying SUSFS patch..."
-        
-        if [ ! -f "$GITHUB_WORKSPACE/patches/sus2.0.patch" ]; then
-          echo "Patch not found!"
+
+        git config --global user.name "github-actions"
+        git config --global user.email "actions@github.com"
+
+        PATCH_FILE="$GITHUB_WORKSPACE/patches/sus2.0.patch"
+
+        if [ ! -f "$PATCH_FILE" ]; then
+          echo "SUSFS patch not found!"
           exit 1
         fi
-        
-        git am $GITHUB_WORKSPACE/patches/sus2.0.patch || {
-          echo "git am failed, trying git apply..."
+
+        if git am --3way "$PATCH_FILE"; then
+          echo "SUSFS applied via git am"
+        else
           git am --abort || true
-          git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.0.patch || {
+          if git apply --3way --whitespace=fix "$PATCH_FILE"; then
+            git add .
+            git commit -m "Apply SUSFS patch"
+          else
             echo "Patch failed!"
             exit 1
-          }
-          git add .
-          git commit -m "Apply SUSFS 2.0 patch manually"
-        }
-        
-        echo "SUSFS patch applied successfully"
+          fi
+        fi
 
-    # ================= BUILD =================
+    # ------------------------------------------------------------
+    # Enable KSU + SUSFS (SAFE defconfig edit)
+    # ------------------------------------------------------------
 
-    - name: Build Kernel
+    - name: Enable KSU + SUSFS
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        
+        DEF=arch/arm64/configs/vendor/kona-perf_defconfig
+
+        sed -i '/CONFIG_KSU/d' $DEF
+        sed -i '/CONFIG_KSU_MANUAL_HOOK/d' $DEF
+        sed -i '/CONFIG_KSU_SUSFS/d' $DEF
+
+        echo "CONFIG_KSU=y" >> $DEF
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> $DEF
+        echo "CONFIG_KSU_SUSFS=y" >> $DEF
+
+    # ------------------------------------------------------------
+    # Build Kernel
+    # ------------------------------------------------------------
+
+    - name: Build kernel with KSUN + SUSFS
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
         export ARCH=arm64
         export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
         export KBUILD_BUILD_HOST=Github-Action
         export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
 
         BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android-"
         EX_CMD="LD=ld.lld LLVM=1 LLVM_IAS=1"
+
         DEFCONFIG="vendor/kona-perf_defconfig vendor/debugfs.config vendor/oplus.config"
 
         make O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD $DEFCONFIG
         make -j$(nproc --all) O=out ARCH=arm64 CC=clang $BA_CMD $EX_CMD
 
-    # ================= CHECK OUTPUT =================
+    # ------------------------------------------------------------
+    # Package AnyKernel3
+    # ------------------------------------------------------------
 
-    - name: Verify Image
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
-        if [ -f arch/arm64/boot/Image ]; then
-          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-        else
-          echo "Build failed!"
-          exit 1
-        fi
-
-    # ================= ANYKERNEL =================
-
-    - name: Package AnyKernel3
-      if: ${{ env.CHECK_IMAGE == 'true' }}
+    - name: Make AnyKernel3
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-        
+
         sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
         sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
-        
+
         cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
-        rm -rf AnyKernel3/.git*
 
         cd AnyKernel3
-        zip -r $GITHUB_WORKSPACE/AK3-${{ env.Lineage_VERSION }}-SM8250-KSU-SUSFS_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip ./*
+        zip -r $GITHUB_WORKSPACE/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU-SUSFS_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip ./*
 
-    # ================= UPLOAD =================
+    # ------------------------------------------------------------
+    # Upload
+    # ------------------------------------------------------------
 
-    - name: Upload AnyKernel3
-      if: ${{ env.CHECK_IMAGE == 'true' }}
+    - name: Upload Image
       uses: actions/upload-artifact@v4
       with:
-        name: AK3-${{ env.Lineage_VERSION }}-SM8250-KSU-SUSFS
-        path: ${{ github.workspace }}/AK3-*.zip
+        name: Image
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3
+      uses: actions/upload-artifact@v4
+      with:
+        name: AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU-SUSFS_${{ env.KSUVER }}-${{ env.BUILD_TIME }}
+        path: AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSU-SUSFS_${{ env.KSUVER }}-${{ env.BUILD_TIME }}.zip
