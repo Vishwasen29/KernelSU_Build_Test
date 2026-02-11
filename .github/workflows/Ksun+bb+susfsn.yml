@@ -109,15 +109,15 @@ jobs:
         
         echo "Applying SUSFS patch..."
         
-        if [ ! -f "$GITHUB_WORKSPACE/patches/sus_2.0.patch" ]; then
+        if [ ! -f "$GITHUB_WORKSPACE/patches/sus2.0.patch" ]; then
           echo "Patch not found!"
           exit 1
         fi
         
-        git am $GITHUB_WORKSPACE/patches/sus_2.0.patch || {
+        git am $GITHUB_WORKSPACE/patches/sus2.0.patch || {
           echo "git am failed, trying git apply..."
           git am --abort || true
-          git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus_2.0.patch || {
+          git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.0.patch || {
             echo "Patch failed!"
             exit 1
           }
