@@ -1,0 +1,141 @@
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -26,10 +26,22 @@
+ #include <linux/bootmem.h>
+ #include <linux/task_work.h>
+ #include <linux/sched/task.h>
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++#include <linux/susfs_def.h>
++#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+
+ #include "pnode.h"
+ #include "internal.h"
+
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++extern bool susfs_is_current_ksu_domain(void);
++extern bool susfs_is_sdcard_android_data_decrypted;
++
++static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);
++
++#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */
++#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++
+ /* Maximum number of mounts in a mount namespace */
+ unsigned int sysctl_mount_max __read_mostly = 100000;
+ 
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -1614,6 +1697,15 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
+ 			goto out_free;
+ 		ret = walk_page_range(start_vaddr, end, &pagemap_walk);
+ 		up_read(&mm->mmap_sem);
++#ifdef CONFIG_KSU_SUSFS_SUS_MAP
++		vma = find_vma(mm, start_vaddr);
++		if (vma && vma->vm_file) {
++			struct inode *inode = file_inode(vma->vm_file);
++			if (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {
++				pm.buffer->pme = 0;
++			}
++		}
++#endif
+ 		start_vaddr = end;
+
+ 		len = min(count, PM_ENTRY_BYTES * pm.pos);
+ 
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -14,6 +14,8 @@ obj-y :=	open.o read_write.o file_table.o super.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o
+
++obj-$(CONFIG_KSU_SUSFS) += susfs.o
++
+ ifeq ($(CONFIG_BLOCK),y)
+ obj-y +=	buffer.o block_dev.o direct-io.o mpage.o
+ else
+--- a/include/linux/mount.h
++++ b/include/linux/mount.h
+@@ -72,7 +72,11 @@ struct vfsmount {
+ 	ANDROID_KABI_RESERVE(1);
+ 	ANDROID_KABI_RESERVE(2);
+ 	ANDROID_KABI_RESERVE(3);
++#ifdef CONFIG_KSU_SUSFS
++	ANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);
++#else
+ 	ANDROID_KABI_RESERVE(4);
++#endif
+ 	void *data;
+ } __randomize_layout;
+ 
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -949,11 +1102,12 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void
+ {
+ 	struct mount *mnt;
+ 	struct dentry *root;
+-
++
+ 	if (!type)
+ 		return ERR_PTR(-ENODEV);
+
+ 	mnt = alloc_vfsmnt(name);
++
+ 	if (!mnt)
+ 		return ERR_PTR(-ENOMEM);
+
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -108,6 +120,18 @@ static int mnt_alloc_id(struct mount *mnt)
+ 
+ static void mnt_free_id(struct mount *mnt)
+ {
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++	// First we have to check if susfs_mnt_id_backup == DEFAULT_KSU_MNT_ID,
++	// if so, no need to free.
++	if (mnt->mnt.susfs_mnt_id_backup == DEFAULT_KSU_MNT_ID) {
++		return;
++	}
++	// Second if susfs_mnt_id_backup was set after mnt_id reorder, free it if so.
++	if (likely(mnt->mnt.susfs_mnt_id_backup)) {
++		ida_free(&mnt_id_ida, mnt->mnt.susfs_mnt_id_backup);
++		return;
++	}
++#endif
+ 	ida_free(&mnt_id_ida, mnt->mnt_id);
+ }
+ 
+@@ -116,7 +140,24 @@ static void mnt_free_id(struct mount *mnt)
+  */
+ static int mnt_alloc_group_id(struct mount *mnt)
+ {
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++	int res;
++
++	/* - mnt_alloc_group_id will unlikely get called after screen is unlocked on reboot,
++	 *   so here we can persistently check if current is ksu domain, and assign a sus
++	 *   mnt_group_id if so.
++	 * - Also we can re-use the original mnt_group_ida so there is no need to use
++	 *   another ida nor hook the mnt_release_group_id() function.
++	 */
++	if (susfs_is_current_ksu_domain()) {
++		res = ida_alloc_min(&mnt_group_ida, DEFAULT_KSU_MNT_GROUP_ID, GFP_KERNEL);
++		goto bypass_orig_flow;
++	}
++	res = ida_alloc_min(&mnt_group_ida, 1, GFP_KERNEL);
++bypass_orig_flow:
++#else
+ 	int res = ida_alloc_min(&mnt_group_ida, 1, GFP_KERNEL);
++#endif
+ 
+ 	if (res < 0)
+ 		return res;
+--- a/fs/overlayfs/inode.c
++++ b/fs/overlayfs/inode.c
+@@ -155,7 +155,6 @@ int ovl_getattr(const struct path *path, struct kstat *stat,
+ 	bool metacopy_blocks = false;
+ 
+ 	metacopy_blocks = ovl_is_metacopy_dentry(dentry);
+-
+ 	type = ovl_path_real(dentry, &realpath);
+ 	old_cred = ovl_override_creds(dentry->d_sb);
+ 	err = vfs_getattr(&realpath, stat, request_mask, flags);
