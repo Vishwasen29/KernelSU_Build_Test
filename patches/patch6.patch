@@ -1,0 +1,32 @@
+- name: Verify no rejects remain (confirm patches applied cleanly)
+  run: |
+    cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+    # 1. Check for any leftover .rej files
+    REJ_COUNT=$(find . -name "*.rej" | wc -l)
+    if [ "$REJ_COUNT" -ne 0 ]; then
+      echo "❌ Reject files still exist:"
+      find . -name "*.rej"
+      exit 1
+    else
+      echo "✅ No reject files found – previous rejects resolved!"
+    fi
+
+    # 2. (Optional) Verify that the key susfs changes are actually present
+    #    This confirms the fix patch was applied, not just that .rej are gone.
+    if ! grep -q "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" fs/Makefile; then
+      echo "❌ susfs.o not added to fs/Makefile"
+      exit 1
+    fi
+    if ! grep -q "u64 susfs_mnt_id_backup" include/linux/mount.h; then
+      echo "❌ susfs_mnt_id_backup not found in mount.h"
+      exit 1
+    fi
+    if ! grep -q "susfs_is_current_proc_umounted" fs/namespace.c; then
+      echo "❌ susfs mount hooks missing in fs/namespace.c"
+      exit 1
+    fi
+    if ! grep -q "BIT_SUS_MAPS" fs/proc/task_mmu.c; then
+      echo "❌ susfs pagemap hook missing in task_mmu.c"
+      exit 1
+    fi
+    echo "✅ All previously rejected files have been correctly patched!"
