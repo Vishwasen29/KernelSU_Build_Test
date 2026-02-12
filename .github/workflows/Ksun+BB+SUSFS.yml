@@ -74,7 +74,7 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         set +e
-        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/patch4.patch
+        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch
 
         git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/patch5.patch
         
