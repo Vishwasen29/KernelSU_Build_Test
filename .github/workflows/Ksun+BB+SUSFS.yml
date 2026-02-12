@@ -82,19 +82,19 @@ jobs:
 
         - name: Apply patch
           run: |
-               set +e
-               git apply --reject --whitespace=fix patches/patch2.patch
-               echo "Exit code: $?"
-               find . -name "*.rej"
-               set -e
+              set +e
+              git apply --reject --whitespace=fix patches/patch2.patch
+              echo "Exit code: $?"
+              find . -name "*.rej"
+              set -e
 
         - name: Upload reject files
-            if: always()
-            uses: actions/upload-artifact@v4
-            with:
-            name: patch-reject-files
-            path: |
-             **/*.rej
+          if: always()
+          uses: actions/upload-artifact@v4
+          with:
+             name: patch-reject-files
+             path: |
+              **/*.rej
     
         
         # bash $GITHUB_WORKSPACE/patches/susfs_fix.sh
