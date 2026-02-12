@@ -60,7 +60,7 @@ jobs:
         git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    - name: Setup KSUN + SUSFS
+    - name: Setup KSUN + BB
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
@@ -75,6 +75,8 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         set +e
         git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/patch4.patch
+
+        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/patch5.patch
         
         echo "Exit code: $?"
         find . -name "*.rej"
