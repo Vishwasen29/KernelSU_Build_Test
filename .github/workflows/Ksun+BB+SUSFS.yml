@@ -95,7 +95,7 @@ jobs:
        # Put clang FIRST in PATH
        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
 
-    # Android kernel flags
+       # Android kernel flags
         export CROSS_COMPILE=aarch64-linux-android-
         export CLANG_TRIPLE=aarch64-linux-gnu-
 
