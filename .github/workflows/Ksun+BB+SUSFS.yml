@@ -75,6 +75,7 @@ jobs:
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
+        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch || true
         
         # bash $GITHUB_WORKSPACE/patches/susfs_fix.sh
         echo "CONFIG_KSU_MANUAL_HOOK=y
@@ -101,13 +102,7 @@ jobs:
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
-    - name: Apply SUSFS + KernelSU patch
-      #run: patch -p1 --forward --fuzz=3 < patches/k_patch.patch || true
-      #run: git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/k_patch.patch
-      run:  cp -rp $GITHUB_WORKSPACE/patches/50_add_susfs_in_kernel-4.19.patch $GITHUB_WORKSPACE/kernel_workspace/android-kernel/
-            cp -rp $GITHUB_WORKSPACE/patches/10_enable_susfs_for_ksu.patch $GITHUB_WORKSPACE/kernel_workspace/android-kernel/KernelSU-Next/
-            patch -p1 < $GITHUB_WORKSPACE/kernel_workspace/android-kernel/KernelSU-Next/10_enable_susfs_for_ksu.patch
-            patch -p1 < $GITHUB_WORKSPACE/kernel_workspace/android-kernel/50_add_susfs_in_kernel-4.19.patch
+    
     - name: Build kernel with KSUN
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
