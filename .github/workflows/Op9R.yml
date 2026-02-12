@@ -71,6 +71,7 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         set +e
         git apply --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch  # Original patch file
+        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/fix1.patch
         echo "Exit code: $?"
         find . -name "*.rej"  # If any rejections occur, they will be listed
         set -e
