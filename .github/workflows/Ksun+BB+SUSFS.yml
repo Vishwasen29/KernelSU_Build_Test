@@ -88,11 +88,20 @@ jobs:
     - name: Build kernel
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
         export ARCH=arm64
         export SUBARCH=arm64
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-        make O=out ARCH=arm64 CC=clang vendor/kona-perf_defconfig
-        make -j$(nproc) O=out ARCH=arm64 CC=clang
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
+
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CROSS_COMPILE=aarch64-linux-android-
+
+        make O=out ARCH=arm64 CC=clang \
+        LLVM=1 LLVM_IAS=1 LD=ld.lld \
+        vendor/kona-perf_defconfig
+
+        make -j$(nproc) O=out ARCH=arm64 CC=clang \
+        LLVM=1 LLVM_IAS=1 LD=ld.lld
 
     - name: Check kernel output
       run: |
