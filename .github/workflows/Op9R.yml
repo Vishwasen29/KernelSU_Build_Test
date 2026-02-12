@@ -91,7 +91,7 @@ jobs:
       - name: Apply susfs reject fixes
         run: |
          cd kernel_workspace/android-kernel
-         git apply --whitespace=nowarn $GITHUB_WORKSPACE/patches/patch5.patch
+         git apply --whitespace=nowarn $GITHUB_WORKSPACE/patches/patch6.patch
 
       - name: Verify no rejects remain (confirm patches applied cleanly)
         run: |
