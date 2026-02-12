@@ -13,7 +13,6 @@ jobs:
 
     env:
       CLANG_VERSION: clang-r547379
-      GCC_TAG: android-12.1.0_r27
       Lineage_VERSION: lineage-23.2
 
     steps:
@@ -28,11 +27,27 @@ jobs:
       run: |
         echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
         echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date "+%Y-%m-%d")" >> $GITHUB_ENV
+        #echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
+        #echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
         sudo apt-get update
-        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl \
-          zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools \
-          dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+
+    - name: Cache Clang toolchain
+      id: cache-clang
+      uses: actions/cache@v5
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
+
+    - name: Download & extract Clang-aosp (if cache miss)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        mkdir -p clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
 
     - name: Download kernel source
       run: |
@@ -48,7 +63,7 @@ jobs:
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
         bash $GITHUB_WORKSPACE/patches/syacall_hook.sh
-        bash $GITHUB_WORKSPACE/patches/backport_patch.sh
+        #bash $GITHUB_WORKSPACE/patches/backport_patch.sh
 
     - name: Apply SUSFS patch
       run: |
@@ -85,39 +100,25 @@ jobs:
         EOF
         echo "[✓] SUSFS configs enabled"
 
+    
     - name: Build kernel
       run: |
-       cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        cd kernel_workspace/android-kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
 
-       export ARCH=arm64
-       export SUBARCH=arm64
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
 
-       # Put clang FIRST in PATH
-       export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD   
 
-       # Android kernel flags
-        export CROSS_COMPILE=aarch64-linux-android-
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-
-        make O=out \
-        ARCH=arm64 \
-        CC=clang \
-        CROSS_COMPILE=$CROSS_COMPILE \
-        CLANG_TRIPLE=$CLANG_TRIPLE \
-        LLVM=1 \
-        LLVM_IAS=1 \
-        LD=ld.lld \
-        vendor/kona-perf_defconfig
-
-        make -j$(nproc) O=out \
-        ARCH=arm64 \
-        CC=clang \
-        CROSS_COMPILE=$CROSS_COMPILE \
-        CLANG_TRIPLE=$CLANG_TRIPLE \
-        LLVM=1 \
-        LLVM_IAS=1 \
-        LD=ld.lld
-    
+        
 
     - name: Check kernel output
       run: |
@@ -135,3 +136,30 @@ jobs:
       with:
         name: Image
         path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3 ZIP
+      uses: actions/upload-artifact@v6
+      with:
+        name: AK3-${{ matrix.ks }}
+        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_*.zip
+
+    - name: Save build info
+      run: |
+        cd kernel_workspace
+        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+          {
+            echo "RSKSUVER=${{ env.RSKSUVER }}"
+            echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+            echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          } > build-info-${{ matrix.ks }}.txt
+        else
+          {
+            echo "XXKSUVER=${{ env.XXKSUVER }}"
+          } > build-info-${{ matrix.ks }}.txt
+        fi
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v6
+      with:
+        name: INFO-${{ matrix.ks }}
+        path: kernel_workspace/build-info-${{ matrix.ks }}.txt
