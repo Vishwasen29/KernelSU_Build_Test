@@ -86,12 +86,12 @@ jobs:
       - name: Apply original susfs patch (allow rejects)
         run: |
           cd kernel_workspace/android-kernel
-          git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/patch1.txt || true
+          git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch || true
 
       - name: Apply susfs reject fixes
         run: |
          cd kernel_workspace/android-kernel
-         git apply --whitespace=nowarn $GITHUB_WORKSPACE/patches/susfs-fix-rejects.patch
+         git apply --whitespace=nowarn $GITHUB_WORKSPACE/patches/patch5.patch
 
       - name: Verify no rejects remain (confirm patches applied cleanly)
         run: |
