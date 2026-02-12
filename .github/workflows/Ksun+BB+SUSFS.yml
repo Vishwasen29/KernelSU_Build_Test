@@ -83,7 +83,7 @@ jobs:
         - name: Apply patch
           run: |
               set +e
-              git apply --reject --whitespace=fix patches/patch2.patch
+              git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/patch2.patch
               echo "Exit code: $?"
               find . -name "*.rej"
               set -e
