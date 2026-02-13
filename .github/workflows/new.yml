@@ -1,0 +1,230 @@
+name: A Test Build LineageOS OPlus SM8250 Kernel with KSUN BB susfs
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Kolkata
+
+jobs:
+  build:
+    name: Build Kernel by ${{ github.actor }}
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ks: [rsuntk, backslashxx, next]
+
+    env:
+      CLANG_VERSION: clang-r547379
+      Lineage_VERSION: lineage-23.2
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # --------------------------------------------------
+    # Swap
+    # --------------------------------------------------
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    # --------------------------------------------------
+    # Setup Environment
+    # --------------------------------------------------
+    - name: Setup build environment
+      run: |
+        echo "BUILD_TIME=$(date "+%y%m%d")" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(date "+%Y-%m-%d")" >> $GITHUB_ENV
+
+        sudo apt update
+        sudo apt install -y \
+          git ccache flex bison build-essential zip curl \
+          libssl-dev libelf-dev bc python3 \
+          libncurses5-dev
+
+        mkdir -p kernel_workspace
+
+    # --------------------------------------------------
+    # Cache Clang
+    # --------------------------------------------------
+    - name: Cache Clang
+      id: cache-clang
+      uses: actions/cache@v4
+      with:
+        path: kernel_workspace/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
+
+    - name: Download Clang (if needed)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd kernel_workspace
+        mkdir clang-aosp
+        wget -O clang.tar.gz \
+        https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -C clang-aosp -zxvf clang.tar.gz
+
+    # --------------------------------------------------
+    # Clone Kernel
+    # --------------------------------------------------
+    - name: Clone kernel
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 \
+          -b ${{ env.Lineage_VERSION }} \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+          android-kernel
+
+    # --------------------------------------------------
+    # Detect Kernel Version
+    # --------------------------------------------------
+    - name: Detect kernel version
+      run: |
+        cd kernel_workspace/android-kernel
+        KVER=$(make kernelversion)
+        echo "Kernel Version: $KVER"
+        echo "KERNEL_VERSION=$KVER" >> $GITHUB_ENV
+
+    # --------------------------------------------------
+    # Clean Kernel Tree
+    # --------------------------------------------------
+    - name: Clean kernel tree
+      run: |
+        cd kernel_workspace/android-kernel
+        git reset --hard
+        git clean -fd
+
+    # --------------------------------------------------
+    # Setup KSUN + Baseband Guard
+    # --------------------------------------------------
+    - name: Setup KSUN + BB
+      run: |
+        cd kernel_workspace/android-kernel
+
+        curl -LSs \
+        https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+        | bash -s legacy
+
+        wget -O- \
+        https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh \
+        | bash
+
+    # --------------------------------------------------
+    # Apply SUSFS Patch Safely
+    # --------------------------------------------------
+    - name: Apply SUSFS patch (safe mode)
+      run: |
+        cd kernel_workspace/android-kernel
+
+        echo "Applying SUSFS patch..."
+        set +e
+        git apply --reject --whitespace=fix \
+        $GITHUB_WORKSPACE/patches/sus2.patch
+        PATCH_EXIT=$?
+        set -e
+
+        echo "Patch exit code: $PATCH_EXIT"
+
+        REJECT_COUNT=$(find . -name "*.rej" | wc -l)
+        echo "Reject files found: $REJECT_COUNT"
+
+        echo "REJECT_COUNT=$REJECT_COUNT" >> $GITHUB_ENV
+
+    # --------------------------------------------------
+    # Print Reject Details
+    # --------------------------------------------------
+    - name: Print SUSFS rejects
+      if: env.REJECT_COUNT != '0'
+      run: |
+        cd kernel_workspace/android-kernel
+        echo "======= SUSFS REJECTS ======="
+        find . -name "*.rej" -exec echo "---- {} ----" \; -exec cat {} \;
+
+    # --------------------------------------------------
+    # Auto Fix Common 4.19 Issues
+    # --------------------------------------------------
+    - name: Auto-fix common SUSFS rejects (4.19)
+      if: env.REJECT_COUNT != '0'
+      run: |
+        cd kernel_workspace/android-kernel
+        echo "Attempting auto-fix..."
+
+        # fs/Makefile fix
+        grep -q "susfs.o" fs/Makefile || \
+        sed -i '/nsfs\.o/a obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile
+
+        # mount.h fix
+        grep -q "susfs_mnt_id_backup" include/linux/mount.h || \
+        sed -i '/ANDROID_KABI_RESERVE/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nint susfs_mnt_id_backup;\n#endif' include/linux/mount.h
+
+        echo "Auto-fix complete"
+
+    # --------------------------------------------------
+    # Re-check Rejects
+    # --------------------------------------------------
+    - name: Final reject verification
+      run: |
+        cd kernel_workspace/android-kernel
+        FINAL_REJECTS=$(find . -name "*.rej" | wc -l)
+        echo "Final reject count: $FINAL_REJECTS"
+
+        if [ "$FINAL_REJECTS" -gt 0 ]; then
+          echo "Critical SUSFS rejects remain!"
+          exit 1
+        fi
+
+    # --------------------------------------------------
+    # Enable SUSFS Config
+    # --------------------------------------------------
+    - name: Enable SUSFS config
+      run: |
+        cd kernel_workspace/android-kernel
+        cat <<EOF >> arch/arm64/configs/vendor/kona-perf_defconfig
+        CONFIG_KSU_SUSFS=y
+        CONFIG_KSU_SUSFS_SUS_MOUNT=y
+        CONFIG_KSU_SUSFS_SUS_MAPS=y
+        CONFIG_KSU_SUSFS_ENABLE_LOG=y
+        EOF
+
+    # --------------------------------------------------
+    # Build Kernel
+    # --------------------------------------------------
+    - name: Build kernel
+      run: |
+        cd kernel_workspace/android-kernel
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export ARCH=arm64
+        export LLVM=1
+
+        make O=out vendor/kona-perf_defconfig
+        make -j$(nproc) O=out
+
+    # --------------------------------------------------
+    # Verify Build
+    # --------------------------------------------------
+    - name: Verify kernel image
+      run: |
+        cd kernel_workspace/android-kernel/out
+        test -f arch/arm64/boot/Image || exit 1
+
+    # --------------------------------------------------
+    # Upload Image
+    # --------------------------------------------------
+    - name: Upload Image
+      uses: actions/upload-artifact@v4
+      with:
+        name: Image-${{ matrix.ks }}
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    # --------------------------------------------------
+    # Upload Reject Files
+    # --------------------------------------------------
+    - name: Upload reject files
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: patch-reject-files-${{ matrix.ks }}
+        path: kernel_workspace/android-kernel/**/*.rej
+        if-no-files-found: ignore
