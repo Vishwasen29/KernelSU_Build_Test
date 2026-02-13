@@ -122,6 +122,8 @@ jobs:
         set +e
         git apply --reject --whitespace=fix \
         $GITHUB_WORKSPACE/patches/sus2.patch
+        git apply --reject --whitespace=fix \
+        $GITHUB_WORKSPACE/patches/sus3.patch
         PATCH_EXIT=$?
         set -e
 
