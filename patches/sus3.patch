@@ -1,0 +1,60 @@
+diff --git a/fs/Makefile b/fs/Makefile
+index 1111111..2222222 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@
+ obj-$(CONFIG_NSFS)           += nsfs.o
++obj-$(CONFIG_KSU_SUSFS)      += susfs.o
+
+
+diff --git a/include/linux/mount.h b/include/linux/mount.h
+index 1111111..2222222 100644
+--- a/include/linux/mount.h
++++ b/include/linux/mount.h
+@@
+-       ANDROID_KABI_RESERVE(4);
++#ifdef CONFIG_KSU_SUSFS
++       u64 susfs_mnt_id_backup;
++#else
++       ANDROID_KABI_RESERVE(4);
++#endif
+
+
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 1111111..2222222 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@
+ #include <linux/sched/task.h>
++
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++#include <linux/susfs_def.h>
++
++extern bool susfs_is_current_ksu_domain(void);
++extern bool susfs_is_sdcard_android_data_decrypted;
++
++static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);
++
++#define CL_COPY_MNT_NS BIT(25)
++#endif
+
+
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 1111111..2222222 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@
+        up_read(&mm->mmap_sem);
++
++#ifdef CONFIG_KSU_SUSFS_SUS_MAPS
++       vma = find_vma(mm, start_vaddr);
++       if (vma && vma->vm_file) {
++               struct inode *inode = file_inode(vma->vm_file);
++               if (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) &&
++                   susfs_is_current_proc_umounted()) {
++                       pm.buffer->pme = 0;
++               }
++       }
++#endif
++
+        start_vaddr = end;
