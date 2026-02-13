@@ -1,32 +1,37 @@
 diff --git a/fs/Makefile b/fs/Makefile
-index 1111111..2222222 100644
 --- a/fs/Makefile
 +++ b/fs/Makefile
 @@
- obj-$(CONFIG_NSFS)           += nsfs.o
-+obj-$(CONFIG_KSU_SUSFS)      += susfs.o
+ obj-y := open.o read_write.o file_table.o super.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o
++
++obj-$(CONFIG_KSU_SUSFS) += susfs.o
+
 
 
 diff --git a/include/linux/mount.h b/include/linux/mount.h
-index 1111111..2222222 100644
 --- a/include/linux/mount.h
 +++ b/include/linux/mount.h
 @@
--       ANDROID_KABI_RESERVE(4);
+ 	ANDROID_KABI_RESERVE(1);
+ 	ANDROID_KABI_RESERVE(2);
+ 	ANDROID_KABI_RESERVE(3);
 +#ifdef CONFIG_KSU_SUSFS
-+       u64 susfs_mnt_id_backup;
++	u64 susfs_mnt_id_backup;
 +#else
-+       ANDROID_KABI_RESERVE(4);
+ 	ANDROID_KABI_RESERVE(4);
 +#endif
+ 	void *data;
+
 
 
 diff --git a/fs/namespace.c b/fs/namespace.c
-index 1111111..2222222 100644
 --- a/fs/namespace.c
 +++ b/fs/namespace.c
 @@
  #include <linux/sched/task.h>
-+
+
 +#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 +#include <linux/susfs_def.h>
 +
@@ -39,22 +44,20 @@ index 1111111..2222222 100644
 +#endif
 
 
+
 diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
-index 1111111..2222222 100644
 --- a/fs/proc/task_mmu.c
 +++ b/fs/proc/task_mmu.c
 @@
-        up_read(&mm->mmap_sem);
+ 		up_read(&mm->mmap_sem);
 +
-+#ifdef CONFIG_KSU_SUSFS_SUS_MAPS
-+       vma = find_vma(mm, start_vaddr);
-+       if (vma && vma->vm_file) {
-+               struct inode *inode = file_inode(vma->vm_file);
-+               if (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) &&
-+                   susfs_is_current_proc_umounted()) {
-+                       pm.buffer->pme = 0;
-+               }
-+       }
++#ifdef CONFIG_KSU_SUSFS_SUS_MAP
++		vma = find_vma(mm, start_vaddr);
++		if (vma && vma->vm_file) {
++			struct inode *inode = file_inode(vma->vm_file);
++			if (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) &&
++				susfs_is_current_proc_umounted()) {
++				pm.buffer->pme = 0;
++			}
++		}
 +#endif
-+
-        start_vaddr = end;
