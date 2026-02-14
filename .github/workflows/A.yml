@@ -135,21 +135,9 @@ jobs:
         if [ ! -f "$PATCH_FILE" ]; then
           echo "SUSFS patch not found!"
           exit 1
-        fi
-
-        PATCH_FAILED=0
-
-        if git am --3way "$PATCH_FILE"; then
-          echo "SUSFS applied via git am"
-        else
-          git am --abort || true
-          if git apply --reject --whitespace=fix "$PATCH_FILE"; then
-            git add .
-            git commit -m "Apply SUSFS patch"
-          else
-            PATCH_FAILED=1
-          fi
-        fi
+        fi    
+        git apply --reject --whitespace=fix "$PATCH_FILE"
+        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus3.patch 
 
         ARTIFACT_DIR="$GITHUB_WORKSPACE/susfs_reject_artifacts"
         mkdir -p "$ARTIFACT_DIR"
