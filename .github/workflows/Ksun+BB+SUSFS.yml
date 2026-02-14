@@ -67,7 +67,7 @@ jobs:
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-        bash $GITHUB_WORKSPACE/patches/syacall_hook.sh
+        #bash $GITHUB_WORKSPACE/patches/syacall_hook.sh
         bash $GITHUB_WORKSPACE/patches/sus_inline.sh
 
     - name: Apply SUSFS patch
