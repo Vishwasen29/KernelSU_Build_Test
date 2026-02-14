@@ -137,7 +137,7 @@ jobs:
           exit 1
         fi    
         git apply --reject --whitespace=fix "$PATCH_FILE"
-        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus3.patch 
+        #git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus3.patch 
 
         ARTIFACT_DIR="$GITHUB_WORKSPACE/susfs_reject_artifacts"
         mkdir -p "$ARTIFACT_DIR"
