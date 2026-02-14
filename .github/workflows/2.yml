@@ -1,38 +1,34 @@
-name: A Vishwas Build LineageOS OPlus SM8250 Kernel with KSUN BB susfs
+name: 1 Build LineageOS OPlus SM8250 Kernel with SUSFS
 
 on:
   workflow_dispatch:
 
 env:
-  TZ: Asia/Kolkata
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-23.2
 
 jobs:
   build:
-    name: Build Kernel by ${{ github.actor }}
+    name: Build Kernel (${{ matrix.ks }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        ks: [rsuntk, backslashxx, next]
-
-    env:
-      CLANG_VERSION: clang-r547379
-      Lineage_VERSION: lineage-23.2
+        ks: [next]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set swap to 10G
         uses: pierotofy/set-swap-space@master
         with:
           swap-size-gb: 10
 
-      - name: Setup build environment
+      - name: Setup build kernel environment
         run: |
-          echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
-          echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date "+%Y-%m-%d")" >> $GITHUB_ENV
-          #echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
-          #echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
+          echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
           sudo apt-get update
           sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
           mkdir -p $GITHUB_WORKSPACE/kernel_workspace
@@ -56,18 +52,35 @@ jobs:
       - name: Download kernel source
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
-          git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-            -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
+          git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-      - name: Setup KSUN + BB
+      - name: Set up KernelSU-Next (${{ matrix.ks }})
         run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-          bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-          #bash $GITHUB_WORKSPACE/patches/syacall_hook.sh
-          #bash $GITHUB_WORKSPACE/patches/sus_inline.sh
+          cd kernel_workspace/android-kernel
+
+          if [ "${{ matrix.ks }}" = "next" ]; then
+
+            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+            wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+            sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+            bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+          else
+
+          if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+            curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
+            bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+            RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
+            echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+          else
+            curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh | bash -s master
+            echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+            XXKSUVER=$(grep -oP 'KSU_VERSION\s*=\s*\K\d+' KernelSU/kernel/Makefile | tail -n1)
+            echo "XXKSUVER=$XXKSUVER" >> $GITHUB_ENV
+          fi
+
+          sed -i 's/ -dirty//g' scripts/setlocalversion
 
       - name: Apply SUSFS patch with inline fixes
         run: |
@@ -218,18 +231,10 @@ jobs:
           echo ""
           [ $VERIFICATION_FAILED -eq 0 ] && echo "✅ SUSFS INTEGRATION VERIFIED!" || { echo "❌ SUSFS INTEGRATION FAILED!"; exit 1; }
 
-      - name: Upload reject files
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: patch-reject-files-${{ matrix.ks }}-${{ env.BUILD_TIME }}
-          path: kernel_workspace/android-kernel/**/*.rej
-
       - name: Enable SUSFS configs
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
           cat <<EOF >> arch/arm64/configs/vendor/kona-perf_defconfig
-             CONFIG_KSU_MANUAL_HOOK=y
              CONFIG_KSU_SUSFS=y
              CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
              CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -244,7 +249,7 @@ jobs:
           EOF
           echo "[✓] SUSFS configs enabled"
 
-      - name: Build kernel
+      - name: Build kernel (${{ matrix.ks }})
         run: |
           cd kernel_workspace/android-kernel
           export ARCH=arm64
@@ -264,24 +269,43 @@ jobs:
       - name: Check kernel output
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+
           if [ -f arch/arm64/boot/Image ]; then
             echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+            echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
           else
-            echo "Kernel build failed"
+            echo "Kernel output file is empty"
             exit 1
           fi
 
-      - name: Upload Image
-        if: ${{ env.CHECK_IMAGE == 'true' }}
-        uses: actions/upload-artifact@v4
+      - name: Prepare AnyKernel3 and package
+        run: |
+          cd kernel_workspace
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+          sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+          sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+          rm -rf AnyKernel3/.git* AnyKernel3/README.md
+          cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+
+          cd AnyKernel3
+          if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+            zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-rsuntk_KSU_SUSFS_${{ env.RSKSUVER }}.zip ./*
+          else
+            zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-backslashxx_KSU_SUSFS_${{ env.XXKSUVER }}.zip ./*
+          fi
+
+      - name: Upload Image artifact
+        if: env.CHECK_IMAGE == 'true'
+        uses: actions/upload-artifact@v6
         with:
-          name: Image-${{ matrix.ks }}-${{ env.BUILD_TIME }}
+          name: Image-${{ matrix.ks }}
           path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
 
       - name: Upload AnyKernel3 ZIP
         uses: actions/upload-artifact@v6
         with:
-          name: AK3-${{ matrix.ks }}-${{ env.BUILD_TIME }}
+          name: AK3-${{ matrix.ks }}
           path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_*.zip
 
       - name: Save build info
@@ -302,6 +326,7 @@ jobs:
       - name: Upload build info
         uses: actions/upload-artifact@v6
         with:
-          name: INFO-${{ matrix.ks }}-${{ env.BUILD_TIME }}
+          name: INFO-${{ matrix.ks }}
           path: kernel_workspace/build-info-${{ matrix.ks }}.txt
-          
+
+ 
