@@ -74,9 +74,9 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         set +e
-        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch
+        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch || true
 
-        #git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/patch5.patch
+        bash $GITHUB_WORKSPACE/patches/fix.sh
         
         echo "Exit code: $?"
         find . -name "*.rej"
