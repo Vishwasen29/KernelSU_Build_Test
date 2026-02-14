@@ -67,7 +67,7 @@ jobs:
             echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
           else
 
-          if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+            [ "${{ matrix.ks }}" = "rsuntk" ]; then
             curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
             bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
             echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
