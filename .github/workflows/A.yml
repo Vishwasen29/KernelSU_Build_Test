@@ -120,7 +120,7 @@ jobs:
         sed -i 's/ -dirty//g' setlocalversion
 
     # ------------------------------------------------------------
-    # Apply SUSFS Patch (Reject-safe)
+    # Apply SUSFS Patch (Reject + Source Capture)
     # ------------------------------------------------------------
 
     - name: Apply SUSFS Patch
@@ -130,7 +130,7 @@ jobs:
         git config --global user.name "github-actions"
         git config --global user.email "actions@github.com"
 
-        PATCH_FILE="$GITHUB_WORKSPACE/patches/sus2.patch"
+        PATCH_FILE="$GITHUB_WORKSPACE/patches/sus2.0.patch"
 
         if [ ! -f "$PATCH_FILE" ]; then
           echo "SUSFS patch not found!"
@@ -140,30 +140,40 @@ jobs:
         PATCH_FAILED=0
 
         if git am --3way "$PATCH_FILE"; then
-          echo "Applied via git am"
+          echo "SUSFS applied via git am"
         else
           git am --abort || true
           if git apply --reject --whitespace=fix "$PATCH_FILE"; then
             git add .
-            git commit -m "Apply SUSFS patch (manual)"
+            git commit -m "Apply SUSFS patch"
           else
             PATCH_FAILED=1
           fi
         fi
 
-        mkdir -p $GITHUB_WORKSPACE/reject_artifacts
+        ARTIFACT_DIR="$GITHUB_WORKSPACE/susfs_reject_artifacts"
+        mkdir -p "$ARTIFACT_DIR"
 
-        while IFS= read -r file; do
-          cp --parents "$file" $GITHUB_WORKSPACE/reject_artifacts
-          ORIGINAL="${file%.rej}"
-          [ -f "$ORIGINAL" ] && cp --parents "$ORIGINAL" $GITHUB_WORKSPACE/reject_artifacts
-        done < <(find . -name "*.rej")
+        REJ_FILES=$(find . -type f -name "*.rej")
 
-        find . -name "*.orig" -exec cp --parents {} $GITHUB_WORKSPACE/reject_artifacts \;
+        if [ -n "$REJ_FILES" ]; then
+          for REJ in $REJ_FILES; do
+            DEST="$ARTIFACT_DIR/$(dirname "$REJ")"
+            mkdir -p "$DEST"
 
-        if [ -d "$GITHUB_WORKSPACE/reject_artifacts" ] && [ "$(ls -A $GITHUB_WORKSPACE/reject_artifacts)" ]; then
-          cd $GITHUB_WORKSPACE
-          tar -czf susfs_patch_rejects.tar.gz reject_artifacts
+            cp "$REJ" "$DEST/"
+            SRC="${REJ%.rej}"
+            [ -f "$SRC" ] && cp "$SRC" "$DEST/"
+          done
+        fi
+
+        ORIG_FILES=$(find . -type f -name "*.orig")
+        if [ -n "$ORIG_FILES" ]; then
+          for ORIG in $ORIG_FILES; do
+            DEST="$ARTIFACT_DIR/$(dirname "$ORIG")"
+            mkdir -p "$DEST"
+            cp "$ORIG" "$DEST/"
+          done
         fi
 
         if [ "$PATCH_FAILED" -eq 1 ]; then
@@ -175,8 +185,8 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: SUSFS-Patch-Rejects
-        path: susfs_patch_rejects.tar.gz
+        name: SUSFS-Rejects-And-Source-Files
+        path: susfs_reject_artifacts
         if-no-files-found: ignore
 
     # ------------------------------------------------------------
@@ -226,7 +236,6 @@ jobs:
       run: |
         cd kernel_workspace
         git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-
         cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
 
         cd AnyKernel3
