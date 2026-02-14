@@ -1,4 +1,4 @@
-name: A Vishwas test Build LineageOS OPlus SM8250 Kernel with KSUN BB susfs
+name: A Vishwas Build LineageOS OPlus SM8250 Kernel with KSUN BB susfs
 
 on:
   workflow_dispatch:
@@ -261,7 +261,7 @@ jobs:
             exit 1
           fi
 
-      - name: Package AnyKernel3
+      - name: Setup and Package AnyKernel3
         if: ${{ env.CHECK_IMAGE == 'true' }}
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
@@ -274,10 +274,62 @@ jobs:
           cd AnyKernel3
           
           # Clean previous builds
-          rm -f *.zip Image
+          rm -f *.zip Image dtb dtbo
+          
+          # Configure AnyKernel3 for OnePlus 9R (SM8250)
+          cat > anykernel.sh << 'EOF'
+          # AnyKernel3 Ramdisk Mod Script
+          # osm0sis @ xda-developers
+          
+          ## AnyKernel setup
+          # begin properties
+          properties() { '
+          kernel.string=KernelSU SUSFS Kernel by ${{ github.actor }}
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=lemonades
+          device.name2=lemonadep
+          device.name3=OnePlus9R
+          device.name4=OnePlus9Pro
+          supported.versions=11-15
+          supported.patchlevels=
+          '; } # end properties
+          
+          # shell variables
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          
+          ## AnyKernel methods (DO NOT CHANGE)
+          # import patching functions/variables - see for reference
+          . tools/ak3-core.sh;
+          
+          ## AnyKernel boot install
+          dump_boot;
+          
+          # begin ramdisk changes
+          
+          # end ramdisk changes
+          
+          write_boot;
+          ## end boot install
+          EOF
           
           # Copy kernel image
           cp $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot/Image .
+          
+          # Check if dtb and dtbo exist, copy if they do
+          if [ -f "$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot/dtb" ]; then
+            cp $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot/dtb .
+          fi
+          
+          if [ -f "$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot/dtbo.img" ]; then
+            cp $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot/dtbo.img dtbo
+          fi
           
           # Get kernel version
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
@@ -286,10 +338,15 @@ jobs:
           # Create ZIP
           cd $GITHUB_WORKSPACE/kernel_workspace/AnyKernel3
           ZIP_NAME="AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_SUSFS_${KERNEL_VERSION}_${{ env.BUILD_TIME }}.zip"
-          zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder
+          zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder .gitignore .gitattributes
           
           echo "✅ Created flashable ZIP: $ZIP_NAME"
           ls -lh "$ZIP_NAME"
+          
+          # Verify ZIP contents
+          echo ""
+          echo "ZIP contents:"
+          unzip -l "$ZIP_NAME" | head -20
 
       - name: Upload Image
         if: ${{ env.CHECK_IMAGE == 'true' }}
@@ -315,12 +372,22 @@ jobs:
             echo "Build Date: ${{ env.BUILD_TIME_1 }}"
             echo "Build Variant: ${{ matrix.ks }}"
             echo "Lineage Version: ${{ env.Lineage_VERSION }}"
-            echo "Device: OnePlus 9R (SM8250)"
+            echo "Device: OnePlus 9R / 9 Pro (SM8250)"
+            echo "Codename: lemonades / lemonadep"
             echo "=========================================="
             echo "Features:"
             echo "  - KernelSU (${{ matrix.ks }} variant)"
             echo "  - SUSFS (Integrated)"
             echo "  - Baseband Guard"
+            echo "=========================================="
+            echo "Flash Instructions:"
+            echo "  1. Boot into TWRP/custom recovery"
+            echo "  2. Flash the AK3 ZIP file"
+            echo "  3. Reboot to system"
+            echo "  OR"
+            echo "  1. Use Franco Kernel Manager app"
+            echo "  2. Select the AK3 ZIP file"
+            echo "  3. Flash and reboot"
             echo "=========================================="
           } > build-info-${{ matrix.ks }}.txt
 
@@ -329,3 +396,4 @@ jobs:
         with:
           name: INFO-${{ matrix.ks }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/build-info-${{ matrix.ks }}.txt
+          
