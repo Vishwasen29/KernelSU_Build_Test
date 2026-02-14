@@ -76,7 +76,7 @@ jobs:
         set +e
         git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch || true
 
-        bash $GITHUB_WORKSPACE/patches/fix1.sh
+        bash $GITHUB_WORKSPACE/patches/fix2.sh
         
         echo "Exit code: $?"
         find . -name "*.rej"
