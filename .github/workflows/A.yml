@@ -130,7 +130,7 @@ jobs:
         git config --global user.name "github-actions"
         git config --global user.email "actions@github.com"
 
-        PATCH_FILE="$GITHUB_WORKSPACE/patches/sus2.0.patch"
+        PATCH_FILE="$GITHUB_WORKSPACE/patches/sus2.patch"
 
         if [ ! -f "$PATCH_FILE" ]; then
           echo "SUSFS patch not found!"
