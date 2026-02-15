@@ -1,4 +1,4 @@
-name: A Mom Build LineageOS OPlus SM8250 Kernel with SUSFS
+name: A mom Build LineageOS OPlus SM8250 Kernel with KernelSU and SUSFS
 
 on:
   workflow_dispatch:
@@ -60,184 +60,242 @@ jobs:
           cd $GITHUB_WORKSPACE/kernel_workspace
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b ${{ env.SUSFS_VERSION }} susfs4ksu
 
-      - name: Set up KernelSU-Next (${{ matrix.ks }})
+      - name: Set up KernelSU (${{ matrix.ks }})
         run: |
           cd kernel_workspace/android-kernel
-
+          
           if [ "${{ matrix.ks }}" = "ksun" ]; then
-            # KernelSU-Next setup
-            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+            echo "Setting up KernelSU-Next with SUSFS..."
+            curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/next-susfs/kernel/setup.sh" | bash -s next-susfs
             wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
             sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
             bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
             echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-            
-            # Get KernelSU-Next version
             KSUNVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 40000)
             echo "KSUNVER=$KSUNVER" >> $GITHUB_ENV
             echo "KSU_DIR=KernelSU-Next" >> $GITHUB_ENV
-            
+            echo "HAS_SUSFS=integrated" >> $GITHUB_ENV
           elif [ "${{ matrix.ks }}" = "rsuntk" ]; then
-            # rsuntk KernelSU setup
+            echo "Setting up rsuntk KernelSU..."
             curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
             bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
             echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-            
             RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
             echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
             echo "KSU_DIR=KernelSU" >> $GITHUB_ENV
-            
+            echo "HAS_SUSFS=patches_needed" >> $GITHUB_ENV
           else
-            # backslashxx KernelSU setup
+            echo "Setting up backslashxx KernelSU..."
             curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh | bash -s master
             echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-            
             XXKSUVER=$(grep -oP 'KSU_VERSION\s*=\s*\K\d+' KernelSU/kernel/Makefile | tail -n1)
             echo "XXKSUVER=$XXKSUVER" >> $GITHUB_ENV
             echo "KSU_DIR=KernelSU" >> $GITHUB_ENV
+            echo "HAS_SUSFS=patches_needed" >> $GITHUB_ENV
           fi
-
+          
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
-      - name: Apply SUSFS prerequisite patches
-        run: |
-          cd kernel_workspace/android-kernel
-          
-          # Apply revert commit (commented out as per original)
-          # git revert --no-commit 898e9d4f8ca9b2f46b0c6b36b80a872b5b88d899 || true
-          
-          # Disable kprobe hooks
-          find . -type f \( -name "*.c" -o -name "*.h" \) | xargs sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/g'
-
-      - name: Apply SUSFS kernel patches
+      - name: Apply SUSFS patches for non-integrated variants
+        if: env.HAS_SUSFS == 'patches_needed'
         run: |
           cd kernel_workspace/android-kernel
           KERNEL_ROOT=$(pwd)
-          
-          # Create directory for patch rejects
           mkdir -p $GITHUB_WORKSPACE/patch_rejects/${{ matrix.ks }}
           
-          # Copy SUSFS patches
-          cp $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ${{ env.KSU_DIR }}/
-          cp $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-*.patch ./
-          cp -r $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/fs/* fs/
-          cp -r $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/include/linux/* include/linux/
+          echo "Copying SUSFS source files..."
+          cp -r $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/fs/susfs.c fs/ || true
+          cp -r $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/ || true
           
-          # Apply KernelSU SUSFS patch
-          cd ${{ env.KSU_DIR }}
-          patch -p1 < 10_enable_susfs_for_ksu.patch > $GITHUB_WORKSPACE/patch_rejects/${{ matrix.ks }}/ksu_patch.log 2>&1 || {
-            echo "KSU_PATCH_FAILED=true" >> $GITHUB_ENV
-            echo "KernelSU patch had issues, collecting rejects..."
-          }
-          
-          # Apply kernel SUSFS patch
-          cd $KERNEL_ROOT
-          patch -p1 < 50_add_susfs_in_kernel-*.patch > $GITHUB_WORKSPACE/patch_rejects/${{ matrix.ks }}/kernel_patch.log 2>&1 || {
+          echo "Applying kernel patches..."
+          cp $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-*.patch ./susfs_kernel.patch
+          patch -p1 --forward --no-backup-if-mismatch --reject-file=$GITHUB_WORKSPACE/patch_rejects/${{ matrix.ks }}/kernel.rej < susfs_kernel.patch > $GITHUB_WORKSPACE/patch_rejects/${{ matrix.ks }}/kernel_patch.log 2>&1 || {
             echo "KERNEL_PATCH_FAILED=true" >> $GITHUB_ENV
-            echo "Kernel patch had issues, collecting rejects..."
+            echo "Some kernel patches failed - will apply manual fixes..."
           }
+          
+          if [ -f $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ]; then
+            cp $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ${{ env.KSU_DIR }}/ksu_susfs.patch
+            cd ${{ env.KSU_DIR }}
+            patch -p1 --forward --no-backup-if-mismatch --reject-file=$GITHUB_WORKSPACE/patch_rejects/${{ matrix.ks }}/ksu.rej < ksu_susfs.patch > $GITHUB_WORKSPACE/patch_rejects/${{ matrix.ks }}/ksu_patch.log 2>&1 || {
+              echo "KSU_PATCH_FAILED=true" >> $GITHUB_ENV
+              echo "Some KSU patches failed - will apply manual fixes..."
+            }
+            cd $KERNEL_ROOT
+          fi
+          
+          echo "Applying manual fixes..."
+          if ! grep -q "CONFIG_KSU_SUSFS" fs/Makefile; then
+            sed -i '/obj-\$(CONFIG_PROC_FS)/a obj-\$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile
+          fi
+          
+          if [ -f include/linux/susfs.h ]; then
+            if ! grep -q "#ifndef _LINUX_SUSFS_H" include/linux/susfs.h; then
+              sed -i '1i #ifndef _LINUX_SUSFS_H\n#define _LINUX_SUSFS_H' include/linux/susfs.h
+              echo "#endif /* _LINUX_SUSFS_H */" >> include/linux/susfs.h
+            fi
+          fi
+          
+          if [ -f include/linux/mount.h ] && ! grep -q "susfs_suspicious" include/linux/mount.h; then
+            awk '/struct mount \{/,/\};/{
+              if (/struct mnt_namespace \*mnt_ns;/) {
+                print
+                print "\tunsigned int susfs_suspicious;"
+                next
+              }
+            } {print}' include/linux/mount.h > include/linux/mount.h.tmp
+            mv include/linux/mount.h.tmp include/linux/mount.h
+          fi
+          
+          for file in fs/namespace.c fs/proc/task_mmu.c; do
+            if [ -f "$file" ] && ! grep -q "linux/susfs.h" "$file"; then
+              sed -i '1a #ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#endif' "$file"
+            fi
+          done
+          
+          if [ -f ${{ env.KSU_DIR }}/kernel/Makefile ]; then
+            if ! grep -q "SUSFS_VERSION" ${{ env.KSU_DIR }}/kernel/Makefile; then
+              cat >> ${{ env.KSU_DIR }}/kernel/Makefile << 'EOFMAKE'
+          
+          # SUSFS Integration
+          ifeq ($(shell test -e $(srctree)/fs/susfs.c; echo $$?),0)
+          $(eval SUSFS_VERSION=$(shell grep -E '^#define SUSFS_VERSION' $(srctree)/include/linux/susfs.h 2>/dev/null | cut -d' ' -f3 | sed 's/"//g'))
+          $(info -- SUSFS_VERSION: $(SUSFS_VERSION))
+          ccflags-y += -DKSU_SUSFS_ENABLED
+          else
+          $(info -- SUSFS not integrated)
+          endif
+          EOFMAKE
+            fi
+          fi
 
-      - name: Collect patch rejects and original files
-        if: env.KSU_PATCH_FAILED == 'true' || env.KERNEL_PATCH_FAILED == 'true'
+      - name: Enable SUSFS configuration
+        run: |
+          cd kernel_workspace/android-kernel
+          cat >> arch/arm64/configs/vendor/kona-perf_defconfig << 'EOFCONFIG'
+          
+          # SUSFS Configuration
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_MODULE_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KPROBE_SYSCALL_TABLE=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          EOFCONFIG
+
+      - name: Add SUSFS Kconfig
+        run: |
+          cd kernel_workspace/android-kernel
+          if [ -f ${{ env.KSU_DIR }}/kernel/Kconfig ]; then
+            if ! grep -q "config KSU_SUSFS$" ${{ env.KSU_DIR }}/kernel/Kconfig; then
+              cat >> ${{ env.KSU_DIR }}/kernel/Kconfig << 'EOFKCONFIG'
+          
+          menu "SUSFS - Advanced Root Hiding"
+          	depends on KSU
+          
+          config KSU_SUSFS
+          	bool "Enable SUSFS support"
+          	depends on KSU
+          	default y
+          
+          config KSU_SUSFS_HAS_MAGIC_MOUNT
+          	bool "Magic Mount support"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_SUS_PATH
+          	bool "Suspicious path hiding"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_SUS_MOUNT
+          	bool "Suspicious mount hiding"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_SUS_KSTAT
+          	bool "Kstat spoofing"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_SUS_OVERLAYFS
+          	bool "OverlayFS hiding"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_TRY_UMOUNT
+          	bool "Try umount support"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+          	bool "Auto-add KSU default mounts"
+          	depends on KSU_SUSFS && KSU_SUSFS_HAS_MAGIC_MOUNT
+          	default y
+          
+          config KSU_SUSFS_AUTO_ADD_SUS_KSU_MODULE_MOUNT
+          	bool "Auto-add KSU module mounts"
+          	depends on KSU_SUSFS && KSU_SUSFS_HAS_MAGIC_MOUNT
+          	default y
+          
+          config KSU_SUSFS_AUTO_ADD_SUS_KPROBE_SYSCALL_TABLE
+          	bool "Auto-add kprobe syscall table hiding"
+          	depends on KSU_SUSFS
+          	default y
+          
+          endmenu
+          EOFKCONFIG
+            fi
+          fi
+
+      - name: Collect patch diagnostics
+        if: env.KERNEL_PATCH_FAILED == 'true' || env.KSU_PATCH_FAILED == 'true'
         run: |
           cd kernel_workspace/android-kernel
           REJECT_DIR=$GITHUB_WORKSPACE/patch_rejects/${{ matrix.ks }}
+          find . -name "*.rej" -type f > $REJECT_DIR/reject_files_list.txt 2>/dev/null || true
           
-          # Find all .rej files
-          find . -name "*.rej" -type f > $REJECT_DIR/reject_files_list.txt
-          
-          # Copy .rej files and their corresponding original files
-          while IFS= read -r reject_file; do
-            if [ -f "$reject_file" ]; then
-              # Get the original file name (remove .rej extension)
-              original_file="${reject_file%.rej}"
-              
-              # Create directory structure in reject folder
-              reject_dest="$REJECT_DIR/rejects/$(dirname $reject_file)"
-              original_dest="$REJECT_DIR/originals/$(dirname $reject_file)"
-              
-              mkdir -p "$reject_dest"
-              mkdir -p "$original_dest"
-              
-              # Copy reject file
-              cp "$reject_file" "$reject_dest/"
-              
-              # Copy original file if it exists
-              if [ -f "$original_file" ]; then
-                cp "$original_file" "$original_dest/"
+          if [ -f $REJECT_DIR/reject_files_list.txt ] && [ -s $REJECT_DIR/reject_files_list.txt ]; then
+            while IFS= read -r reject_file; do
+              if [ -f "$reject_file" ]; then
+                original_file="${reject_file%.rej}"
+                reject_dest="$REJECT_DIR/rejects/$(dirname $reject_file)"
+                original_dest="$REJECT_DIR/originals/$(dirname $reject_file)"
+                mkdir -p "$reject_dest" "$original_dest"
+                cp "$reject_file" "$reject_dest/" || true
+                [ -f "$original_file" ] && cp "$original_file" "$original_dest/" || true
+                [ -f "${original_file}.orig" ] && cp "${original_file}.orig" "$original_dest/" || true
               fi
-              
-              # Also copy the .orig file if it exists (backup created by patch)
-              if [ -f "${original_file}.orig" ]; then
-                cp "${original_file}.orig" "$original_dest/"
-              fi
-            fi
-          done < $REJECT_DIR/reject_files_list.txt
+            done < $REJECT_DIR/reject_files_list.txt
+          fi
           
-          # Create a summary report
-          cat > $REJECT_DIR/PATCH_SUMMARY.txt << 'EOF'
-          SUSFS Patch Application Summary
-          ================================
-          Build Variant: ${{ matrix.ks }}
-          Date: $(date)
+          cat > $REJECT_DIR/PATCH_SUMMARY.txt << EOFSUM
+          SUSFS Patch Summary for ${{ matrix.ks }}
+          ========================================
+          Build Date: $(date)
+          KernelSU Variant: ${{ matrix.ks }}
+          KernelSU Directory: ${{ env.KSU_DIR }}
+          EOFSUM
           
-          KernelSU Patch Status: $([ "${{ env.KSU_PATCH_FAILED }}" = "true" ] && echo "FAILED" || echo "SUCCESS")
-          Kernel Patch Status: $([ "${{ env.KERNEL_PATCH_FAILED }}" = "true" ] && echo "FAILED" || echo "SUCCESS")
-          
-          Reject Files Found:
-          -------------------
-          EOF
-          
-          cat $REJECT_DIR/reject_files_list.txt >> $REJECT_DIR/PATCH_SUMMARY.txt
-          
-          # Count rejects
-          REJECT_COUNT=$(wc -l < $REJECT_DIR/reject_files_list.txt)
-          echo "" >> $REJECT_DIR/PATCH_SUMMARY.txt
-          echo "Total Reject Files: $REJECT_COUNT" >> $REJECT_DIR/PATCH_SUMMARY.txt
-          
-          # Add patch logs to summary
-          echo "" >> $REJECT_DIR/PATCH_SUMMARY.txt
-          echo "KernelSU Patch Log:" >> $REJECT_DIR/PATCH_SUMMARY.txt
-          echo "-------------------" >> $REJECT_DIR/PATCH_SUMMARY.txt
-          cat $REJECT_DIR/ksu_patch.log >> $REJECT_DIR/PATCH_SUMMARY.txt
-          
-          echo "" >> $REJECT_DIR/PATCH_SUMMARY.txt
-          echo "Kernel Patch Log:" >> $REJECT_DIR/PATCH_SUMMARY.txt
-          echo "-----------------" >> $REJECT_DIR/PATCH_SUMMARY.txt
-          cat $REJECT_DIR/kernel_patch.log >> $REJECT_DIR/PATCH_SUMMARY.txt
-          
-          # Display summary
-          cat $REJECT_DIR/PATCH_SUMMARY.txt
+          [ -f $REJECT_DIR/kernel_patch.log ] && cat $REJECT_DIR/kernel_patch.log >> $REJECT_DIR/PATCH_SUMMARY.txt || true
+          [ -f $REJECT_DIR/ksu_patch.log ] && cat $REJECT_DIR/ksu_patch.log >> $REJECT_DIR/PATCH_SUMMARY.txt || true
 
-      - name: Upload patch rejects and diagnostics
-        if: env.KSU_PATCH_FAILED == 'true' || env.KERNEL_PATCH_FAILED == 'true'
+      - name: Upload patch diagnostics
+        if: env.KERNEL_PATCH_FAILED == 'true' || env.KSU_PATCH_FAILED == 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: patch-rejects-${{ matrix.ks }}
+          name: patch-diagnostics-${{ matrix.ks }}
           path: ${{ github.workspace }}/patch_rejects/${{ matrix.ks }}/
           retention-days: 30
-
-      - name: Enable SUSFS config options
-        run: |
-          cd kernel_workspace/android-kernel
-          
-          # Enable SUSFS options in defconfig
-          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          
-          # Add any additional SUSFS config options you need
-          # echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          # echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
       - name: Build SUSFS userspace tools
         run: |
           cd kernel_workspace/susfs4ksu
-          
-          # Build ksu_susfs tool
-          bash build_ksu_susfs_tool.sh || echo "ksu_susfs build may have issues, check logs"
-          
-          # Optional: Build KSU module
-          # bash build_ksu_module.sh
+          bash build_ksu_susfs_tool.sh 2>&1 | tee build_tools.log || echo "Tool build had issues"
 
       - name: Build kernel (${{ matrix.ks }})
         run: |
@@ -248,21 +306,33 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
           export KBUILD_BUILD_HOST=Github-Action
           export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
-
           BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
           EX_CMD="LD=ld.lld LLVM=1"
           DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
-
           make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
-          make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+          make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD 2>&1 | tee $GITHUB_WORKSPACE/build_log_${{ matrix.ks }}.txt
+
+      - name: Upload build log if failed
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-log-${{ matrix.ks }}
+          path: ${{ github.workspace }}/build_log_${{ matrix.ks }}.txt
+          retention-days: 7
 
       - name: Check kernel output
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
-
           if [ -f arch/arm64/boot/Image ]; then
             echo "CHECK_IMAGE=true" >> $GITHUB_ENV
             echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+            if [ -f ../fs/susfs.o ]; then
+              echo "SUSFS_COMPILED=yes" >> $GITHUB_ENV
+              echo "âœ“ SUSFS successfully compiled"
+            else
+              echo "SUSFS_COMPILED=no" >> $GITHUB_ENV
+              echo "âš  SUSFS not found"
+            fi
           else
             echo "Kernel output file is empty"
             exit 1
@@ -277,57 +347,73 @@ jobs:
           sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
           rm -rf AnyKernel3/.git* AnyKernel3/README.md
           cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
-          
-          # Copy SUSFS tools to AnyKernel3 if needed
           mkdir -p AnyKernel3/tools
-          cp susfs4ksu/ksu_module_susfs/tools/ksu_susfs_arm64 AnyKernel3/tools/ || true
-          cp susfs4ksu/ksu_module_susfs/tools/ksu_susfs_arm AnyKernel3/tools/ || true
-
+          cp susfs4ksu/ksu_module_susfs/tools/ksu_susfs_arm64 AnyKernel3/tools/ 2>/dev/null || true
+          cp susfs4ksu/ksu_module_susfs/tools/ksu_susfs_arm AnyKernel3/tools/ 2>/dev/null || true
+          cat > AnyKernel3/tools/README.txt << 'EOFREADME'
+          SUSFS Tools for KernelSU
+          =========================
+          Installation:
+          1. Flash this kernel
+          2. Copy ksu_susfs_arm64 to /data/adb/ksu/bin/
+          3. chmod 755 /data/adb/ksu/bin/ksu_susfs_arm64
+          4. Run 'ksu_susfs' in root shell
+          EOFREADME
           cd AnyKernel3
+          SUSFS_TAG=""
+          [ "${{ env.SUSFS_COMPILED }}" = "yes" ] && SUSFS_TAG="_SUSFS"
           if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-            zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-rsuntk_KSU_SUSFS_${{ env.RSKSUVER }}.zip ./*
+            ZIP_NAME="AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-rsuntk${SUSFS_TAG}_${{ env.RSKSUVER }}.zip"
           elif [ "${{ matrix.ks }}" = "ksun" ]; then
-            zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-ksun_KSU_SUSFS_${{ env.KSUNVER }}.zip ./*
+            ZIP_NAME="AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-ksun${SUSFS_TAG}_${{ env.KSUNVER }}.zip"
           else
-            zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-backslashxx_KSU_SUSFS_${{ env.XXKSUVER }}.zip ./*
+            ZIP_NAME="AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-backslashxx${SUSFS_TAG}_${{ env.XXKSUVER }}.zip"
           fi
+          zip -r "$ZIP_NAME" ./*
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
       - name: Upload Image artifact
         if: env.CHECK_IMAGE == 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: Image-${{ matrix.ks }}-SUSFS
+          name: Image-${{ matrix.ks }}
           path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
 
       - name: Upload AnyKernel3 ZIP
         uses: actions/upload-artifact@v6
         with:
-          name: AK3-${{ matrix.ks }}-SUSFS
-          path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_SUSFS_*.zip
+          name: AK3-${{ matrix.ks }}
+          path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/*.zip
 
       - name: Save build info
         run: |
           cd kernel_workspace
-          
           {
-            echo "BUILD_VARIANT=${{ matrix.ks }}"
-            echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
-            echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
-            echo "SUSFS_ENABLED=yes"
-            echo "KSU_PATCH_STATUS=$([ "${{ env.KSU_PATCH_FAILED }}" = "true" ] && echo "FAILED" || echo "SUCCESS")"
-            echo "KERNEL_PATCH_STATUS=$([ "${{ env.KERNEL_PATCH_FAILED }}" = "true" ] && echo "FAILED" || echo "SUCCESS")"
-            
+            echo "========================================="
+            echo "Build Information - ${{ matrix.ks }}"
+            echo "========================================="
+            echo "Build Variant: ${{ matrix.ks }}"
+            echo "Build Date: ${{ env.BUILD_TIME_1 }}"
+            echo "LineageOS Version: ${{ env.Lineage_VERSION }}"
+            echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
+            echo ""
             if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-              echo "RSKSUVER=${{ env.RSKSUVER }}"
+              echo "KSU Variant: rsuntk"
+              echo "KSU Version: ${{ env.RSKSUVER }}"
             elif [ "${{ matrix.ks }}" = "ksun" ]; then
-              echo "KSUNVER=${{ env.KSUNVER }}"
+              echo "KSU Variant: KernelSU-Next"
+              echo "KSU Version: ${{ env.KSUNVER }}"
             else
-              echo "XXKSUVER=${{ env.XXKSUVER }}"
+              echo "KSU Variant: backslashxx"
+              echo "KSU Version: ${{ env.XXKSUVER }}"
             fi
+            echo "SUSFS Compiled: ${{ env.SUSFS_COMPILED }}"
+            echo "Package: ${{ env.ZIP_NAME }}"
+            echo "========================================="
           } > build-info-${{ matrix.ks }}.txt
 
       - name: Upload build info
         uses: actions/upload-artifact@v6
         with:
-          name: INFO-${{ matrix.ks }}-SUSFS
+          name: INFO-${{ matrix.ks }}
           path: kernel_workspace/build-info-${{ matrix.ks }}.txt
