@@ -95,6 +95,7 @@ jobs:
         # Get version info
         NEXTKSUVER=$(cd KernelSU && git describe --tags --always)
         echo "NEXTKSUVER=$NEXTKSUVER" >> $GITHUB_ENV
+        fi
 
     - name: Apply SUSFS patch
       run: |
