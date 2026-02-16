@@ -1,373 +1,224 @@
-name: 1 Build LineageOS OPlus SM8250 Kernel with SUSFS
+name: A Test ABC Build LineageOS OPlus SM8250 Kernel with KSUN BB susfs
 
 on:
   workflow_dispatch:
 
 env:
-  TZ: Asia/Shanghai
-  CLANG_VERSION: clang-r547379
-  Lineage_VERSION: lineage-23.2
+  TZ: Asia/Kolkata
 
 jobs:
   build:
-    name: Build Kernel (${{ matrix.ks }})
+    name: Build Kernel by ${{ github.actor }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        ks: [next]
+        ks: [rsuntk, backslashxx, next]
+
+    env:
+      CLANG_VERSION: clang-r547379
+      Lineage_VERSION: lineage-23.2
 
     steps:
-      - uses: actions/checkout@v6
+    - uses: actions/checkout@v4
 
-      - name: Set swap to 10G
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 10
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
 
-      - name: Setup build kernel environment
-        run: |
-          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
-          echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
-          sudo apt-get update
-          sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
-          mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+    - name: Setup build environment
+      run: |
+        echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date "+%Y-%m-%d")" >> $GITHUB_ENV
+        sudo apt-get update
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-      - name: Cache Clang toolchain
-        id: cache-clang
-        uses: actions/cache@v5
-        with:
-          path: ${{ github.workspace }}/kernel_workspace/clang-aosp
-          key: ${{ env.CLANG_VERSION }}
+    - name: Cache Clang toolchain
+      id: cache-clang
+      uses: actions/cache@v5
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
 
-      - name: Download & extract Clang-aosp (if cache miss)
-        if: steps.cache-clang.outputs.cache-hit != 'true'
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
-          mkdir -p clang-aosp
-          wget -O ${CLANG_VERSION}.tar.gz \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
-          tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
+    - name: Download & extract Clang-aosp (if cache miss)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        mkdir -p clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
 
-      - name: Download kernel source
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
-          git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
+    - name: Download kernel source
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+          -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-      - name: Set up KernelSU-Next (${{ matrix.ks }})
-        run: |
-          cd kernel_workspace/android-kernel
+    - name: Setup KSUN + BB (for rsuntk and backslashxx)
+      if: matrix.ks != 'next'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
+        
+        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+          curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-rksu-master
+          RSKSUVER=$(cd KernelSU && git describe --tags --always)
+          echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+        elif [ "${{ matrix.ks }}" = "backslashxx" ]; then
+          curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/main/kernel/setup.sh" | bash -s susfs
+          XXKSUVER=$(cd KernelSU && git describe --tags --always)
+          echo "XXKSUVER=$XXKSUVER" >> $GITHUB_ENV
+        fi
 
-          if [ "${{ matrix.ks }}" = "next" ]; then
-            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-            wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-            sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-            bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          elif [ "${{ matrix.ks }}" = "rsuntk" ]; then
-            curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
-            bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
-            echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-            RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
-            echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
-          else
-            curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh | bash -s master
-            echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-            XXKSUVER=$(grep -oP 'KSU_VERSION\s*=\s*\K\d+' KernelSU/kernel/Makefile | tail -n1)
-            echo "XXKSUVER=$XXKSUVER" >> $GITHUB_ENV
-          fi
+    - name: Setup KernelSU-Next
+      if: matrix.ks == 'next'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        # Setup KernelSU-Next
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+        
+        # Setup Baseband Guard
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+        
+        # Apply patches
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
+        
+        # Get version info
+        NEXTKSUVER=$(cd KernelSU && git describe --tags --always)
+        echo "NEXTKSUVER=$NEXTKSUVER" >> $GITHUB_ENV
 
-          sed -i 's/ -dirty//g' scripts/setlocalversion
+    - name: Enable SUSFS configs
+      if: matrix.ks != 'next'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        cat <<EOF >> arch/arm64/configs/vendor/kona-perf_defconfig
+           CONFIG_KSU_MANUAL_HOOK=y
+           CONFIG_KSU_SUSFS=y
+           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+           CONFIG_KSU_SUSFS_SUS_PATH=y
+           CONFIG_KSU_SUSFS_SUS_MOUNT=y
+           CONFIG_KSU_SUSFS_SUS_KSTAT=y
+           CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+           CONFIG_KSU_SUSFS_ENABLE_LOG=y
+           CONFIG_KSU_SUSFS_SUS_SU=y
+        EOF
+        echo "[✓] SUSFS configs enabled"
 
-      - name: Apply SUSFS patch with inline fixes
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          
-          echo "=========================================="
-          echo "ðŸ“¦ Applying SUSFS Patch"
-          echo "=========================================="
-          
-          if [ ! -f "$GITHUB_WORKSPACE/patches/sus2.patch" ]; then
-            echo "âŒ ERROR: SUSFS patch file not found!"
-            exit 1
-          fi
-          
-          set +e
-          git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch
-          set -e
-          
-          echo ""
-          echo "=========================================="
-          echo "ðŸ”§ Applying Manual Fixes"
-          echo "=========================================="
-          
-          # Fix 1: fs/Makefile
-          echo ""
-          echo "â†’ Fixing fs/Makefile..."
-          if ! grep -q "CONFIG_KSU_SUSFS" fs/Makefile; then
-            awk '
-            /stack.o fs_struct.o statfs.o fs_pin.o nsfs.o/ {
-                print
-                getline
-                print
-                if ($0 ~ /fs_context.o fs_parser.o/) {
-                    print ""
-                    print "obj-$(CONFIG_KSU_SUSFS) += susfs.o"
-                } else {
-                    print ""
-                    print "obj-$(CONFIG_KSU_SUSFS) += susfs.o"
-                }
-                next
-            }
-            { print }
-            ' fs/Makefile > fs/Makefile.tmp && mv fs/Makefile.tmp fs/Makefile
-            echo "  âœ… Fixed"
-          else
-            echo "  âŠ˜ Already fixed"
-          fi
-          
-          # Fix 2: fs/namespace.c - includes
-          echo ""
-          echo "â†’ Fixing fs/namespace.c includes..."
-          if ! grep -q 'include <linux/susfs_def.h>' fs/namespace.c; then
-            if grep -q '#include <linux/fs_context.h>' fs/namespace.c; then
-              sed -i '/#include <linux\/fs_context\.h>/a\
-          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
-          #include <linux/susfs_def.h>\
-          #endif' fs/namespace.c
-              echo "  âœ… Fixed"
-            elif grep -q '#include <linux/sched/task.h>' fs/namespace.c; then
-              sed -i '/#include <linux\/sched\/task\.h>/a\
-          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
-          #include <linux/susfs_def.h>\
-          #endif' fs/namespace.c
-              echo "  âœ… Fixed"
-            else
-              echo "  âŒ Failed!"
-              exit 1
-            fi
-          else
-            echo "  âŠ˜ Already fixed"
-          fi
-          
-          # Fix 3: fs/namespace.c - declarations
-          echo ""
-          echo "â†’ Fixing fs/namespace.c declarations..."
-          if ! grep -q "extern bool susfs_is_current_ksu_domain" fs/namespace.c; then
-            sed -i '/#include "internal\.h"/a\
-          \
-          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
-          extern bool susfs_is_current_ksu_domain(void);\
-          extern bool susfs_is_sdcard_android_data_decrypted;\
-          \
-          static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);\
-          \
-          #define CL_COPY_MNT_NS BIT(25)\
-          #endif' fs/namespace.c
-            echo "  âœ… Fixed"
-          else
-            echo "  âŠ˜ Already fixed"
-          fi
-          
-          # Fix 4: fs/proc/task_mmu.c
-          echo ""
-          echo "â†’ Fixing fs/proc/task_mmu.c..."
-          if ! grep -q "CONFIG_KSU_SUSFS_SUS_MAP" fs/proc/task_mmu.c; then
-            sed -i '/while.*count.*start_vaddr.*end_vaddr/,/^[[:space:]]*}/ {
-                /mmap_read_unlock(mm);/ {
-                    a\
-          #ifdef CONFIG_KSU_SUSFS_SUS_MAP\
-          \t\tvma = find_vma(mm, start_vaddr);\
-          \t\tif (vma && vma->vm_file) {\
-          \t\t\tstruct inode *inode = file_inode(vma->vm_file);\
-          \t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\
-          \t\t\t\tpm.buffer->pme = 0;\
-          \t\t\t}\
-          \t\t}\
-          #endif
-                }
-            }' fs/proc/task_mmu.c
-            echo "  âœ… Fixed"
-          else
-            echo "  âŠ˜ Already fixed"
-          fi
-          
-          # Fix 5: include/linux/mount.h
-          echo ""
-          echo "â†’ Fixing include/linux/mount.h..."
-          if [ -f include/linux/mount.h ]; then
-            if ! grep -q "unsigned long ksu_mnt;" include/linux/mount.h; then
-              sed -i '/void \*data;/a\
-          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
-          \tunsigned long ksu_mnt;\
-          #endif' include/linux/mount.h
-              echo "  âœ… Fixed"
-            else
-              echo "  âŠ˜ Already fixed"
-            fi
-          else
-            echo "  âš ï¸  File not found"
-          fi
-          
-          # Cleanup
-          find . -name "*.rej" -delete 2>/dev/null || true
-          find . -name "*.orig" -delete 2>/dev/null || true
-          
-          echo ""
-          echo "=========================================="
-          echo "âœ… Fixes Complete"
-          echo "=========================================="
+    - name: Enable KernelSU-Next configs
+      if: matrix.ks == 'next'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        cat <<EOF >> arch/arm64/configs/vendor/kona-perf_defconfig
+           CONFIG_KSU=y
+           CONFIG_KSU_MANUAL_HOOK=y
+        EOF
+        echo "[✓] KernelSU-Next configs enabled"
 
-      - name: Verify SUSFS Integration
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          
-          echo ""
-          echo "=========================================="
-          echo "ðŸ” VERIFYING SUSFS INTEGRATION"
-          echo "=========================================="
-          echo ""
-          
-          FAILED=0
-          
-          [ -f "fs/susfs.c" ] && echo "  âœ… fs/susfs.c" || { echo "  âŒ fs/susfs.c"; FAILED=1; }
-          [ -f "include/linux/susfs.h" ] && echo "  âœ… susfs.h" || { echo "  âŒ susfs.h"; FAILED=1; }
-          [ -f "include/linux/susfs_def.h" ] && echo "  âœ… susfs_def.h" || { echo "  âŒ susfs_def.h"; FAILED=1; }
-          
-          grep -q "CONFIG_KSU_SUSFS" fs/Makefile && echo "  âœ… fs/Makefile" || { echo "  âŒ fs/Makefile"; FAILED=1; }
-          grep -q 'include <linux/susfs_def.h>' fs/namespace.c && echo "  âœ… namespace.c includes" || { echo "  âŒ namespace.c includes"; FAILED=1; }
-          grep -q "extern bool susfs_is_current_ksu_domain" fs/namespace.c && echo "  âœ… namespace.c declarations" || { echo "  âŒ namespace.c declarations"; FAILED=1; }
-          grep -q "CONFIG_KSU_SUSFS_SUS_MAP" fs/proc/task_mmu.c && echo "  âœ… task_mmu.c" || { echo "  âŒ task_mmu.c"; FAILED=1; }
-          grep -q "CONFIG_KSU_SUSFS_SUS_PATH" fs/namei.c && echo "  âœ… namei.c" || { echo "  âŒ namei.c"; FAILED=1; }
-          
-          [ $(find . -name "*.rej" 2>/dev/null | wc -l) -eq 0 ] && echo "  âœ… No .rej files" || { echo "  âŒ .rej files exist"; FAILED=1; }
-          
-          echo ""
-          if [ $FAILED -eq 0 ]; then
-            echo "âœ… VERIFICATION PASSED"
-          else
-            echo "âŒ VERIFICATION FAILED - Build aborted"
-            exit 1
-          fi
+    - name: Build kernel
+      run: |
+        cd kernel_workspace/android-kernel
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
 
-      - name: Enable SUSFS configs
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          
-          echo "âš™ï¸  Enabling SUSFS configs..."
-          
-          cat >> arch/arm64/configs/vendor/kona-perf_defconfig << 'SUSFS_EOF'
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_SUS_SU=y
-          CONFIG_KSU_SUSFS_SUS_MAPS=y
-          SUSFS_EOF
-          
-          echo "âœ… SUSFS configs enabled"
-          grep "CONFIG_KSU_SUSFS" arch/arm64/configs/vendor/kona-perf_defconfig | head -5
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
 
-      - name: Build kernel
-        run: |
-          cd kernel_workspace/android-kernel
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export BRAND_SHOW_FLAG=oneplus
-          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-          export KBUILD_BUILD_HOST=Github-Action
-          export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+        
+        # Get kernel version
+        KERNEL_VERSION=$(make O=out CC=clang kernelrelease | tail -n1)
+        echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
 
-          make O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 vendor/kona-perf_defconfig vendor/oplus.config
-          make -j$(nproc --all) O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1
+    - name: Check kernel output
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+        else
+          echo "Kernel build failed"
+          exit 1
+        fi
 
-      - name: Verify SUSFS in kernel
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-          
-          echo "ðŸ” Checking built kernel config..."
-          
-          if grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
-            echo "âœ… CONFIG_KSU_SUSFS is enabled"
-          else
-            echo "âš ï¸  CONFIG_KSU_SUSFS not found in .config"
-          fi
-          
-          echo ""
-          echo "SUSFS configs in built kernel:"
-          grep "CONFIG_KSU_SUSFS" out/.config || echo "None found"
+    - name: Setup AnyKernel3
+      if: env.CHECK_IMAGE == 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+        cd AnyKernel3
+        
+        # Copy kernel Image
+        cp $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/arch/arm64/boot/Image ./
+        
+        # Set version string based on matrix
+        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+          VERSION_STR="${{ env.RSKSUVER }}"
+        elif [ "${{ matrix.ks }}" = "backslashxx" ]; then
+          VERSION_STR="${{ env.XXKSUVER }}"
+        elif [ "${{ matrix.ks }}" = "next" ]; then
+          VERSION_STR="${{ env.NEXTKSUVER }}"
+        fi
+        
+        # Create ZIP file
+        ZIP_NAME="AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_${VERSION_STR}_${{ env.BUILD_TIME }}.zip"
+        zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder
+        
+        echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
-      - name: Check kernel output
-        run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+    - name: Upload Image
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: Image-${{ matrix.ks }}
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
 
-          if [ -f arch/arm64/boot/Image ]; then
-            echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-            echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
-            echo "âœ… Kernel built: $(du -h arch/arm64/boot/Image | cut -f1)"
-          else
-            echo "âŒ Build failed"
-            exit 1
-          fi
+    - name: Upload AnyKernel3 ZIP
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: AK3-${{ matrix.ks }}
+        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/${{ env.ZIP_NAME }}
 
-      - name: Package AnyKernel3
-        run: |
-          cd kernel_workspace
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
-          sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
-          sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
-          rm -rf AnyKernel3/.git* AnyKernel3/README.md
-          cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+    - name: Save build info
+      run: |
+        cd kernel_workspace
+        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+          {
+            echo "RSKSUVER=${{ env.RSKSUVER }}"
+            echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+            echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          } > build-info-${{ matrix.ks }}.txt
+        elif [ "${{ matrix.ks }}" = "backslashxx" ]; then
+          {
+            echo "XXKSUVER=${{ env.XXKSUVER }}"
+            echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+            echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          } > build-info-${{ matrix.ks }}.txt
+        elif [ "${{ matrix.ks }}" = "next" ]; then
+          {
+            echo "NEXTKSUVER=${{ env.NEXTKSUVER }}"
+            echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+            echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          } > build-info-${{ matrix.ks }}.txt
+        fi
 
-          cd AnyKernel3
-          ZIP_NAME="AK3-${{ env.Lineage_VERSION }}-SM8250-${{ matrix.ks }}-SUSFS-${{ env.BUILD_TIME }}.zip"
-          zip -r9 "$ZIP_NAME" ./* -x .git README.md
-          
-          echo "âœ… Created: $ZIP_NAME"
-          ls -lh "$ZIP_NAME"
-
-      - name: Upload Image
-        if: env.CHECK_IMAGE == 'true'
-        uses: actions/upload-artifact@v6
-        with:
-          name: Image-${{ matrix.ks }}-${{ env.BUILD_TIME }}
-          path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
-
-      - name: Upload AnyKernel3 ZIP
-        uses: actions/upload-artifact@v6
-        with:
-          name: AK3-${{ matrix.ks }}-${{ env.BUILD_TIME }}
-          path: kernel_workspace/AnyKernel3/*.zip
-
-      - name: Upload build info
-        run: |
-          cd kernel_workspace
-          cat > build-info.txt << 'INFO_EOF'
-          ==========================================
-          Kernel Build Information
-          ==========================================
-          Variant: ${{ matrix.ks }}
-          Version: ${{ env.KERNEL_VERSION }}
-          Build Date: ${{ env.BUILD_TIME_1 }}
-          
-          Features:
-            âœ… KernelSU/KernelSU-Next
-            âœ… SUSFS (Verified)
-            âœ… Baseband Guard
-          
-          Device: OnePlus 9R/9 Pro (SM8250)
-          ==========================================
-          INFO_EOF
-
-      - name: Upload info
-        uses: actions/upload-artifact@v6
-        with:
-          name: INFO-${{ matrix.ks }}-${{ env.BUILD_TIME }}
-          path: kernel_workspace/build-info.txt
+    - name: Upload build info
+      uses: actions/upload-artifact@v4
+      with:
+        name: INFO-${{ matrix.ks }}
+        path: kernel_workspace/build-info-${{ matrix.ks }}.txt
