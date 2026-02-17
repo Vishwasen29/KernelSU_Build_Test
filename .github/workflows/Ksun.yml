@@ -81,6 +81,28 @@ jobs:
         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
 
+    - name: Apply SUSFS patch
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        set +e
+        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch || true
+
+        #bash $GITHUB_WORKSPACE/patches/fix1.sh
+    - name: Upload reject files
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+       name: patch-reject-files
+       path: kernel_workspace/android-kernel/**/*.rej
+
+    - name: Check for patch reject files
+      if: always()
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        echo "Searching for .rej files..."
+        find . -name "*.rej"
+        echo "Exit code: $?"
+
     - name: Enable SUSFS configs
       if: matrix.ks != 'next'
       run: |
