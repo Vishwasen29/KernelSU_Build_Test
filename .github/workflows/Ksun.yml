@@ -69,7 +69,7 @@ jobs:
         git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
     - name: Setup KernelSU
-     run: |
+      run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy/setup.sh" | bash -s legacy
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
@@ -86,21 +86,20 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         cat <<EOF >> arch/arm64/configs/vendor/kona-perf_defconfig
-           CONFIG_KSU_MANUAL_HOOK=y
-           CONFIG_KSU_SUSFS=y
-           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-           CONFIG_KSU_SUSFS_SUS_PATH=y
-           CONFIG_KSU_SUSFS_SUS_MOUNT=y
-           CONFIG_KSU_SUSFS_SUS_KSTAT=y
-           CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-           CONFIG_KSU_SUSFS_ENABLE_LOG=y
-           CONFIG_KSU_SUSFS_SUS_SU=y
+        CONFIG_KSU_MANUAL_HOOK=y
+        CONFIG_KSU_SUSFS=y
+        CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+        CONFIG_KSU_SUSFS_SUS_PATH=y
+        CONFIG_KSU_SUSFS_SUS_MOUNT=y
+        CONFIG_KSU_SUSFS_SUS_KSTAT=y
+        CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+        CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+        CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+        CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+        CONFIG_KSU_SUSFS_ENABLE_LOG=y
+        CONFIG_KSU_SUSFS_SUS_SU=y
         EOF
         echo "[✓] SUSFS configs enabled"
-        
 
     - name: Build kernel with KSUN
       run: |
@@ -119,15 +118,15 @@ jobs:
     
     - name: Check a kernel output files with rsuntk KernelSU
       run: |
-       cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
-       if [ -f arch/arm64/boot/Image ]; then
-           echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-           KERNEL_VERSION=$(cat include/config/kernel.release)
-           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
-       else
-           echo "Kernel output file is empty"
-           exit 1
-       fi
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+        if [ -f arch/arm64/boot/Image ]; then
+            echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+            KERNEL_VERSION=$(cat include/config/kernel.release)
+            echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+        else
+            echo "Kernel output file is empty"
+            exit 1
+        fi
       
     - name: Make AnyKernel3 with KSUN
       if: ${{ env.CHECK_IMAGE == 'true' }}
