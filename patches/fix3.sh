@@ -302,6 +302,18 @@ info "Patching $TASK_MMU ..."
 [ -f "$TASK_MMU" ] || error "File not found: $TASK_MMU"
 backup "$TASK_MMU"
 
+# =============================================================================
+# 4. fs/proc/task_mmu.c
+#    4a. Insert the SUS_MAP block after up_read(&mm->mmap_sem)
+#        Uses strip-based matching to handle blank lines between the two targets
+#    4b. Only declare 'vma' if the SUS_MAP block was actually inserted —
+#        declaring it without the block causes: unused variable 'vma' error
+# =============================================================================
+TASK_MMU="fs/proc/task_mmu.c"
+info "Patching $TASK_MMU ..."
+[ -f "$TASK_MMU" ] || error "File not found: $TASK_MMU"
+backup "$TASK_MMU"
+
 python3 - "$TASK_MMU" <<'PYEOF'
 import sys, re
 
@@ -321,41 +333,54 @@ sus_map_block = (
     '#endif\n'
 )
 
-# 4a: Insert SUS_MAP block
+sus_map_inserted = False
+
+# 4a: Insert SUS_MAP block using strip-based matching so blank lines between
+#     up_read() and start_vaddr = end; don't break the search.
 if 'CONFIG_KSU_SUSFS_SUS_MAP' not in content and 'BIT_SUS_MAPS' not in content:
-    target_after  = '\t\tup_read(&mm->mmap_sem);\n'
-    target_before = '\t\tstart_vaddr = end;\n'
     lines = content.splitlines(keepends=True)
     new_lines = []
     inserted = False
     i = 0
     while i < len(lines):
-        new_lines.append(lines[i])
-        if lines[i] == target_after and not inserted:
+        if lines[i].strip() == 'up_read(&mm->mmap_sem);' and not inserted:
+            # Look ahead up to 10 lines for start_vaddr = end; (skip blanks)
+            found_j = -1
             for j in range(i + 1, min(i + 10, len(lines))):
-                if lines[j] == target_before:
-                    new_lines.append(sus_map_block)
-                    inserted = True
+                if lines[j].strip() == 'start_vaddr = end;':
+                    found_j = j
                     break
+            if found_j >= 0:
+                # Emit up_read line
+                new_lines.append(lines[i])
+                # Emit any lines between up_read and start_vaddr (blank lines etc)
+                for k in range(i + 1, found_j):
+                    new_lines.append(lines[k])
+                # Insert SUS_MAP block before start_vaddr = end
+                new_lines.append(sus_map_block)
+                # Emit start_vaddr = end
+                new_lines.append(lines[found_j])
+                i = found_j + 1
+                inserted = True
+                continue
+        new_lines.append(lines[i])
         i += 1
+
     if inserted:
         content = ''.join(new_lines)
+        sus_map_inserted = True
         print("[+] task_mmu.c 4a (SUS_MAP block) inserted.")
     else:
-        print("[!] task_mmu.c 4a: could not find up_read/start_vaddr pattern.")
-        print("    Manually insert SUS_MAP block after up_read(&mm->mmap_sem) in pagemap_read().")
+        print("[!] task_mmu.c 4a: could not find up_read/start_vaddr — manual insert required.")
 else:
+    sus_map_inserted = True
     print("[!] task_mmu.c 4a: SUS_MAP block already present, skipping.")
 
-# 4b: Fix unused variable 'vma' compile error
-# The SUS_MAP block references 'vma' but it may not be declared in pagemap_read().
-# Find pagemap_read() and add 'struct vm_area_struct *vma = NULL;' after the
-# first local variable declaration inside the function.
-if 'CONFIG_KSU_SUSFS_SUS_MAP' in content or 'BIT_SUS_MAPS' in content:
-    func_match = re.search(
-        r'static ssize_t pagemap_read\s*\([^{]*\{',
-        content, re.DOTALL
-    )
+# 4b: Add vma declaration inside pagemap_read() ONLY if SUS_MAP block is present.
+#     If we add the declaration without the block, the compiler sees an unused
+#     variable and fails with -Werror. Only declare it if we need it.
+if sus_map_inserted and ('CONFIG_KSU_SUSFS_SUS_MAP' in content or 'BIT_SUS_MAPS' in content):
+    func_match = re.search(r'static ssize_t pagemap_read\s*\([^{]*\{', content, re.DOTALL)
     if func_match:
         func_start = func_match.end()
         snippet = content[func_start:func_start + 3000]
@@ -377,14 +402,15 @@ if 'CONFIG_KSU_SUSFS_SUS_MAP' in content or 'BIT_SUS_MAPS' in content:
                         in_func = False
             if inserted_decl:
                 content = ''.join(new_lines)
-                print("[+] task_mmu.c 4b (vma declaration) added — fixes unused-variable error.")
+                print("[+] task_mmu.c 4b (vma declaration) added.")
             else:
-                print("[!] task_mmu.c 4b: could not auto-insert vma declaration.")
-                print("    Manually add 'struct vm_area_struct *vma = NULL;' inside pagemap_read().")
+                print("[!] task_mmu.c 4b: could not insert vma declaration — manual fix required.")
         else:
-            print("[!] task_mmu.c 4b: vma already declared in pagemap_read(), skipping.")
+            print("[!] task_mmu.c 4b: vma already declared, skipping.")
     else:
         print("[!] task_mmu.c 4b: could not locate pagemap_read() — manual fix required.")
+elif not sus_map_inserted:
+    print("[!] task_mmu.c 4b: skipping vma declaration — SUS_MAP block not present (would cause unused-variable error).")
 
 with open(filepath, 'w') as f:
     f.write(content)
@@ -405,3 +431,35 @@ echo "    2. Run: bash \$GITHUB_WORKSPACE/patches/fix3.sh   ← this script"
 echo "    3. Run: <your existing SuSFS patch step>"
 echo "    4. Build"
 info "==================================================="
+
+# =============================================================================
+# 5. drivers/kernelsu/supercalls.c
+#    The rsuntk KernelSU driver references CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS
+#    and susfs_set_hide_sus_mnts_for_all_procs which don't exist in the sus2.patch.
+#    This is a version mismatch between the KSU driver and the SuSFS patch.
+#    Fix: add a compat stub in include/linux/susfs.h so the driver compiles.
+# =============================================================================
+SUSFS_H="include/linux/susfs.h"
+info "Checking $SUSFS_H for supercalls compat stubs ..."
+
+if [ ! -f "$SUSFS_H" ]; then
+    warn "$SUSFS_H not found — SuSFS patch may not have been applied yet. Skipping."
+else
+    if grep -q "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS\|susfs_set_hide_sus_mnts_for_all_procs" "$SUSFS_H"; then
+        info "supercalls compat already present in $SUSFS_H, skipping."
+    else
+        # Append compat defines and inline stub to the end of susfs.h
+        cat >> "$SUSFS_H" << 'STUBEOF'
+
+/* ---- Compat stubs for rsuntk KernelSU driver version mismatch ---- */
+#ifndef CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS
+#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS 0x55550019
+#endif
+#ifndef susfs_set_hide_sus_mnts_for_all_procs
+static inline void susfs_set_hide_sus_mnts_for_all_procs(u64 enabled) {}
+#endif
+/* ------------------------------------------------------------------ */
+STUBEOF
+        info "$SUSFS_H — compat stubs added for CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS."
+    fi
+fi
