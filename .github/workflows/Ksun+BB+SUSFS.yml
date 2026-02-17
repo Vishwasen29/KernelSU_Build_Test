@@ -63,17 +63,43 @@ jobs:
     - name: Setup KSUN + BB
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+        #curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-rksu-master
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-rksu-master
+        
         #bash $GITHUB_WORKSPACE/patches/syacall_hook.sh
         #bash $GITHUB_WORKSPACE/patches/sus_inline.sh
 
+    - name: Apply SUSFS patch
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        set +e
+        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch || true
+
+        #bash $GITHUB_WORKSPACE/patches/fix1.sh
     
 
-    
+    - name: Applying susfs fixes
+      run: |
+
+        bash $GITHUB_WORKSPACE/patches/fix3.sh
+
+    - name: Upload reject files
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+       name: patch-reject-files
+       path: kernel_workspace/android-kernel/**/*.rej
+
+    - name: Check for patch reject files
+      if: always()
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        echo "Searching for .rej files..."
+        find . -name "*.rej"
+        echo "Exit code: $?"
     - name: Enable SUSFS configs
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
