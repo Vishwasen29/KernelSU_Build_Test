@@ -50,7 +50,7 @@ backup() {
 # 1. fs/Makefile
 #    The patch adds susfs.o to the obj-y list but fails because the Makefile
 #    line wraps differently in this kernel tree.
-#    Fix: append susfs.o to the line containing nsfs.o.
+#    Fix: insert 'obj-y += susfs.o' after the obj-y block ends safely.
 # =============================================================================
 MAKEFILE="fs/Makefile"
 info "Patching $MAKEFILE ..."
@@ -59,13 +59,40 @@ backup "$MAKEFILE"
 
 if grep -q "susfs.o" "$MAKEFILE"; then
     warn "$MAKEFILE already contains susfs.o, skipping."
-elif grep -q "nsfs\.o" "$MAKEFILE"; then
-    sed -i '/nsfs\.o/s/$/ susfs.o/' "$MAKEFILE"
-    info "$MAKEFILE patched — susfs.o added to obj-y."
 else
-    warn "Could not find 'nsfs.o' anchor in $MAKEFILE — trying fallback."
-    sed -i '/^obj-y.*:=/a obj-y += susfs.o' "$MAKEFILE"
-    warn "Used fallback for $MAKEFILE — verify manually if build fails."
+    # The patch adds susfs.o to the obj-y list. We cannot safely inline it into
+    # a multi-line obj-y block (lines ending with \) as that corrupts Makefile
+    # syntax. Instead, find where the first obj-y block ends and insert a
+    # standalone 'obj-y += susfs.o' line immediately after it.
+    python3 - "$MAKEFILE" <<'PYEOF'
+import sys
+filepath = sys.argv[1]
+with open(filepath, 'r') as f:
+    lines = f.readlines()
+
+in_block = False
+insert_after = -1
+for i, line in enumerate(lines):
+    stripped = line.rstrip('\n')
+    if not in_block and 'obj-y' in stripped and ':=' in stripped:
+        in_block = True
+    if in_block:
+        if stripped.rstrip().endswith('\\'):
+            insert_after = i
+        else:
+            insert_after = i
+            break
+
+if insert_after >= 0:
+    lines.insert(insert_after + 1, 'obj-y += susfs.o\n')
+    with open(filepath, 'w') as f:
+        f.writelines(lines)
+    print("[+] fs/Makefile patched — susfs.o added after obj-y block.")
+else:
+    with open(filepath, 'a') as f:
+        f.write('\nobj-y += susfs.o\n')
+    print("[!] fs/Makefile: used fallback append.")
+PYEOF
 fi
 
 # =============================================================================
