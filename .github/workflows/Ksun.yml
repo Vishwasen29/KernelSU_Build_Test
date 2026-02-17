@@ -71,7 +71,7 @@ jobs:
     - name: Set up KSUN
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+        curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/kernel/setup.sh" | bash -s legacy
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
@@ -80,6 +80,27 @@ jobs:
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
+
+    - name: Enable SUSFS configs
+      if: matrix.ks != 'next'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        cat <<EOF >> arch/arm64/configs/vendor/kona-perf_defconfig
+           CONFIG_KSU_MANUAL_HOOK=y
+           CONFIG_KSU_SUSFS=y
+           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+           CONFIG_KSU_SUSFS_SUS_PATH=y
+           CONFIG_KSU_SUSFS_SUS_MOUNT=y
+           CONFIG_KSU_SUSFS_SUS_KSTAT=y
+           CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+           CONFIG_KSU_SUSFS_ENABLE_LOG=y
+           CONFIG_KSU_SUSFS_SUS_SU=y
+        EOF
+        echo "[✓] SUSFS configs enabled"
+        
 
     - name: Build kernel with KSUN
       run: |
