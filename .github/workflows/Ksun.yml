@@ -13,7 +13,7 @@ jobs:
     env:
       CLANG_VERSION: clang-r547379
       GCC_TAG: android-12.1.0_r27
-      Lineage_VERSION: lineage-23.0
+      Lineage_VERSION: lineage-23.2
 
     steps:
     - uses: actions/checkout@v6
