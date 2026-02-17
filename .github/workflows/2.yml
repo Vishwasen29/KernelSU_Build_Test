@@ -1,4 +1,4 @@
-name: A Build LineageOS OPlus SM8250 Kernel with KSUN
+name: AB Build LineageOS OPlus SM8250 Kernel with KSUN
 
 on:
   workflow_dispatch:
