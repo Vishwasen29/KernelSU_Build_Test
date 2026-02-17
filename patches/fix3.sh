@@ -21,13 +21,18 @@ warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
 error()   { echo -e "${RED}[-]${NC} $1"; exit 1; }
 
 # GitHub Actions kernel source root
-KERNEL_DIR="${GITHUB_WORKSPACE}/device_kernel"
+KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/android-kernel"
 cd "$KERNEL_DIR" || error "Could not cd into $KERNEL_DIR — is GITHUB_WORKSPACE set?"
 
 # Make sure we're in a kernel source tree
 [ -f "Makefile" ] || error "Makefile not found in $KERNEL_DIR — is this the right kernel path?"
 
 info "Working directory: $(pwd)"
+
+# Clean up any leftover .rej files from previous runs so they don't confuse the build
+info "Cleaning up any leftover .rej and .orig files from previous runs..."
+find . -name "*.rej" -delete
+find . -name "*.orig" -delete
 
 BACKUP_DIR="${KERNEL_DIR}/.susfs_fix_backups"
 mkdir -p "$BACKUP_DIR"
@@ -306,10 +311,11 @@ for f in "$BACKUP_DIR"/*.bak; do
 done
 info "==================================================="
 info "Next steps:"
-echo "  1. Add this script to your repo root and add a workflow step before the SuSFS patch step:"
+echo "  1. Commit this script to your repo at: patches/fix3.sh"
+echo "     Make sure the workflow step runs it BEFORE the SuSFS patch step:"
 echo ""
 echo "     - name: Fix SuSFS reject hunks"
-echo "       run: bash \${{ github.workspace }}/fix_susfs_rejects.sh"
+echo "       run: bash \$GITHUB_WORKSPACE/patches/fix3.sh"
 echo ""
 echo "  2. Re-run your build."
 echo "  3. If errors remain, check the [!] warnings above for files needing manual edits."
