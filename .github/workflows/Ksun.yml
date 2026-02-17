@@ -68,17 +68,17 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace
         git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    - name: Set up KSUN
-      run: |
+    - name: Setup KernelSU
+     run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/kernel/setup.sh" | bash -s legacy
+        curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy/setup.sh" | bash -s legacy
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         KSU_VERSION=$(cd KernelSU-Next && expr $(/usr/bin/git rev-list --count HEAD) + 30000)
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-        cd scripts
+         cd scripts
         sed -i 's/ -dirty//g' setlocalversion
 
     - name: Enable SUSFS configs
