@@ -72,6 +72,12 @@ jobs:
         #bash $GITHUB_WORKSPACE/patches/syacall_hook.sh
         #bash $GITHUB_WORKSPACE/patches/sus_inline.sh
 
+
+    - name: Applying susfs fixes
+      run: |
+
+        bash $GITHUB_WORKSPACE/patches/fix3.sh
+        
     - name: Apply SUSFS patch
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
@@ -81,10 +87,7 @@ jobs:
         #bash $GITHUB_WORKSPACE/patches/fix1.sh
     
 
-    - name: Applying susfs fixes
-      run: |
-
-        bash $GITHUB_WORKSPACE/patches/fix3.sh
+  
 
     - name: Upload reject files
       if: always()
