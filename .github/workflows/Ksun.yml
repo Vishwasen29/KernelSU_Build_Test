@@ -78,7 +78,7 @@ jobs:
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         KSU_VERSION=$(cd KernelSU-Next && expr $(/usr/bin/git rev-list --count HEAD) + 30000)
         echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-         cd scripts
+        cd scripts
         sed -i 's/ -dirty//g' setlocalversion
 
     - name: Enable SUSFS configs
