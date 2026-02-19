@@ -1,4 +1,4 @@
-name: 2 Build LineageOS OPlus SM8250 Kernel
+name: 1 Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
@@ -63,8 +63,7 @@ jobs:
         cd kernel_workspace/android-kernel
 
         if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-          #curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+          curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
@@ -80,23 +79,6 @@ jobs:
         fi
 
         sed -i 's/ -dirty//g' scripts/setlocalversion
-
-    - name: add susfs to kconfig
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        bash $GITHUB_WORKSPACE/patches/config.sh
-      
-
-    - name: Ensure SUSFS Kconfig is sourced
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-
-        if ! grep -q "KernelSU-Next/kernel/Kconfig" security/Kconfig; then
-          echo 'source "KernelSU-Next/kernel/Kconfig"' >> security/Kconfig
-          echo "[OK] KernelSU-Next Kconfig sourced into security/Kconfig"
-        else
-          echo "[OK] Kconfig already sourced"
-        fi
 
     - name: Apply SUSFS patch
       run: |
@@ -116,8 +98,6 @@ jobs:
     - name: Verify SUSFS source integration (pre-build)
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        grep -R "config KSU_SUSFS" .
-        grep -R "susfs4ksu" .
         echo "================================================"
         echo " SUSFS Pre-Build Source Check"
         echo "================================================"
@@ -162,16 +142,15 @@ jobs:
           && check "No leftover .rej files" ok \
           || { echo "  [FAIL] Leftover .rej files:"; echo "$REJ" | sed 's/^/         /'; FAIL=$((FAIL+1)); }
 
-        # Verify KernelSU/kernel/Kconfig has SUSFS entries
-        # (these must exist BEFORE make defconfig for configs to be recognised)
-        # Verify SUSFS Kconfig entries exist anywhere in tree
-        if grep -R -q "config KSU_SUSFS" .; then
-         check "SUSFS Kconfig entries exist in kernel tree" ok
+        # Verify SUSFS Kconfig entries exist somewhere in the tree
+        # backslashxx uses drivers/kernelsu/Kconfig
+        # rsuntk/sidex15 uses KernelSU/kernel/Kconfig
+        if grep -rq "config KSU_SUSFS" KernelSU/kernel/Kconfig 2>/dev/null || \
+           grep -rq "config KSU_SUSFS" drivers/kernelsu/Kconfig 2>/dev/null; then
+          check "SUSFS Kconfig entries found in KernelSU tree" ok
         else
-         check "SUSFS Kconfig entries exist in kernel tree" fail
-        fi 
-        
-
+          check "SUSFS Kconfig entries found in KernelSU tree (patch to KSU missing)" fail
+        fi
 
         echo "------------------------------------------------"
         echo "  Result: $FAIL failure(s)"
@@ -215,42 +194,37 @@ jobs:
     #   scripts/config operates directly on out/.config AFTER Kconfig is fully
     #   loaded, so it correctly enables configs and resolves dependencies.
     # -------------------------------------------------------------------------
-    - name: Enable SUSFS configs properly
+    - name: Enable SUSFS configs in .config
       run: |
-        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        CFG="./scripts/config --file out/.config"
 
+        echo "Enabling SUSFS configs via scripts/config..."
+        $CFG -e CONFIG_KSU_SUSFS
+        $CFG -e CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+        $CFG -e CONFIG_KSU_SUSFS_SUS_PATH
+        $CFG -e CONFIG_KSU_SUSFS_SUS_MOUNT
+        $CFG -e CONFIG_KSU_SUSFS_SUS_KSTAT
+        $CFG -e CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+        $CFG -e CONFIG_KSU_SUSFS_TRY_UMOUNT
+        $CFG -e CONFIG_KSU_SUSFS_SPOOF_UNAME
+        $CFG -e CONFIG_KSU_SUSFS_OPEN_REDIRECT
+        $CFG -e CONFIG_KSU_SUSFS_ENABLE_LOG
+        $CFG -e CONFIG_KSU_SUSFS_SUS_SU
+        $CFG -e CONFIG_KSU_SUSFS_SUS_MAP
+
+        # Run olddefconfig to resolve any newly-introduced dependencies
         export ARCH=arm64
-        export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        make O=out CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
+          olddefconfig
 
-        CONFIG_FILE="out/.config"
-
-        # Enable base KSU
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU
-
-        # Enable SUSFS configs
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_PATH
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_MOUNT
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_KSTAT
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_OVERLAYFS
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_TRY_UMOUNT
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SPOOF_UNAME
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_OPEN_REDIRECT
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_ENABLE_LOG
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_SU
-        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_MAP
-
-        # Resolve dependencies properly
-        make O=out olddefconfig
-
-        echo "[OK] SUSFS configs applied correctly"
+        echo "[OK] SUSFS configs applied"
 
     # -------------------------------------------------------------------------
     # Now verify every SUSFS config is =y in the resolved .config
     # -------------------------------------------------------------------------
-    
-    
     - name: Verify SUSFS configs in .config (pre-compile)
       run: |
         CONFIG=$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/.config
