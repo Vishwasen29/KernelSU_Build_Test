@@ -1,4 +1,4 @@
-name: 6 Build LineageOS OPlus SM8250 Kernel (KernelSU-Next Legacy)
+name: A Build LineageOS OPlus SM8250 Kernel (KernelSU-Next Legacy + SUSFS)
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
         swap-size-gb: 10
 
     # ---------------------------------------------------------
-    # Dependencies
+    # Install dependencies
     # ---------------------------------------------------------
     - name: Install build dependencies
       run: |
@@ -39,7 +39,7 @@ jobs:
         mkdir -p kernel_workspace
 
     # ---------------------------------------------------------
-    # Cache Clang
+    # Cache clang
     # ---------------------------------------------------------
     - name: Cache Clang toolchain
       id: cache-clang
@@ -58,9 +58,9 @@ jobs:
         tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
 
     # ---------------------------------------------------------
-    # Clone Kernel Source
+    # Clone kernel source
     # ---------------------------------------------------------
-    - name: Clone Lineage Kernel
+    - name: Clone Lineage kernel
       run: |
         cd kernel_workspace
         git clone --depth=1 --recursive \
@@ -68,12 +68,13 @@ jobs:
           -b ${{ env.Lineage_VERSION }} android-kernel
 
     # ---------------------------------------------------------
-    # Setup KernelSU-Next (LEGACY)
+    # Setup KernelSU-Next (legacy)
     # ---------------------------------------------------------
     - name: Setup KernelSU-Next (legacy)
       run: |
         cd kernel_workspace/android-kernel
 
+        echo "[+] Setting up KernelSU-Next legacy..."
         curl -LSs \
           https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy/kernel/setup.sh \
           | bash -s legacy
@@ -81,14 +82,14 @@ jobs:
         # Required for 4.19 manual hook
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
-        # Calculate version
-        RSKSUVER=$(( $(cd KernelSU && git rev-list --count HEAD) + 30000 ))
+        # Calculate version (correct folder: KernelSU-Next)
+        RSKSUVER=$(( $(cd KernelSU-Next && git rev-list --count HEAD) + 30000 ))
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
 
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
     # ---------------------------------------------------------
-    # Apply SUSFS Patch
+    # Apply SUSFS patch
     # ---------------------------------------------------------
     - name: Apply SUSFS patch
       run: |
@@ -102,9 +103,9 @@ jobs:
         bash $GITHUB_WORKSPACE/patches/fix3.sh
 
     # ---------------------------------------------------------
-    # Generate Defconfig
+    # Generate defconfig
     # ---------------------------------------------------------
-    - name: Generate kernel .config
+    - name: Generate .config
       run: |
         cd kernel_workspace/android-kernel
 
@@ -117,35 +118,35 @@ jobs:
           vendor/kona-perf_defconfig
 
     # ---------------------------------------------------------
-    # Enable SUSFS via Kconfig Fragment (Correct Way)
+    # Enable SUSFS configs properly (KCONFIG fragment method)
     # ---------------------------------------------------------
     - name: Enable SUSFS configs
       run: |
         cd kernel_workspace/android-kernel
 
         cat > out/susfs_fragment.config <<EOF
-         CONFIG_KSU_SUSFS=y
-         CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-         CONFIG_KSU_SUSFS_SUS_PATH=y
-         CONFIG_KSU_SUSFS_SUS_MOUNT=y
-         CONFIG_KSU_SUSFS_SUS_KSTAT=y
-         CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-         CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-         CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-         CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-         CONFIG_KSU_SUSFS_ENABLE_LOG=y
-         CONFIG_KSU_SUSFS_SUS_SU=y
-         CONFIG_KSU_SUSFS_SUS_MAP=y
-         EOF
+        CONFIG_KSU_SUSFS=y
+        CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+        CONFIG_KSU_SUSFS_SUS_PATH=y
+        CONFIG_KSU_SUSFS_SUS_MOUNT=y
+        CONFIG_KSU_SUSFS_SUS_KSTAT=y
+        CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+        CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+        CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+        CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+        CONFIG_KSU_SUSFS_ENABLE_LOG=y
+        CONFIG_KSU_SUSFS_SUS_SU=y
+        CONFIG_KSU_SUSFS_SUS_MAP=y
+        EOF
 
         export KCONFIG_ALLCONFIG=out/susfs_fragment.config
         make O=out olddefconfig
 
-        echo "=== SUSFS Configs ==="
+        echo "=== SUSFS entries in .config ==="
         grep CONFIG_KSU_SUSFS out/.config
 
     # ---------------------------------------------------------
-    # Build Kernel
+    # Build kernel
     # ---------------------------------------------------------
     - name: Build kernel
       run: |
@@ -160,9 +161,9 @@ jobs:
           CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1
 
     # ---------------------------------------------------------
-    # Verify SUSFS Compiled
+    # Verify SUSFS compiled
     # ---------------------------------------------------------
-    - name: Verify SUSFS build
+    - name: Verify SUSFS integration
       run: |
         cd kernel_workspace/android-kernel
 
@@ -185,7 +186,7 @@ jobs:
         zip -r AK3-${{ env.Lineage_VERSION }}-SM8250-KSU_${{ env.RSKSUVER }}.zip ./*
 
     # ---------------------------------------------------------
-    # Upload Artifacts
+    # Upload artifacts
     # ---------------------------------------------------------
     - name: Upload Image
       uses: actions/upload-artifact@v4
