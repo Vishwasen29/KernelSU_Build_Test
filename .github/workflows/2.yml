@@ -226,6 +226,17 @@ jobs:
     # -------------------------------------------------------------------------
     # Now verify every SUSFS config is =y in the resolved .config
     # -------------------------------------------------------------------------
+    - name: Ensure SUSFS Kconfig is sourced
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
+        if ! grep -q "KernelSU-Next/kernel/Kconfig" security/Kconfig; then
+          echo 'source "KernelSU-Next/kernel/Kconfig"' >> security/Kconfig
+          echo "[OK] KernelSU-Next Kconfig sourced into security/Kconfig"
+        else
+          echo "[OK] Kconfig already sourced"
+        fi
+    
     - name: Verify SUSFS configs in .config (pre-compile)
       run: |
         CONFIG=$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/.config
