@@ -81,6 +81,11 @@ jobs:
 
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
+    - name: add susfs to kconfig
+      run: |
+      bash $GITHUB_WORKSPACE/patches/config.sh
+      
+
     - name: Ensure SUSFS Kconfig is sourced
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
