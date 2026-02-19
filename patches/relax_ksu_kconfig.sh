@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# relax_ksu_kconfig.sh — called as:  python3 relax_ksu_kconfig.sh <path/to/Kconfig>
+# relax_ksu_kconfig.sh — invoked as: python3 relax_ksu_kconfig.sh <path/to/Kconfig>
 #
 # Removes all "depends on KSU..." lines from inside config KSU_* blocks.
 #
@@ -37,8 +37,16 @@ if len(sys.argv) != 2:
 
 path = sys.argv[1]
 
+print("  Reading: " + path)
+
 with open(path) as f:
     src = f.readlines()
+
+print("  Total lines: " + str(len(src)))
+
+# Print all KSU config entries found for diagnostics
+ksu_configs = [l.rstrip() for l in src if re.match(r'^config KSU', l)]
+print("  KSU configs found: " + str(ksu_configs))
 
 out = []
 in_ksu_block = False
@@ -49,7 +57,7 @@ for line in src:
     if re.match(r'^config KSU', line):
         in_ksu_block = True
 
-    # Detect entry into any other top-level Kconfig directive — reset context
+    # Detect entry into any other top-level Kconfig directive -- reset context
     elif re.match(r'^(config|menuconfig|choice|endchoice|menu|endmenu|source)\b', line):
         in_ksu_block = False
 
@@ -58,7 +66,7 @@ for line in src:
 
     # Inside a KSU_* block: drop any line that says 'depends on KSU...'
     if in_ksu_block and re.match(r'^\s+depends on KSU', line):
-        print('  REMOVED from ' + path + ': ' + line.rstrip())
+        print('  REMOVED: ' + line.rstrip())
         removed += 1
         continue
 
