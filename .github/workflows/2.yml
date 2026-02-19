@@ -191,24 +191,25 @@ jobs:
     #   scripts/config operates directly on out/.config AFTER Kconfig is fully
     #   loaded, so it correctly enables configs and resolves dependencies.
     # -------------------------------------------------------------------------
-    - name: Enable SUSFS configs in .config
+    - name: Enable SUSFS configs
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        CFG="./scripts/config --file out/.config"
-
-        echo "Enabling SUSFS configs via scripts/config..."
-        $CFG -e CONFIG_KSU_SUSFS
-        $CFG -e CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
-        $CFG -e CONFIG_KSU_SUSFS_SUS_PATH
-        $CFG -e CONFIG_KSU_SUSFS_SUS_MOUNT
-        $CFG -e CONFIG_KSU_SUSFS_SUS_KSTAT
-        $CFG -e CONFIG_KSU_SUSFS_SUS_OVERLAYFS
-        $CFG -e CONFIG_KSU_SUSFS_TRY_UMOUNT
-        $CFG -e CONFIG_KSU_SUSFS_SPOOF_UNAME
-        $CFG -e CONFIG_KSU_SUSFS_OPEN_REDIRECT
-        $CFG -e CONFIG_KSU_SUSFS_ENABLE_LOG
-        $CFG -e CONFIG_KSU_SUSFS_SUS_SU
-        $CFG -e CONFIG_KSU_SUSFS_SUS_MAP
+        cat <<EOF >> arch/arm64/configs/vendor/kona-perf_defconfig
+           CONFIG_KSU_MANUAL_HOOK=y
+           CONFIG_KSU_SUSFS=y
+           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+           CONFIG_KSU_SUSFS_SUS_PATH=y
+           CONFIG_KSU_SUSFS_SUS_MOUNT=y
+           CONFIG_KSU_SUSFS_SUS_KSTAT=y
+           CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+           CONFIG_KSU_SUSFS_ENABLE_LOG=y
+           CONFIG_KSU_SUSFS_SUS_SU=y
+        EOF
+        echo "[✓] SUSFS configs enabled"
+        
 
         # Run olddefconfig to resolve any newly-introduced dependencies
         export ARCH=arm64
