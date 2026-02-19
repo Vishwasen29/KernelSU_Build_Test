@@ -72,27 +72,31 @@ jobs:
     # configs unconditionally visible, matching how the patched source files
     # use #ifdef â€” which is evaluated by the compiler, not Kconfig.
     # -------------------------------------------------------------------------
-    - name: Relax SUSFS Kconfig dependencies
+    - name: Relax KernelSU Kconfig dependencies
       run: |
         cd kernel_workspace/android-kernel
-        KCONFIG=$(find . -name "Kconfig" \
+
+        # Find all Kconfig files that define any config KSU_* entry
+        mapfile -t KCONFIGS < <(find . -name "Kconfig" \
           -not -path "./.git/*" \
           -not -path "./out/*" \
-          -exec grep -l "^config KSU_SUSFS$" {} \; 2>/dev/null | head -1)
+          -exec grep -l "^config KSU" {} \; 2>/dev/null)
 
-        if [ -z "$KCONFIG" ]; then
-          echo "[WARN] No Kconfig with KSU_SUSFS entries found â€” skipping"
+        if [ ${#KCONFIGS[@]} -eq 0 ]; then
+          echo "[WARN] No KSU Kconfig files found â€” skipping"
           exit 0
         fi
 
-        echo "[INFO] Patching: $KCONFIG"
-        # Remove lines that gate sub-configs on KSU_SUSFS or KSU_SUSFS_ENABLED
-        sed -i '/^\tdepends on KSU_SUSFS$/d' "$KCONFIG"
-        sed -i '/^\tdepends on KSU_SUSFS &&/d' "$KCONFIG"
-        sed -i '/depends on KSU_SUSFS_ENABLED/d' "$KCONFIG"
+        for KCONFIG in "${KCONFIGS[@]}"; do
+          echo "[INFO] Patching: $KCONFIG"
+          python3 $GITHUB_WORKSPACE/patches/relax_ksu_kconfig.sh "$KCONFIG"
+        done
 
-        echo "[OK] Remaining KSU_SUSFS depends lines (should be none or unrelated):"
-        grep -n "depends on KSU_SUSFS" "$KCONFIG" || echo "  (none â€” good)"
+        echo ""
+        echo "[OK] Verification â€” remaining 'depends on KSU' inside KSU blocks:"
+        find . -name "Kconfig" -not -path "./.git/*" -not -path "./out/*" \
+          -exec grep -n "depends on KSU" {} /dev/null \; 2>/dev/null \
+          || echo "  (none â€” good)"
 
     - name: Apply SUSFS patch
       run: |
