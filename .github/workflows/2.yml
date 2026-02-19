@@ -1,4 +1,4 @@
-name: 3 Build LineageOS OPlus SM8250 Kernel
+name: 4 Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
@@ -143,11 +143,11 @@ jobs:
           || { echo "  [FAIL] Leftover .rej files:"; echo "$REJ" | sed 's/^/         /'; FAIL=$((FAIL+1)); }
 
         # Verify SUSFS Kconfig entries exist somewhere in the tree
-        # backslashxx uses drivers/kernelsu/Kconfig
-        # rsuntk/sidex15 uses KernelSU/kernel/Kconfig
-        if grep -rq "config KSU_SUSFS" KernelSU/kernel/Kconfig 2>/dev/null || \
-           grep -rq "config KSU_SUSFS" drivers/kernelsu/Kconfig 2>/dev/null; then
-          check "SUSFS Kconfig entries found in KernelSU tree" ok
+        # backslashxx: drivers/kernelsu/Kconfig
+        # rsuntk/sidex15: KernelSU/kernel/Kconfig
+        KCONFIG_HIT=$(grep -rl "config KSU_SUSFS" KernelSU/ drivers/ 2>/dev/null | head -1)
+        if [ -n "$KCONFIG_HIT" ]; then
+          check "SUSFS Kconfig entries found ($KCONFIG_HIT)" ok
         else
           check "SUSFS Kconfig entries found in KernelSU tree (patch to KSU missing)" fail
         fi
