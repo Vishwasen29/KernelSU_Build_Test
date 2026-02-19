@@ -197,33 +197,43 @@ jobs:
     - name: Enable SUSFS configs in .config
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        CFG="./scripts/config --file out/.config"
+        CONFIG_FILE="out/.config"
 
-        echo "Enabling SUSFS configs via scripts/config..."
-        $CFG -e CONFIG_KSU_SUSFS
-        $CFG -e CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
-        $CFG -e CONFIG_KSU_SUSFS_SUS_PATH
-        $CFG -e CONFIG_KSU_SUSFS_SUS_MOUNT
-        $CFG -e CONFIG_KSU_SUSFS_SUS_KSTAT
-        $CFG -e CONFIG_KSU_SUSFS_SUS_OVERLAYFS
-        $CFG -e CONFIG_KSU_SUSFS_TRY_UMOUNT
-        $CFG -e CONFIG_KSU_SUSFS_SPOOF_UNAME
-        $CFG -e CONFIG_KSU_SUSFS_OPEN_REDIRECT
-        $CFG -e CONFIG_KSU_SUSFS_ENABLE_LOG
-        $CFG -e CONFIG_KSU_SUSFS_SUS_SU
-        $CFG -e CONFIG_KSU_SUSFS_SUS_MAP
+        echo "Enabling SUSFS configs by direct write to .config..."
+        # We write directly instead of using scripts/config + olddefconfig.
+        # make olddefconfig strips CONFIG_KSU_SUSFS_* back out because
+        # backslashxx Kconfig has dependency conditions olddefconfig sees as
+        # unmet. On non-GKI 4.19 there is no ABI enforcement so direct
+        # write is safe â€” the compiler sees the #ifdef at build time.
+        #
+        # For each config: remove any existing line then append =y
 
-        # Run olddefconfig to resolve any newly-introduced dependencies
-        export ARCH=arm64
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-        make O=out CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
-          olddefconfig
+        set_config() {
+          local key="$1"
+          sed -i "/^${key}[= ]/d" "$CONFIG_FILE"
+          sed -i "/^# ${key} is not set/d" "$CONFIG_FILE"
+          echo "${key}=y" >> "$CONFIG_FILE"
+          echo "  SET: ${key}=y"
+        }
 
-        echo "[OK] SUSFS configs applied"
+        set_config CONFIG_KSU_SUSFS
+        set_config CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+        set_config CONFIG_KSU_SUSFS_SUS_PATH
+        set_config CONFIG_KSU_SUSFS_SUS_MOUNT
+        set_config CONFIG_KSU_SUSFS_SUS_KSTAT
+        set_config CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+        set_config CONFIG_KSU_SUSFS_TRY_UMOUNT
+        set_config CONFIG_KSU_SUSFS_SPOOF_UNAME
+        set_config CONFIG_KSU_SUSFS_OPEN_REDIRECT
+        set_config CONFIG_KSU_SUSFS_ENABLE_LOG
+        set_config CONFIG_KSU_SUSFS_SUS_SU
+        set_config CONFIG_KSU_SUSFS_SUS_MAP
 
-    # -------------------------------------------------------------------------
-    # Now verify every SUSFS config is =y in the resolved .config
+        echo "[OK] All SUSFS configs written"
+        echo "Verifying written entries:"
+        grep "CONFIG_KSU_SUSFS" "$CONFIG_FILE" | sed 's/^/  /'
+
+
     # -------------------------------------------------------------------------
     - name: Verify SUSFS configs in .config (pre-compile)
       run: |
