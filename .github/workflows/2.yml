@@ -1,4 +1,4 @@
-name: 5 Build LineageOS OPlus SM8250 Kernel
+name: 1 Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
@@ -69,7 +69,7 @@ jobs:
 
           bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
+          RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         else
           curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh | bash -s master
@@ -79,6 +79,36 @@ jobs:
         fi
 
         sed -i 's/ -dirty//g' scripts/setlocalversion
+
+    # -------------------------------------------------------------------------
+    # Relax backslashxx SUSFS Kconfig dependencies so syncconfig keeps them
+    # -------------------------------------------------------------------------
+    - name: Relax SUSFS Kconfig dependencies (backslashxx)
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
+        # Find the Kconfig file containing KSU_SUSFS entries (varies by variant)
+        KCONFIG=$(find . -name "Kconfig" -not -path "./.git/*" -not -path "./out/*" \
+          -exec grep -l "^config KSU_SUSFS$" {} \; 2>/dev/null | head -1)
+
+        if [ -z "$KCONFIG" ]; then
+          echo "[WARN] No Kconfig with KSU_SUSFS found â€” skipping"
+          exit 0
+        fi
+
+        echo "[INFO] Patching: $KCONFIG"
+
+        # Remove lines that say "\tdepends on KSU_SUSFS" inside KSU_SUSFS_* blocks.
+        # These cause syncconfig to strip all sub-configs when KSU_SUSFS itself
+        # appears unresolved due to circular/ordering issues in the Kconfig parse.
+        sed -i '/^\tdepends on KSU_SUSFS$/d' "$KCONFIG"
+        sed -i '/^\tdepends on KSU_SUSFS &&/d' "$KCONFIG"
+
+        # Also remove any "depends on KSU_SUSFS_ENABLED" style gates
+        sed -i '/depends on KSU_SUSFS_ENABLED/d' "$KCONFIG"
+
+        echo "[OK] Dependencies relaxed. Verify:"
+        grep -n "depends on KSU_SUSFS" "$KCONFIG" || echo "  (none remaining â€” good)"
 
     - name: Apply SUSFS patch
       run: |
