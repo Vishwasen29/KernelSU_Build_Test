@@ -145,13 +145,7 @@ jobs:
         # Verify SUSFS Kconfig entries exist somewhere in the tree
         # backslashxx: drivers/kernelsu/Kconfig
         # rsuntk/sidex15: KernelSU/kernel/Kconfig
-        echo "DEBUG: listing KernelSU/ contents:"
-        ls KernelSU/ 2>/dev/null || echo "KernelSU/ not found"
-        echo "DEBUG: listing drivers/ contents:"
-        ls drivers/ 2>/dev/null | grep -i ksu || echo "no ksu in drivers/"
-        echo "DEBUG: raw grep result:"
-        grep -rl "config KSU_SUSFS" KernelSU/ drivers/ 2>/dev/null || echo "nothing found"
-        KCONFIG_HIT=$(grep -rl "config KSU_SUSFS" KernelSU/ drivers/ 2>/dev/null | head -1)
+        KCONFIG_HIT=$(grep -rl "config KSU_SUSFS" . --include="Kconfig" --exclude-dir=".git" --exclude-dir="out" 2>/dev/null | head -1)
         if [ -n "$KCONFIG_HIT" ]; then
           check "SUSFS Kconfig entries found ($KCONFIG_HIT)" ok
         else
