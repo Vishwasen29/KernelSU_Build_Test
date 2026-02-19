@@ -82,6 +82,11 @@ jobs:
         set +e
         git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus4.patch
 
+    - name: Fix SUSFS rejects
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        bash $GITHUB_WORKSPACE/patches/fix3.sh
+
     - name: Upload reject files
       if: always()
       uses: actions/upload-artifact@v4
