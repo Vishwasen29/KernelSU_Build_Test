@@ -1,4 +1,4 @@
-name: 1 Build LineageOS OPlus SM8250 Kernel
+name: 3 Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
