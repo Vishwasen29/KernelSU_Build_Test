@@ -15,32 +15,21 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # ---------------------------------------------------------
-    # Swap
-    # ---------------------------------------------------------
     - name: Set swap to 10G
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 10
 
-    # ---------------------------------------------------------
-    # Install dependencies
-    # ---------------------------------------------------------
     - name: Install build dependencies
       run: |
         echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
         echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
-
         sudo apt update
         sudo apt install -y git bc bison build-essential curl flex gperf \
           libncurses5-dev libssl-dev lzop zip unzip \
-          libelf-dev clang lld python3
-
+          libelf-dev clang lld python3 binutils-aarch64-linux-gnu
         mkdir -p kernel_workspace
 
-    # ---------------------------------------------------------
-    # Cache clang
-    # ---------------------------------------------------------
     - name: Cache Clang toolchain
       id: cache-clang
       uses: actions/cache@v4
@@ -57,9 +46,6 @@ jobs:
           https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
         tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
 
-    # ---------------------------------------------------------
-    # Clone kernel source
-    # ---------------------------------------------------------
     - name: Clone Lineage kernel
       run: |
         cd kernel_workspace
@@ -67,27 +53,46 @@ jobs:
           https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel
 
-    # ---------------------------------------------------------
-    # Setup KernelSU-Next (legacy)
-    # ---------------------------------------------------------
     - name: Setup KernelSU-Next (legacy)
       run: |
         cd kernel_workspace/android-kernel
-
         curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-
-        # Required for 4.19 manual hook
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-
-        # Calculate version (correct folder: KernelSU-Next)
         RSKSUVER=$(( $(cd KernelSU-Next && git rev-list --count HEAD) + 30000 ))
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
-
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
-    # ---------------------------------------------------------
-    # Apply SUSFS patch
-    # ---------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Relax SUSFS Kconfig dependencies so make syncconfig doesn't strip them.
+    # KernelSU-Next's Kconfig defines CONFIG_KSU_SUSFS_* with:
+    #   depends on KSU_SUSFS
+    # This causes syncconfig (which runs automatically during build) to reset
+    # all sub-configs to NOT_SET. Removing those dependency lines makes the
+    # configs unconditionally visible, matching how the patched source files
+    # use #ifdef — which is evaluated by the compiler, not Kconfig.
+    # -------------------------------------------------------------------------
+    - name: Relax SUSFS Kconfig dependencies
+      run: |
+        cd kernel_workspace/android-kernel
+        KCONFIG=$(find . -name "Kconfig" \
+          -not -path "./.git/*" \
+          -not -path "./out/*" \
+          -exec grep -l "^config KSU_SUSFS$" {} \; 2>/dev/null | head -1)
+
+        if [ -z "$KCONFIG" ]; then
+          echo "[WARN] No Kconfig with KSU_SUSFS entries found — skipping"
+          exit 0
+        fi
+
+        echo "[INFO] Patching: $KCONFIG"
+        # Remove lines that gate sub-configs on KSU_SUSFS or KSU_SUSFS_ENABLED
+        sed -i '/^\tdepends on KSU_SUSFS$/d' "$KCONFIG"
+        sed -i '/^\tdepends on KSU_SUSFS &&/d' "$KCONFIG"
+        sed -i '/depends on KSU_SUSFS_ENABLED/d' "$KCONFIG"
+
+        echo "[OK] Remaining KSU_SUSFS depends lines (should be none or unrelated):"
+        grep -n "depends on KSU_SUSFS" "$KCONFIG" || echo "  (none — good)"
+
     - name: Apply SUSFS patch
       run: |
         cd kernel_workspace/android-kernel
@@ -99,93 +104,215 @@ jobs:
         cd kernel_workspace/android-kernel
         bash $GITHUB_WORKSPACE/patches/fix3.sh
 
-    # ---------------------------------------------------------
-    # Generate defconfig
-    # ---------------------------------------------------------
+    - name: Verify SUSFS source integration (pre-build)
+      run: |
+        cd kernel_workspace/android-kernel
+        echo "================================================"
+        echo " SUSFS Pre-Build Source Check"
+        echo "================================================"
+        FAIL=0
+        check() {
+          [ "$2" = "ok" ] && echo "  [PASS] $1" || { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
+        }
+        [ -f "fs/susfs.c" ]               && check "fs/susfs.c exists" ok               || check "fs/susfs.c exists" fail
+        [ -f "include/linux/susfs.h" ]     && check "include/linux/susfs.h exists" ok     || check "include/linux/susfs.h exists" fail
+        [ -f "include/linux/susfs_def.h" ] && check "include/linux/susfs_def.h exists" ok || check "include/linux/susfs_def.h exists" fail
+        grep -q "CONFIG_KSU_SUSFS.*susfs\.o" fs/Makefile \
+          && check "fs/Makefile has susfs.o" ok || check "fs/Makefile has susfs.o" fail
+        grep -q "susfs_mnt_id_backup" include/linux/mount.h \
+          && check "mount.h has susfs_mnt_id_backup" ok || check "mount.h has susfs_mnt_id_backup" fail
+        grep -q "susfs_def\.h" fs/namespace.c \
+          && check "namespace.c includes susfs_def.h" ok || check "namespace.c includes susfs_def.h" fail
+        grep -q "CONFIG_KSU_SUSFS_SUS_MAP" fs/proc/task_mmu.c \
+          && check "task_mmu.c has SUS_MAP block" ok || check "task_mmu.c has SUS_MAP block" fail
+        REJ=$(find . -name "*.rej" 2>/dev/null)
+        [ -z "$REJ" ] && check "No leftover .rej files" ok \
+          || { echo "  [FAIL] Leftover .rej files:"; echo "$REJ" | sed 's/^/    /'; FAIL=$((FAIL+1)); }
+        echo "------------------------------------------------"
+        echo "  Result: $FAIL failure(s)"
+        echo "================================================"
+        [ "$FAIL" -eq 0 ] || exit 1
+
     - name: Generate .config
       run: |
         cd kernel_workspace/android-kernel
-
         export ARCH=arm64
         export SUBARCH=arm64
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-
         make O=out CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
           vendor/kona-perf_defconfig
 
-    # ---------------------------------------------------------
-    # Enable SUSFS configs properly (KCONFIG fragment method)
-    # ---------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Enable SUSFS configs by direct write to out/.config
+    #
+    # WHY NOT KCONFIG_ALLCONFIG + olddefconfig:
+    #   KCONFIG_ALLCONFIG only works with the 'allconfig' make target — it has
+    #   no effect on 'olddefconfig' or the internal 'syncconfig' that runs
+    #   automatically at the start of every normal build. Both strip any config
+    #   whose Kconfig 'depends on' chain is unsatisfied.
+    #
+    # WHY NOT defconfig append:
+    #   'make defconfig' evaluates Kconfig and discards unknown/unsatisfied
+    #   entries silently. Writing CONFIG_KSU_SUSFS=y to defconfig before
+    #   'make defconfig' runs has no effect if the dependency isn't met.
+    #
+    # SOLUTION — direct write + Kconfig dependency removal (done above):
+    #   1. We already removed the 'depends on KSU_SUSFS' lines from Kconfig,
+    #      so syncconfig no longer has a reason to strip sub-configs.
+    #   2. We write directly to out/.config so the configs are present
+    #      immediately without going through Kconfig evaluation again.
+    #   3. We do NOT run olddefconfig/syncconfig after this write — that
+    #      would just undo the work. The next thing that runs is make -j
+    #      which will run syncconfig once, but now with relaxed dependencies
+    #      the configs will be retained.
+    # -------------------------------------------------------------------------
     - name: Enable SUSFS configs
       run: |
         cd kernel_workspace/android-kernel
+        CONFIG="out/.config"
 
-        cat > out/susfs_fragment.config <<EOF
-        CONFIG_KSU_SUSFS=y
-        CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-        CONFIG_KSU_SUSFS_SUS_PATH=y
-        CONFIG_KSU_SUSFS_SUS_MOUNT=y
-        CONFIG_KSU_SUSFS_SUS_KSTAT=y
-        CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-        CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-        CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-        CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-        CONFIG_KSU_SUSFS_ENABLE_LOG=y
-        CONFIG_KSU_SUSFS_SUS_SU=y
-        CONFIG_KSU_SUSFS_SUS_MAP=y
-        EOF
+        set_config() {
+          local key="$1"
+          # Remove any existing entry (=y, =n, =m, or "# KEY is not set")
+          sed -i "/^${key}[= ]/d" "$CONFIG"
+          sed -i "/^# ${key} is not set/d" "$CONFIG"
+          echo "${key}=y" >> "$CONFIG"
+          echo "  SET: ${key}=y"
+        }
 
-        export KCONFIG_ALLCONFIG=out/susfs_fragment.config
-        make O=out olddefconfig
+        echo "Writing SUSFS configs directly to out/.config..."
+        set_config CONFIG_KSU_SUSFS
+        set_config CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+        set_config CONFIG_KSU_SUSFS_SUS_PATH
+        set_config CONFIG_KSU_SUSFS_SUS_MOUNT
+        set_config CONFIG_KSU_SUSFS_SUS_KSTAT
+        set_config CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+        set_config CONFIG_KSU_SUSFS_TRY_UMOUNT
+        set_config CONFIG_KSU_SUSFS_SPOOF_UNAME
+        set_config CONFIG_KSU_SUSFS_OPEN_REDIRECT
+        set_config CONFIG_KSU_SUSFS_ENABLE_LOG
+        set_config CONFIG_KSU_SUSFS_SUS_SU
+        set_config CONFIG_KSU_SUSFS_SUS_MAP
 
+        echo ""
         echo "=== SUSFS entries in .config ==="
-        grep CONFIG_KSU_SUSFS out/.config
+        grep "CONFIG_KSU_SUSFS" "$CONFIG"
 
-    # ---------------------------------------------------------
-    # Build kernel
-    # ---------------------------------------------------------
+    - name: Verify SUSFS configs in .config (pre-compile)
+      run: |
+        cd kernel_workspace/android-kernel
+        CONFIG="out/.config"
+        echo "================================================"
+        echo " SUSFS .config Verification"
+        echo "================================================"
+        FAIL=0
+        check_config() {
+          local val
+          val=$(grep -E "^${1}=" "$CONFIG" 2>/dev/null || echo "NOT_SET")
+          if echo "$val" | grep -q "=y$"; then
+            echo "  [PASS] ${1}=y"
+          else
+            echo "  [FAIL] ${1} → $val"
+            FAIL=$((FAIL+1))
+          fi
+        }
+        check_config CONFIG_KSU
+        check_config CONFIG_KSU_SUSFS
+        check_config CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+        check_config CONFIG_KSU_SUSFS_SUS_PATH
+        check_config CONFIG_KSU_SUSFS_SUS_MOUNT
+        check_config CONFIG_KSU_SUSFS_SUS_KSTAT
+        check_config CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+        check_config CONFIG_KSU_SUSFS_TRY_UMOUNT
+        check_config CONFIG_KSU_SUSFS_SPOOF_UNAME
+        check_config CONFIG_KSU_SUSFS_OPEN_REDIRECT
+        check_config CONFIG_KSU_SUSFS_ENABLE_LOG
+        check_config CONFIG_KSU_SUSFS_SUS_SU
+        check_config CONFIG_KSU_SUSFS_SUS_MAP
+        echo "------------------------------------------------"
+        echo "  Result: $FAIL failure(s)"
+        echo "================================================"
+        [ "$FAIL" -eq 0 ] || exit 1
+
     - name: Build kernel
       run: |
         cd kernel_workspace/android-kernel
-
         export ARCH=arm64
         export SUBARCH=arm64
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-        export KCONFIG_ALLCONFIG=out/susfs_fragment.config
-
         make -j$(nproc) O=out CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1
 
-    # ---------------------------------------------------------
-    # Verify SUSFS compiled
-    # ---------------------------------------------------------
-    - name: Verify SUSFS integration
+    - name: Check kernel output
+      run: |
+        cd kernel_workspace/android-kernel/out
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+        else
+          echo "Image not found"; exit 1
+        fi
+
+    - name: Verify SUSFS compiled into kernel (post-build)
       run: |
         cd kernel_workspace/android-kernel
+        echo "================================================"
+        echo " SUSFS Post-Build Verification"
+        echo "================================================"
+        FAIL=0
+        check() {
+          [ "$2" = "ok" ] && echo "  [PASS] $1" || { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
+        }
 
-        echo "Checking susfs.o..."
-        find out/ -name "susfs.o"
+        # susfs.o — find anywhere in out/
+        SUSFS_OBJ=$(find out/ -name "susfs.o" 2>/dev/null | head -1)
+        [ -n "$SUSFS_OBJ" ] \
+          && check "susfs.o compiled ($SUSFS_OBJ)" ok \
+          || check "susfs.o not found in out/" fail
 
-        echo "Checking System.map..."
-        grep susfs_ out/System.map || true
+        # System.map symbols
+        if [ -f out/System.map ]; then
+          COUNT=$(grep -c "susfs_" out/System.map 2>/dev/null || echo 0)
+          COUNT=$(echo "$COUNT" | tr -d '[:space:]')
+          [ "${COUNT:-0}" -gt 0 ] 2>/dev/null \
+            && { check "System.map has $COUNT susfs_ symbols" ok
+                 grep "susfs_" out/System.map | head -5 | sed 's/^/    /'; } \
+            || check "System.map: no susfs_ symbols" fail
+        else
+          echo "  [WARN] System.map not found"
+        fi
 
-    # ---------------------------------------------------------
-    # Package AnyKernel3
-    # ---------------------------------------------------------
+        # .config survived the build
+        grep -q "^CONFIG_KSU_SUSFS=y" out/.config 2>/dev/null \
+          && check "out/.config has CONFIG_KSU_SUSFS=y after build" ok \
+          || check "out/.config has CONFIG_KSU_SUSFS=y after build" fail
+
+        # All built SUSFS/KSU objects
+        echo ""
+        echo "  Built SUSFS/KSU objects:"
+        find out/ -name "*.o" 2>/dev/null | grep -iE "susfs|ksu" \
+          | sed 's/^/    /' || echo "    (none)"
+
+        echo "------------------------------------------------"
+        echo "  Result: $FAIL failure(s)"
+        echo "================================================"
+        [ "$FAIL" -eq 0 ] || exit 1
+
     - name: Package AnyKernel3
       run: |
         cd kernel_workspace
         git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
         cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
-
         cd AnyKernel3
         zip -r AK3-${{ env.Lineage_VERSION }}-SM8250-KSU_${{ env.RSKSUVER }}.zip ./*
 
-    # ---------------------------------------------------------
-    # Upload artifacts
-    # ---------------------------------------------------------
     - name: Upload Image
+      if: env.CHECK_IMAGE == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: Image
@@ -196,3 +323,11 @@ jobs:
       with:
         name: AnyKernel3-ZIP
         path: kernel_workspace/AnyKernel3/*.zip
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-info
+        path: |
+          kernel_workspace/android-kernel/out/include/config/kernel.release
+          
