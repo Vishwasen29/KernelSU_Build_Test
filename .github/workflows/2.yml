@@ -147,11 +147,12 @@ jobs:
 
         # Verify KernelSU/kernel/Kconfig has SUSFS entries
         # (these must exist BEFORE make defconfig for configs to be recognised)
+        # Verify SUSFS Kconfig entries exist anywhere in tree
         if grep -R -q "config KSU_SUSFS" .; then
-        check "SUSFS Kconfig entries exist in kernel tree" ok
+         check "SUSFS Kconfig entries exist in kernel tree" ok
         else
-        check "SUSFS Kconfig entries exist in kernel tree" fail
-        fi fail 
+         check "SUSFS Kconfig entries exist in kernel tree" fail
+        fi 
         
 
 
