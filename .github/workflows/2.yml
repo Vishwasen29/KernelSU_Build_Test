@@ -74,10 +74,7 @@ jobs:
       run: |
         cd kernel_workspace/android-kernel
 
-        echo "[+] Setting up KernelSU-Next legacy..."
-        curl -LSs \
-          https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy/kernel/setup.sh \
-          | bash -s legacy
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
         # Required for 4.19 manual hook
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
