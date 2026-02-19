@@ -18,7 +18,6 @@ jobs:
         ks: [rsuntk, backslashxx]
 
     steps:
-    # FIX: v6 does not exist, use v4
     - uses: actions/checkout@v4
 
     - name: Set swap to 10G
@@ -93,34 +92,8 @@ jobs:
         bash $GITHUB_WORKSPACE/patches/fix3.sh
 
     # -------------------------------------------------------------------------
-    # FIX: Original had leading spaces inside heredoc which would write
-    # "  CONFIG_KSU_SUSFS=y" (with spaces) into defconfig â€” not recognised.
-    # Using printf for each line guarantees no leading whitespace.
-    # -------------------------------------------------------------------------
-    - name: Enable SUSFS configs in defconfig
-      run: |
-        DEFCONFIG=$GITHUB_WORKSPACE/kernel_workspace/android-kernel/arch/arm64/configs/vendor/kona-perf_defconfig
-        printf '%s\n' \
-          'CONFIG_KSU_SUSFS=y' \
-          'CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y' \
-          'CONFIG_KSU_SUSFS_SUS_PATH=y' \
-          'CONFIG_KSU_SUSFS_SUS_MOUNT=y' \
-          'CONFIG_KSU_SUSFS_SUS_KSTAT=y' \
-          'CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y' \
-          'CONFIG_KSU_SUSFS_TRY_UMOUNT=y' \
-          'CONFIG_KSU_SUSFS_SPOOF_UNAME=y' \
-          'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y' \
-          'CONFIG_KSU_SUSFS_ENABLE_LOG=y' \
-          'CONFIG_KSU_SUSFS_SUS_SU=y' \
-          'CONFIG_KSU_SUSFS_SUS_MAP=y' \
-          >> "$DEFCONFIG"
-        echo "[OK] SUSFS configs appended to defconfig"
-        echo "     Verifying no leading whitespace in appended lines:"
-        tail -13 "$DEFCONFIG"
-
-    # -------------------------------------------------------------------------
-    # Verify SUSFS source files are present and all patches applied correctly
-    # before wasting time on a full compile
+    # Verify SUSFS source files are present and correctly patched before
+    # wasting time on a full compile
     # -------------------------------------------------------------------------
     - name: Verify SUSFS source integration (pre-build)
       run: |
@@ -139,49 +112,48 @@ jobs:
           fi
         }
 
-        # Patched source files
-        [ -f "fs/susfs.c" ]                  && check "fs/susfs.c exists" ok                  || check "fs/susfs.c exists" fail
-        [ -f "include/linux/susfs.h" ]        && check "include/linux/susfs.h exists" ok        || check "include/linux/susfs.h exists" fail
-        [ -f "include/linux/susfs_def.h" ]    && check "include/linux/susfs_def.h exists" ok    || check "include/linux/susfs_def.h exists" fail
+        [ -f "fs/susfs.c" ]                && check "fs/susfs.c exists" ok               || check "fs/susfs.c exists" fail
+        [ -f "include/linux/susfs.h" ]      && check "include/linux/susfs.h exists" ok     || check "include/linux/susfs.h exists" fail
+        [ -f "include/linux/susfs_def.h" ]  && check "include/linux/susfs_def.h exists" ok || check "include/linux/susfs_def.h exists" fail
 
-        # Fix 1: Makefile
         grep -q "CONFIG_KSU_SUSFS.*susfs\.o" fs/Makefile \
           && check "fs/Makefile has susfs.o entry" ok \
           || check "fs/Makefile has susfs.o entry" fail
 
-        # Fix 2: mount.h KABI
         grep -q "susfs_mnt_id_backup" include/linux/mount.h \
           && check "include/linux/mount.h has susfs_mnt_id_backup" ok \
           || check "include/linux/mount.h has susfs_mnt_id_backup" fail
 
-        # Fix 3: namespace.c include
         grep -q "susfs_def\.h" fs/namespace.c \
           && check "fs/namespace.c includes susfs_def.h" ok \
           || check "fs/namespace.c includes susfs_def.h" fail
 
-        # Fix 3: namespace.c externs
         grep -q "susfs_is_current_ksu_domain" fs/namespace.c \
           && check "fs/namespace.c has susfs extern declarations" ok \
           || check "fs/namespace.c has susfs extern declarations" fail
 
-        # Fix 4: task_mmu.c SUS_MAP block
         grep -q "CONFIG_KSU_SUSFS_SUS_MAP" fs/proc/task_mmu.c \
           && check "fs/proc/task_mmu.c has SUS_MAP block" ok \
           || check "fs/proc/task_mmu.c has SUS_MAP block" fail
 
-        # No leftover .rej files
+        # No leftover .rej files (fix script cleans these up)
         REJ=$(find . -name "*.rej" 2>/dev/null)
         [ -z "$REJ" ] \
           && check "No leftover .rej files" ok \
           || { echo "  [FAIL] Leftover .rej files:"; echo "$REJ" | sed 's/^/         /'; FAIL=$((FAIL+1)); }
+
+        # Verify KernelSU/kernel/Kconfig has SUSFS entries
+        # (these must exist BEFORE make defconfig for configs to be recognised)
+        grep -q "config KSU_SUSFS" KernelSU/kernel/Kconfig 2>/dev/null \
+          && check "KernelSU/kernel/Kconfig has SUSFS entries" ok \
+          || check "KernelSU/kernel/Kconfig has SUSFS entries (SUSFS patch to KSU may be missing)" fail
 
         echo "------------------------------------------------"
         echo "  Result: $FAIL failure(s)"
         echo "================================================"
         [ "$FAIL" -eq 0 ] || exit 1
 
-    # Upload rejects only if pre-build check found some
-    - name: Upload reject files (if any)
+    - name: Upload reject files (if pre-build check failed)
       if: failure()
       uses: actions/upload-artifact@v4
       with:
@@ -189,9 +161,9 @@ jobs:
         path: kernel_workspace/android-kernel/**/*.rej
 
     # -------------------------------------------------------------------------
-    # Split build into two steps:
-    # 1. make defconfig  â€” so we can inspect .config before compiling
-    # 2. make -j         â€” actual compile
+    # Generate .config from defconfig
+    # SUSFS Kconfig entries now exist in KernelSU/kernel/Kconfig at this point
+    # so make defconfig will recognise them
     # -------------------------------------------------------------------------
     - name: Generate kernel .config
       run: |
@@ -207,10 +179,49 @@ jobs:
           vendor/kona-perf_defconfig vendor/oplus.config
 
     # -------------------------------------------------------------------------
-    # Check every SUSFS config is =y in the generated .config
-    # Catches missing Kconfig entries, wrong dependencies, typos in defconfig
+    # Enable SUSFS configs using scripts/config AFTER .config is generated
+    #
+    # WHY HERE and not in defconfig:
+    #   CONFIG_KSU_SUSFS_* entries are defined in KernelSU/kernel/Kconfig.
+    #   `make defconfig` silently drops any config key that has no matching
+    #   Kconfig entry at parse time. Writing to defconfig before this step
+    #   means the entries get stripped during defconfig generation.
+    #
+    #   scripts/config operates directly on out/.config AFTER Kconfig is fully
+    #   loaded, so it correctly enables configs and resolves dependencies.
     # -------------------------------------------------------------------------
-    - name: Verify SUSFS configs in generated .config (pre-compile)
+    - name: Enable SUSFS configs in .config
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        CFG="./scripts/config --file out/.config"
+
+        echo "Enabling SUSFS configs via scripts/config..."
+        $CFG -e CONFIG_KSU_SUSFS
+        $CFG -e CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+        $CFG -e CONFIG_KSU_SUSFS_SUS_PATH
+        $CFG -e CONFIG_KSU_SUSFS_SUS_MOUNT
+        $CFG -e CONFIG_KSU_SUSFS_SUS_KSTAT
+        $CFG -e CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+        $CFG -e CONFIG_KSU_SUSFS_TRY_UMOUNT
+        $CFG -e CONFIG_KSU_SUSFS_SPOOF_UNAME
+        $CFG -e CONFIG_KSU_SUSFS_OPEN_REDIRECT
+        $CFG -e CONFIG_KSU_SUSFS_ENABLE_LOG
+        $CFG -e CONFIG_KSU_SUSFS_SUS_SU
+        $CFG -e CONFIG_KSU_SUSFS_SUS_MAP
+
+        # Run olddefconfig to resolve any newly-introduced dependencies
+        export ARCH=arm64
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        make O=out CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
+          olddefconfig
+
+        echo "[OK] SUSFS configs applied"
+
+    # -------------------------------------------------------------------------
+    # Now verify every SUSFS config is =y in the resolved .config
+    # -------------------------------------------------------------------------
+    - name: Verify SUSFS configs in .config (pre-compile)
       run: |
         CONFIG=$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out/.config
         echo "================================================"
@@ -228,7 +239,7 @@ jobs:
             echo "  [WARN] $key=m  (should be =y for built-in)"
             FAIL=$((FAIL+1))
           else
-            echo "  [FAIL] $key  not enabled  ($val)"
+            echo "  [FAIL] $key  â†’  $val"
             FAIL=$((FAIL+1))
           fi
         }
@@ -249,19 +260,11 @@ jobs:
 
         echo "------------------------------------------------"
         echo "  All KSU/SUSFS entries in .config:"
-        grep -E "CONFIG_KSU" "$CONFIG" | sed 's/^/    /' || echo "    (none found)"
+        grep -E "CONFIG_KSU" "$CONFIG" | sed 's/^/    /' || echo "    (none)"
         echo "------------------------------------------------"
         echo "  Result: $FAIL failure(s)"
         echo "================================================"
-
-        if [ "$FAIL" -gt 0 ]; then
-          echo ""
-          echo "  To fix: ensure the following lines exist in"
-          echo "  arch/arm64/configs/vendor/kona-perf_defconfig"
-          echo "  with NO leading spaces:"
-          grep -E "CONFIG_KSU" "$CONFIG" | grep "=y" | sed 's/^/    /'
-          exit 1
-        fi
+        [ "$FAIL" -eq 0 ] || exit 1
 
     - name: Build kernel (${{ matrix.ks }})
       run: |
@@ -306,19 +309,18 @@ jobs:
           fi
         }
 
-        # 1. susfs.o must exist â€” proves susfs.c was compiled
+        # 1. susfs.o must exist â€” confirms susfs.c was compiled
         [ -f "out/fs/susfs.o" ] \
           && check "out/fs/susfs.o compiled" ok \
-          || check "out/fs/susfs.o compiled (susfs.c not built)" fail
+          || check "out/fs/susfs.o compiled" fail
 
-        # 2. System.map susfs symbols â€” proves SUSFS linked into vmlinux
+        # 2. System.map susfs_ symbols â€” confirms SUSFS linked into vmlinux
         SYSMAP="out/System.map"
         if [ -f "$SYSMAP" ]; then
           COUNT=$(grep -c "susfs_" "$SYSMAP" 2>/dev/null || echo 0)
           if [ "$COUNT" -gt 0 ]; then
             check "System.map has $COUNT susfs_ symbol(s)" ok
-            echo "         Symbols:"
-            grep "susfs_" "$SYSMAP" | head -10 | sed 's/^/           /'
+            grep "susfs_" "$SYSMAP" | head -8 | sed 's/^/           /'
           else
             check "System.map has susfs_ symbols" fail
           fi
@@ -328,8 +330,8 @@ jobs:
 
         # 3. out/.config still shows SUSFS enabled (not overridden during build)
         grep -q "CONFIG_KSU_SUSFS=y" out/.config 2>/dev/null \
-          && check "out/.config still has CONFIG_KSU_SUSFS=y after build" ok \
-          || check "out/.config still has CONFIG_KSU_SUSFS=y after build" fail
+          && check "out/.config has CONFIG_KSU_SUSFS=y after build" ok \
+          || check "out/.config has CONFIG_KSU_SUSFS=y after build" fail
 
         # 4. Strings in Image binary â€” secondary confirmation
         IMAGE="out/arch/arm64/boot/Image"
@@ -339,13 +341,13 @@ jobs:
             check "Image binary has $COUNT susfs string(s)" ok
             strings "$IMAGE" | grep "susfs" | head -5 | sed 's/^/           /'
           else
-            echo "  [WARN] No susfs strings in Image â€” likely stripped (not critical)"
+            echo "  [WARN] No susfs strings in Image â€” may be stripped (not critical)"
           fi
         fi
 
-        # 5. Show all SUSFS-related objects that were built
+        # 5. Show all SUSFS/KSU objects built
         echo ""
-        echo "  Built SUSFS/KSU objects in out/:"
+        echo "  Built SUSFS/KSU objects:"
         find out/ -name "*.o" 2>/dev/null | grep -E "susfs|ksu" \
           | sed 's/^/    /' || echo "    (none found)"
 
@@ -373,14 +375,12 @@ jobs:
 
     - name: Upload Image artifact
       if: env.CHECK_IMAGE == 'true'
-      # FIX: v6 does not exist, use v4
       uses: actions/upload-artifact@v4
       with:
         name: Image-${{ matrix.ks }}
         path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
 
     - name: Upload AnyKernel3 ZIP
-      # FIX: v6 does not exist, use v4
       uses: actions/upload-artifact@v4
       with:
         name: AK3-${{ matrix.ks }}
@@ -402,7 +402,6 @@ jobs:
         fi
 
     - name: Upload build info
-      # FIX: v6 does not exist, use v4
       uses: actions/upload-artifact@v4
       with:
         name: INFO-${{ matrix.ks }}
