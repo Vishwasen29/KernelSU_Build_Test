@@ -146,8 +146,8 @@ jobs:
         # Verify KernelSU/kernel/Kconfig has SUSFS entries
         # (these must exist BEFORE make defconfig for configs to be recognised)
         grep -q "config KSU_SUSFS" KernelSU-Next/kernel/Kconfig 2>/dev/null \
-          && check "KernelSU/kernel/Kconfig has SUSFS entries" ok \
-          || check "KernelSU/kernel/Kconfig has SUSFS entries (SUSFS patch to KSU may be missing)" fail
+          && check "KernelSU-Next/kernel/Kconfig has SUSFS entries" ok \
+          || check "KernelSU-Next/kernel/Kconfig has SUSFS entries (SUSFS patch to KSU may be missing)" fail
 
         echo "------------------------------------------------"
         echo "  Result: $FAIL failure(s)"
