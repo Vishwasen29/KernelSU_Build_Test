@@ -123,35 +123,55 @@ jobs:
         echo "[OK] KernelSU-Next 4.19 patches applied"
 
     # -------------------------------------------------------------------------
-    # Fix schgm-flash.c clang -Werror build failure
+    # Fix schgm-flash.c / schgm-flash.h clang build errors
     #
-    # schgm-flash.c has multiple issues with newer clang (r547379+):
-    #   - 'struct smb_charger' incomplete definition (missing include chain)
-    #   - 'struct smb_irq_data' incomplete definition
-    #   - implicit declarations of smblib_read / smblib_write
-    #   - -Wvisibility errors on forward-declared struct parameters
+    # Three problems, all from the same root cause â€” missing includes:
+    #   1. schgm-flash.h declares functions taking 'struct smb_charger *' but
+    #      never includes the header that defines it, so clang sees only a
+    #      forward declaration and emits -Wvisibility errors.
+    #   2. schgm-flash.c accesses members of struct smb_charger and
+    #      struct smb_irq_data, and calls smblib_read/smblib_write â€” all
+    #      defined in smb-lib.h which is never included.
+    #   3. Because smb_charger is forward-declared in two different scopes
+    #      (header vs .c file parameter list), clang sees "conflicting types".
     #
-    # Root cause: this file was written assuming smb-lib.h would be transitively
-    # included by other headers. Newer clang enforces stricter include hygiene
-    # and the -Werror flag turns all these warnings into hard errors.
-    #
-    # Fix: disable -Werror specifically for schgm-flash.o in the driver Makefile.
-    # This is the standard kernel mechanism (CFLAGS_filename.o) and has zero
-    # effect on the compiled output â€” the code compiles identically, the compiler
-    # just no longer aborts on the warnings that were always present.
+    # Fix:
+    #   - schgm-flash.h: add forward declaration 'struct smb_charger;' so the
+    #     function prototypes are valid without a full struct definition.
+    #   - schgm-flash.c: add '#include "smb-lib.h"' to bring in the full
+    #     struct smb_charger, struct smb_irq_data, smblib_read, smblib_write.
     # -------------------------------------------------------------------------
     - name: Fix schgm-flash.c clang build error
       run: |
-        MAKEFILE="kernel_workspace/android-kernel/drivers/power/supply/qcom/Makefile"
+        DIR="kernel_workspace/android-kernel/drivers/power/supply/qcom"
+        HDR="$DIR/schgm-flash.h"
+        SRC="$DIR/schgm-flash.c"
 
-        if grep -q "CFLAGS_schgm-flash" "$MAKEFILE"; then
-          echo "[SKIP] CFLAGS_schgm-flash.o already set"
+        # Fix 1: add forward declaration to schgm-flash.h before first use
+        if grep -q "^struct smb_charger;" "$HDR"; then
+          echo "[SKIP] forward decl already in schgm-flash.h"
         else
-          echo "" >> "$MAKEFILE"
-          echo "# Disable -Werror for schgm-flash.o â€” newer clang is stricter" >> "$MAKEFILE"
-          echo "CFLAGS_schgm-flash.o += -Wno-error" >> "$MAKEFILE"
-          echo "[OK] Added CFLAGS_schgm-flash.o += -Wno-error to $MAKEFILE"
+          # Insert 'struct smb_charger;' before the first function prototype
+          # that uses it (the line containing 'schgm_flash_get_vreg_ok')
+          sed -i '/schgm_flash_get_vreg_ok/i struct smb_charger;' "$HDR"
+          echo "[OK] Added 'struct smb_charger;' forward decl to schgm-flash.h"
         fi
+
+        # Fix 2: add #include "smb-lib.h" to schgm-flash.c
+        if grep -q '"smb-lib.h"' "$SRC"; then
+          echo "[SKIP] smb-lib.h already included in schgm-flash.c"
+        else
+          # Insert after the last existing #include line in the file
+          sed -i '/#include "schgm-flash.h"/a #include "smb-lib.h"' "$SRC"
+          echo "[OK] Added '#include smb-lib.h' to schgm-flash.c"
+        fi
+
+        echo ""
+        echo "schgm-flash.h includes:"
+        grep "^#include\|^struct smb_charger" "$HDR" | head -10
+        echo ""
+        echo "schgm-flash.c includes:"
+        grep "^#include" "$SRC" | head -10
 
     - name: Apply SUSFS patch
       run: |
