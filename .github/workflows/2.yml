@@ -147,6 +147,7 @@ jobs:
         # (these must exist BEFORE make defconfig for configs to be recognised)
         grep -q "config KSU_SUSFS" KernelSU-Next/kernel/Kconfig 2>/dev/null \
           && check "KernelSU-Next/kernel/Kconfig has SUSFS entries" ok \
+          check "KernelSU-Next/kernel/Kconfig has SUSFS entries" fail
 
 
         echo "------------------------------------------------"
@@ -191,34 +192,36 @@ jobs:
     #   scripts/config operates directly on out/.config AFTER Kconfig is fully
     #   loaded, so it correctly enables configs and resolves dependencies.
     # -------------------------------------------------------------------------
-    - name: Enable SUSFS configs
+    - name: Enable SUSFS configs properly
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        cat <<EOF >> arch/arm64/configs/vendor/kona-perf_defconfig
-           CONFIG_KSU_MANUAL_HOOK=y
-           CONFIG_KSU_SUSFS=y
-           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-           CONFIG_KSU_SUSFS_SUS_PATH=y
-           CONFIG_KSU_SUSFS_SUS_MOUNT=y
-           CONFIG_KSU_SUSFS_SUS_KSTAT=y
-           CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-           CONFIG_KSU_SUSFS_ENABLE_LOG=y
-           CONFIG_KSU_SUSFS_SUS_SU=y
-        EOF
-        echo "[✓] SUSFS configs enabled"
-        
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-        # Run olddefconfig to resolve any newly-introduced dependencies
         export ARCH=arm64
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-        make O=out CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
-          olddefconfig
+        export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
 
-        echo "[OK] SUSFS configs applied"
+        CONFIG_FILE="out/.config"
+
+        # Enable base KSU
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU
+
+        # Enable SUSFS configs
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_PATH
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_MOUNT
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_KSTAT
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_TRY_UMOUNT
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SPOOF_UNAME
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_OPEN_REDIRECT
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_ENABLE_LOG
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_SU
+        scripts/config --file "$CONFIG_FILE" -e CONFIG_KSU_SUSFS_SUS_MAP
+
+        # Resolve dependencies properly
+        make O=out olddefconfig
+
+        echo "[OK] SUSFS configs applied correctly"
 
     # -------------------------------------------------------------------------
     # Now verify every SUSFS config is =y in the resolved .config
