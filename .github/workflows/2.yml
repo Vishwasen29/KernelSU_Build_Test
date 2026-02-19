@@ -99,6 +99,7 @@ jobs:
     - name: Verify SUSFS source integration (pre-build)
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        grep -R "susfs4ksu" .
         echo "================================================"
         echo " SUSFS Pre-Build Source Check"
         echo "================================================"
