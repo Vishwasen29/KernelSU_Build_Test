@@ -10,28 +10,23 @@
 #
 # Verified against actual source files:
 #
-# fs/Makefile:
-#   obj-y block ends with: stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
-#                           fs_context.o fs_parser.o
-#   Followed by blank line then: ifeq ($(CONFIG_BLOCK),y)
-#   → Insert susfs.o BEFORE ifeq ($(CONFIG_BLOCK),y)
-#
 # include/linux/mount.h:
 #   struct vfsmount has void *data BEFORE ANDROID_KABI_RESERVE(1-4)
-#   ANDROID_KABI_RESERVE(4) EXISTS → wrap with #ifdef CONFIG_KSU_SUSFS
-#   Hunk failed only because patch context expected void *data AFTER reserves
+#   ANDROID_KABI_RESERVE(4) EXISTS — hunk failed only because patch context
+#   expected void *data AFTER the reserves. Fix wraps it with #ifdef.
+#
+# fs/Makefile:
+#   obj-y block ends with fs_context.o fs_parser.o (patch only saw up to nsfs.o)
+#   Insert before ifeq ($(CONFIG_BLOCK),y) — always reliable.
 #
 # fs/namespace.c:
-#   HAS #include <linux/bootmem.h> (patch anchor was correct)
-#   HAS #include <linux/fs_context.h> added after sched/task.h → caused offset
-#   HAS "/* Maximum number of mounts in a mount namespace */" exactly
-#   → Use bootmem.h as anchor, insert after it
+#   All 3 hunks were rejected. The extern block may already exist from a
+#   separate KernelSU patch script — so we check susfs_def.h include and
+#   extern declarations INDEPENDENTLY and only add what is missing.
 #
 # fs/proc/task_mmu.c:
 #   Uses mmap_read_unlock(mm) NOT up_read(&mm->mmap_sem)
-#   Uses mmap_read_lock_killable(mm) NOT down_read(&mm->mmap_sem)
-#   Pattern: walk_page_range(...) → mmap_read_unlock(mm) → start_vaddr = end
-#   → Match mmap_read_unlock(mm) + start_vaddr = end
+#   Hunk failed due to this API difference + line offset shift.
 # =============================================================================
 
 set -e
@@ -57,17 +52,6 @@ fi
 
 # =============================================================================
 # FIX 1: fs/Makefile
-#
-# Actual file ends the obj-y block with:
-#   		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
-#   		fs_context.o fs_parser.o
-# Then a blank line, then ifeq ($(CONFIG_BLOCK),y)
-#
-# The patch's context only showed up to nsfs.o so it failed to match
-# because fs_context.o fs_parser.o continuation line was not in the
-# patch's expected context.
-#
-# Fix: insert before ifeq ($(CONFIG_BLOCK),y) — always reliable.
 # =============================================================================
 echo -e "${BOLD}[1/4]${NC} fs/Makefile — adding susfs.o build target"
 
@@ -100,23 +84,6 @@ PYEOF
 
 # =============================================================================
 # FIX 2: include/linux/mount.h
-#
-# Actual struct vfsmount:
-#   struct vfsmount {
-#       struct dentry *mnt_root;
-#       struct super_block *mnt_sb;
-#       int mnt_flags;
-#       void *data;              ← BEFORE the KABI reserves
-#       ANDROID_KABI_RESERVE(1);
-#       ANDROID_KABI_RESERVE(2);
-#       ANDROID_KABI_RESERVE(3);
-#       ANDROID_KABI_RESERVE(4); ← patch target
-#   } __randomize_layout;
-#
-# Hunk failed because patch expected void *data AFTER KABI_RESERVE(4).
-# Fix: regex match ANDROID_KABI_RESERVE(4) directly, no context dependency.
-# ANDROID_KABI_USE(4, ...) expands to an anonymous union consuming the same
-# u64 space — struct size and layout are completely unchanged.
 # =============================================================================
 echo ""
 echo -e "${BOLD}[2/4]${NC} include/linux/mount.h — wrapping ANDROID_KABI_RESERVE(4)"
@@ -132,14 +99,13 @@ if "susfs_mnt_id_backup" in content:
     print("  \033[33m[SKIP]\033[0m Already contains susfs_mnt_id_backup")
     sys.exit(0)
 
-# Match with any leading whitespace to be tab/space agnostic
 pattern = re.compile(r'([ \t]*)ANDROID_KABI_RESERVE\s*\(\s*4\s*\)\s*;')
 m = pattern.search(content)
 if not m:
     print("  \033[31m[FAIL]\033[0m ANDROID_KABI_RESERVE(4) not found in include/linux/mount.h")
     sys.exit(1)
 
-indent = m.group(1)  # preserve original tab indentation
+indent = m.group(1)
 replacement = (
     f"#ifdef CONFIG_KSU_SUSFS\n"
     f"{indent}ANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n"
@@ -160,22 +126,18 @@ PYEOF
 # =============================================================================
 # FIX 3: fs/namespace.c
 #
-# Actual includes at top (relevant lines):
-#   #include <linux/bootmem.h>      ← patch anchor IS present (correct)
-#   #include <linux/task_work.h>
-#   #include <linux/sched/task.h>
-#   #include <linux/fs_context.h>   ← this extra include shifted line numbers
+# IMPORTANT: All 3 namespace.c hunks were rejected by git apply.
+# However, the extern block (susfs_is_current_ksu_domain etc.) may already
+# exist if a separate KernelSU patch script added it independently.
+# We therefore check and apply each part INDEPENDENTLY:
+#   Part A — susfs_def.h include (after bootmem.h)
+#   Part B — extern declarations (before /* Maximum number of mounts */)
+# This way a partial state from another script is handled correctly.
 #
-# The hunk failed NOT because bootmem.h is missing, but because
-# fs_context.h was added after sched/task.h, pushing all subsequent
-# lines down and breaking the patch's line-number context.
-#
-# "/* Maximum number of mounts in a mount namespace */" IS present exactly.
-#
-# Hunks 7 & 8 only add blank lines inside vfs_kern_mount — cosmetic, skipped.
+# Hunks 7 & 8 only add blank lines in vfs_kern_mount — skipped (cosmetic).
 # =============================================================================
 echo ""
-echo -e "${BOLD}[3/4]${NC} fs/namespace.c — include and extern declarations"
+echo -e "${BOLD}[3/4]${NC} fs/namespace.c — include and extern declarations (checked independently)"
 
 python3 << 'PYEOF'
 import sys, re
@@ -184,79 +146,90 @@ fp = "fs/namespace.c"
 with open(fp) as f:
     content = f.read()
 
-if "CONFIG_KSU_SUSFS_SUS_MOUNT" in content or "susfs_is_current_ksu_domain" in content:
-    print("  \033[33m[SKIP]\033[0m Already contains SUSFS declarations")
-    sys.exit(0)
+applied_a = False
+applied_b = False
 
-# Part A — insert susfs_def.h include after bootmem.h
-# bootmem.h IS confirmed present in this kernel
-ANCHOR_INCLUDE = "#include <linux/bootmem.h>"
-if ANCHOR_INCLUDE not in content:
-    # Should not happen, but safe fallback
-    for fallback in ["#include <linux/memblock.h>",
-                     "#include <linux/sched/task.h>",
-                     "#include <linux/fs_context.h>"]:
-        if fallback in content:
-            ANCHOR_INCLUDE = fallback
+# ------------------------------------------------------------------
+# Part A: susfs_def.h include — check independently
+# ------------------------------------------------------------------
+if "susfs_def.h" in content:
+    print("  \033[33m[SKIP]\033[0m Part A: susfs_def.h include already present")
+    applied_a = True
+else:
+    INCLUDE_BLOCK = (
+        "\n"
+        "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+        "#include <linux/susfs_def.h>\n"
+        "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+    )
+
+    # Try anchors in order of preference
+    anchor = None
+    for candidate in [
+        "#include <linux/bootmem.h>",
+        "#include <linux/memblock.h>",
+        "#include <linux/sched/task.h>",
+        "#include <linux/task_work.h>",
+        "#include <linux/fs_context.h>",
+    ]:
+        if candidate in content:
+            anchor = candidate
             break
-    else:
-        print("  \033[31m[FAIL]\033[0m Cannot find include anchor in fs/namespace.c")
+
+    if anchor is None:
+        print("  \033[31m[FAIL]\033[0m Part A: Cannot find include anchor in fs/namespace.c")
         sys.exit(1)
 
-INCLUDE_BLOCK = (
-    "\n"
-    "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-    "#include <linux/susfs_def.h>\n"
-    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-)
-content = content.replace(ANCHOR_INCLUDE, ANCHOR_INCLUDE + INCLUDE_BLOCK, 1)
-print(f"  \033[32m[PASS]\033[0m susfs_def.h include inserted after: {ANCHOR_INCLUDE}")
+    content = content.replace(anchor, anchor + INCLUDE_BLOCK, 1)
+    print(f"  \033[32m[PASS]\033[0m Part A: susfs_def.h include inserted after: {anchor}")
+    applied_a = True
 
-# Part B — insert extern block before "/* Maximum number of mounts */"
-# Confirmed present exactly in this kernel
-EXTERN_BLOCK = (
-    "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-    "extern bool susfs_is_current_ksu_domain(void);\n"
-    "extern bool susfs_is_sdcard_android_data_decrypted;\n"
-    "\n"
-    "static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);\n"
-    "\n"
-    "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n"
-    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-    "\n"
-)
+# ------------------------------------------------------------------
+# Part B: extern declarations — check independently
+# ------------------------------------------------------------------
+if "susfs_is_current_ksu_domain" in content:
+    print("  \033[33m[SKIP]\033[0m Part B: extern declarations already present")
+    applied_b = True
+else:
+    EXTERN_BLOCK = (
+        "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+        "extern bool susfs_is_current_ksu_domain(void);\n"
+        "extern bool susfs_is_sdcard_android_data_decrypted;\n"
+        "\n"
+        "static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);\n"
+        "\n"
+        "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n"
+        "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+        "\n"
+    )
 
-ANCHOR_EXTERN = "/* Maximum number of mounts in a mount namespace */"
-if ANCHOR_EXTERN not in content:
-    print("  \033[31m[FAIL]\033[0m '/* Maximum number of mounts */' not found in fs/namespace.c")
-    sys.exit(1)
+    ANCHOR_EXTERN = "/* Maximum number of mounts in a mount namespace */"
+    if ANCHOR_EXTERN in content:
+        content = content.replace(ANCHOR_EXTERN, EXTERN_BLOCK + ANCHOR_EXTERN, 1)
+        print("  \033[32m[PASS]\033[0m Part B: extern declarations inserted before '/* Maximum number of mounts */'")
+        applied_b = True
+    else:
+        # Fallback: before sysctl_mount_max declaration
+        m = re.search(r'unsigned int sysctl_mount_max', content)
+        if m:
+            content = content[:m.start()] + EXTERN_BLOCK + content[m.start():]
+            print("  \033[32m[PASS]\033[0m Part B: extern declarations inserted before sysctl_mount_max (fallback)")
+            applied_b = True
+        else:
+            print("  \033[31m[FAIL]\033[0m Part B: Cannot find extern insertion anchor in fs/namespace.c")
+            sys.exit(1)
 
-content = content.replace(ANCHOR_EXTERN, EXTERN_BLOCK + ANCHOR_EXTERN, 1)
+if applied_a or applied_b:
+    with open(fp, 'w') as f:
+        f.write(content)
 
-with open(fp, 'w') as f:
-    f.write(content)
-
-print("  \033[32m[PASS]\033[0m Extern declarations inserted before '/* Maximum number of mounts */'")
 print("  \033[33m[SKIP]\033[0m Hunks 7 & 8 — blank lines only in vfs_kern_mount, no functional effect")
 PYEOF
 [ $? -ne 0 ] && FAILED=$((FAILED+1))
 
 # =============================================================================
 # FIX 4: fs/proc/task_mmu.c
-#
-# CRITICAL: This kernel does NOT use up_read(&mm->mmap_sem).
-# It uses the newer mmap locking API:
-#   mmap_read_lock_killable(mm)   instead of down_read(&mm->mmap_sem)
-#   mmap_read_unlock(mm)          instead of up_read(&mm->mmap_sem)
-#
-# The previous script would have SILENTLY FAILED on fix 4 because it
-# searched for up_read(&mm->mmap_sem) which does not exist here.
-#
-# Actual pattern in pagemap_read():
-#   ret = walk_page_range(start_vaddr, end, &pagemap_walk);
-#   mmap_read_unlock(mm);        ← match this
-#   start_vaddr = end;           ← insert between these two lines
-#
+# Uses mmap_read_unlock(mm) — NOT up_read(&mm->mmap_sem)
 # =============================================================================
 echo ""
 echo -e "${BOLD}[4/4]${NC} fs/proc/task_mmu.c — SUS_MAP block in pagemap_read()"
@@ -284,10 +257,10 @@ INSERT = (
     "#endif\n"
 )
 
-# Primary pattern: mmap_read_unlock(mm) — confirmed in this kernel
+# Primary: mmap_read_unlock(mm) — confirmed in this kernel
 pattern = re.compile(
-    r'([ \t]*mmap_read_unlock\s*\(\s*mm\s*\)\s*;\s*\n)'  # group 1: mmap_read_unlock line
-    r'([ \t]*start_vaddr\s*=\s*end\s*;)'                  # group 2: start_vaddr = end
+    r'([ \t]*mmap_read_unlock\s*\(\s*mm\s*\)\s*;\s*\n)'
+    r'([ \t]*start_vaddr\s*=\s*end\s*;)'
 )
 m = pattern.search(content)
 if m:
@@ -297,7 +270,7 @@ if m:
     print("  \033[32m[PASS]\033[0m SUS_MAP block inserted after mmap_read_unlock(mm)")
     sys.exit(0)
 
-# Fallback: older kernels with up_read(&mm->mmap_sem)
+# Fallback: up_read(&mm->mmap_sem)
 pattern2 = re.compile(
     r'([ \t]*up_read\s*\(\s*&mm->mmap_sem\s*\)\s*;\s*\n)'
     r'([ \t]*start_vaddr\s*=\s*end\s*;)'
@@ -323,13 +296,11 @@ if m3:
     print("  \033[32m[PASS]\033[0m SUS_MAP block inserted after up_read(&mm->mmap_lock) [fallback]")
     sys.exit(0)
 
-# None matched — print diagnostic
 print("  \033[31m[FAIL]\033[0m No matching unlock pattern found before 'start_vaddr = end'")
-print("        Searched for: mmap_read_unlock / up_read mmap_sem / up_read mmap_lock")
 m_ctx = re.search(r'static ssize_t pagemap_read', content)
 if m_ctx:
     lines = content[m_ctx.start():m_ctx.start()+3000].split('\n')
-    print("        Context lines in pagemap_read containing relevant keywords:")
+    print("        Relevant lines in pagemap_read:")
     for i, line in enumerate(lines):
         if any(k in line for k in ['unlock', 'up_read', 'mmap', 'start_vaddr', 'walk_page']):
             print(f"          ~+{i}: {line.rstrip()}")
@@ -338,12 +309,26 @@ PYEOF
 [ $? -ne 0 ] && FAILED=$((FAILED+1))
 
 # =============================================================================
+# CLEANUP: Remove all .rej files created by git apply --reject
+# These are no longer needed once the fix script has run
+# =============================================================================
+echo ""
+echo -e "${BOLD}[cleanup]${NC} Removing leftover .rej files..."
+REJ_COUNT=$(find . -name "*.rej" 2>/dev/null | wc -l)
+if [ "$REJ_COUNT" -gt 0 ]; then
+    find . -name "*.rej" -print -delete
+    echo -e "  ${GREEN}[DONE]${NC} Removed $REJ_COUNT .rej file(s)"
+else
+    echo -e "  ${YELLOW}[SKIP]${NC} No .rej files found"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""
 echo -e "${BOLD}${CYAN}============================================================${NC}"
 if [ "$FAILED" -eq 0 ]; then
-    echo -e " ${GREEN}${BOLD}All 4 fixes applied successfully!${NC}"
+    echo -e " ${GREEN}${BOLD}All fixes applied successfully!${NC}"
     echo -e "${BOLD}${CYAN}============================================================${NC}"
     echo ""
     echo "  Verify your defconfig has:"
