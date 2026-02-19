@@ -80,7 +80,7 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         set +e
-        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus4.patch
+        git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus4.patch || true
 
     - name: Fix SUSFS rejects
       run: |
