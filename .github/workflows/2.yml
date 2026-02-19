@@ -122,6 +122,30 @@ jobs:
         echo ""
         echo "[OK] KernelSU-Next 4.19 patches applied"
 
+    # -------------------------------------------------------------------------
+    # Fix schgm-flash.c clang compilation error
+    #
+    # schgm-flash.c uses 'struct smb_charger' members directly (e.g. chg->headroom_mode)
+    # but only has a forward declaration of the struct â€” not the full definition.
+    # The full definition lives in smb5-lib.h. Older gcc tolerated this;
+    # newer clang (r547379+) correctly rejects it with:
+    #   "error: incomplete definition of type 'struct smb_charger'"
+    #
+    # Fix: add #include "smb5-lib.h" after the existing #include "schgm-flash.h"
+    # -------------------------------------------------------------------------
+    - name: Fix schgm-flash.c clang build error
+      run: |
+        FILE="kernel_workspace/android-kernel/drivers/power/supply/qcom/schgm-flash.c"
+
+        if grep -q '"smb5-lib.h"' "$FILE"; then
+          echo "[SKIP] smb5-lib.h already included in schgm-flash.c"
+        else
+          # Insert #include "smb5-lib.h" right after #include "schgm-flash.h"
+          sed -i '/#include "schgm-flash.h"/a #include "smb5-lib.h"' "$FILE"
+          echo "[OK] Added #include \"smb5-lib.h\" to schgm-flash.c"
+          grep -n "include" "$FILE" | head -10
+        fi
+
     - name: Apply SUSFS patch
       run: |
         cd kernel_workspace/android-kernel
