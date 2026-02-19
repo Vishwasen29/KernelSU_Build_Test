@@ -83,7 +83,7 @@ jobs:
 
     - name: add susfs to kconfig
       run: |
-      bash $GITHUB_WORKSPACE/patches/config.sh
+        bash $GITHUB_WORKSPACE/patches/config.sh
       
 
     - name: Ensure SUSFS Kconfig is sourced
