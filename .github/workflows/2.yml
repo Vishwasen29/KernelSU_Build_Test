@@ -54,7 +54,7 @@ jobs:
 
     - name: Download kernel source
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        cd $GITHUB_WORKSPACE/kernel_workspace
         git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
@@ -83,7 +83,7 @@ jobs:
 
     - name: add susfs to kconfig
       run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         bash $GITHUB_WORKSPACE/patches/config.sh
       
 
