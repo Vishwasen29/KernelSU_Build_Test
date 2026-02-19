@@ -1,4 +1,4 @@
-name: 4 Build LineageOS OPlus SM8250 Kernel
+name: 5 Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
@@ -198,24 +198,23 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         CONFIG_FILE="out/.config"
+        FRAGMENT="out/susfs_fragment.config"
 
-        echo "Enabling SUSFS configs by direct write to .config..."
-        # We write directly instead of using scripts/config + olddefconfig.
-        # make olddefconfig strips CONFIG_KSU_SUSFS_* back out because
-        # backslashxx Kconfig has dependency conditions olddefconfig sees as
-        # unmet. On non-GKI 4.19 there is no ABI enforcement so direct
-        # write is safe â€” the compiler sees the #ifdef at build time.
-        #
-        # For each config: remove any existing line then append =y
-
+        # Write to both .config AND a fragment file.
+        # The fragment is used via KCONFIG_ALLCONFIG in the build step so
+        # that make syncconfig re-applies these values instead of stripping
+        # them when it re-evaluates Kconfig dependency conditions.
         set_config() {
           local key="$1"
           sed -i "/^${key}[= ]/d" "$CONFIG_FILE"
           sed -i "/^# ${key} is not set/d" "$CONFIG_FILE"
           echo "${key}=y" >> "$CONFIG_FILE"
+          echo "${key}=y" >> "$FRAGMENT"
           echo "  SET: ${key}=y"
         }
 
+        > "$FRAGMENT"
+        echo "Writing SUSFS configs to .config and fragment..."
         set_config CONFIG_KSU_SUSFS
         set_config CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
         set_config CONFIG_KSU_SUSFS_SUS_PATH
@@ -229,8 +228,7 @@ jobs:
         set_config CONFIG_KSU_SUSFS_SUS_SU
         set_config CONFIG_KSU_SUSFS_SUS_MAP
 
-        echo "[OK] All SUSFS configs written"
-        echo "Verifying written entries:"
+        echo "[OK] Done. Fragment file: $FRAGMENT"
         grep "CONFIG_KSU_SUSFS" "$CONFIG_FILE" | sed 's/^/  /'
 
 
@@ -289,8 +287,12 @@ jobs:
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
         export KBUILD_BUILD_HOST=Github-Action
         export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+        # KCONFIG_ALLCONFIG forces make syncconfig to keep our SUSFS configs
+        # even if Kconfig dependency evaluation would otherwise strip them
+        export KCONFIG_ALLCONFIG=out/susfs_fragment.config
         make -j$(nproc --all) O=out CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1
+
 
     - name: Check kernel output
       run: |
@@ -323,16 +325,22 @@ jobs:
           fi
         }
 
-        # 1. susfs.o must exist â€” confirms susfs.c was compiled
-        [ -f "out/fs/susfs.o" ] \
-          && check "out/fs/susfs.o compiled" ok \
-          || check "out/fs/susfs.o compiled" fail
+        # 1. Find susfs.o â€” location differs by KernelSU variant:
+        #    rsuntk:     out/fs/susfs.o
+        #    backslashxx: out/drivers/kernelsu/susfs.o or out/fs/susfs.o
+        SUSFS_OBJ=$(find out/ -name "susfs.o" 2>/dev/null | head -1)
+        if [ -n "$SUSFS_OBJ" ]; then
+          check "susfs.o compiled ($SUSFS_OBJ)" ok
+        else
+          check "susfs.o compiled (not found anywhere in out/)" fail
+        fi
 
         # 2. System.map susfs_ symbols â€” confirms SUSFS linked into vmlinux
         SYSMAP="out/System.map"
         if [ -f "$SYSMAP" ]; then
-          COUNT=$(grep -c "susfs_" "$SYSMAP" 2>/dev/null || echo 0)
-          if [ "$COUNT" -gt 0 ]; then
+          COUNT=$(grep -c "susfs_" "$SYSMAP" 2>/dev/null || true)
+          COUNT=$(echo "$COUNT" | tr -d '[:space:]')
+          if [ -n "$COUNT" ] && [ "$COUNT" -gt 0 ] 2>/dev/null; then
             check "System.map has $COUNT susfs_ symbol(s)" ok
             grep "susfs_" "$SYSMAP" | head -8 | sed 's/^/           /'
           else
@@ -342,16 +350,22 @@ jobs:
           echo "  [WARN] System.map not found â€” skipping symbol check"
         fi
 
-        # 3. out/.config still shows SUSFS enabled (not overridden during build)
-        grep -q "CONFIG_KSU_SUSFS=y" out/.config 2>/dev/null \
-          && check "out/.config has CONFIG_KSU_SUSFS=y after build" ok \
-          || check "out/.config has CONFIG_KSU_SUSFS=y after build" fail
+        # 3. out/.config has CONFIG_KSU_SUSFS=y
+        # Note: we write this directly so it should always be present
+        if grep -q "^CONFIG_KSU_SUSFS=y" out/.config 2>/dev/null; then
+          check "out/.config has CONFIG_KSU_SUSFS=y after build" ok
+        else
+          check "out/.config has CONFIG_KSU_SUSFS=y after build" fail
+          echo "         Current KSU/SUSFS entries in .config:"
+          grep "KSU_SUSFS" out/.config | head -5 | sed 's/^/           /' || echo "           (none)"
+        fi
 
         # 4. Strings in Image binary â€” secondary confirmation
         IMAGE="out/arch/arm64/boot/Image"
         if [ -f "$IMAGE" ]; then
-          COUNT=$(strings "$IMAGE" 2>/dev/null | grep -c "susfs" || echo 0)
-          if [ "$COUNT" -gt 0 ]; then
+          COUNT=$(strings "$IMAGE" 2>/dev/null | grep -c "susfs" || true)
+          COUNT=$(echo "$COUNT" | tr -d '[:space:]')
+          if [ -n "$COUNT" ] && [ "$COUNT" -gt 0 ] 2>/dev/null; then
             check "Image binary has $COUNT susfs string(s)" ok
             strings "$IMAGE" | grep "susfs" | head -5 | sed 's/^/           /'
           else
@@ -362,13 +376,13 @@ jobs:
         # 5. Show all SUSFS/KSU objects built
         echo ""
         echo "  Built SUSFS/KSU objects:"
-        find out/ -name "*.o" 2>/dev/null | grep -E "susfs|ksu" \
-          | sed 's/^/    /' || echo "    (none found)"
+        find out/ -name "*.o" 2>/dev/null | grep -iE "susfs|ksu" | sed 's/^/    /' || echo "    (none found)"
 
         echo "------------------------------------------------"
         echo "  Result: $FAIL failure(s)"
         echo "================================================"
         [ "$FAIL" -eq 0 ] || exit 1
+
 
     - name: Prepare AnyKernel3 and package
       run: |
