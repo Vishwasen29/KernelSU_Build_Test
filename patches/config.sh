@@ -78,4 +78,4 @@ config KSU_SUSFS_SUS_MAP
 
 EOF
 
-echo "[OK] SUSFS Kconfig entries injected
+echo "[OK] SUSFS Kconfig entries injected into: $KSU_KCONFIG"
