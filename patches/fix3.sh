@@ -1,465 +1,360 @@
 #!/bin/bash
 # =============================================================================
 # fix_susfs_rejects.sh
-# Manually applies all failed SuSFS v2.0.00 patch hunks for the
-# LineageOS android_kernel_oneplus_sm8250 (lineage-23.2) tree.
+# Fixes the 4 rejected SUSFS patch hunks for LineageOS 23.2
+# android_kernel_oneplus_sm8250 (OnePlus 9R / lemonades)
 #
-# Covers:
-#   - fs/Makefile                  (susfs.o obj-y entry)
-#   - include/linux/mount.h        (ANDROID_KABI_RESERVE(4) -> SuSFS ifdef)
-#   - fs/namespace.c               (includes, externs, vfs_kern_mount, clone_mnt)
-#   - fs/proc/task_mmu.c           (pagemap_read SUS_MAP block + vma decl fix)
+# Run from kernel source root:
+#   cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+#   bash fix_susfs_rejects.sh
 #
-# Run BEFORE the SuSFS patch step in your workflow.
+# Verified against actual source files:
+#
+# fs/Makefile:
+#   obj-y block ends with: stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+#                           fs_context.o fs_parser.o
+#   Followed by blank line then: ifeq ($(CONFIG_BLOCK),y)
+#   → Insert susfs.o BEFORE ifeq ($(CONFIG_BLOCK),y)
+#
+# include/linux/mount.h:
+#   struct vfsmount has void *data BEFORE ANDROID_KABI_RESERVE(1-4)
+#   ANDROID_KABI_RESERVE(4) EXISTS → wrap with #ifdef CONFIG_KSU_SUSFS
+#   Hunk failed only because patch context expected void *data AFTER reserves
+#
+# fs/namespace.c:
+#   HAS #include <linux/bootmem.h> (patch anchor was correct)
+#   HAS #include <linux/fs_context.h> added after sched/task.h → caused offset
+#   HAS "/* Maximum number of mounts in a mount namespace */" exactly
+#   → Use bootmem.h as anchor, insert after it
+#
+# fs/proc/task_mmu.c:
+#   Uses mmap_read_unlock(mm) NOT up_read(&mm->mmap_sem)
+#   Uses mmap_read_lock_killable(mm) NOT down_read(&mm->mmap_sem)
+#   Pattern: walk_page_range(...) → mmap_read_unlock(mm) → start_vaddr = end
+#   → Match mmap_read_unlock(mm) + start_vaddr = end
 # =============================================================================
 
 set -e
+FAILED=0
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
-info()  { echo -e "${GREEN}[+]${NC} $1"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
-error() { echo -e "${RED}[-]${NC} $1"; exit 1; }
+pass() { echo -e "  ${GREEN}[PASS]${NC} $1"; }
+fail() { echo -e "  ${RED}[FAIL]${NC} $1"; FAILED=$((FAILED+1)); }
+skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1"; }
 
-# GitHub Actions kernel source root
-KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_workspace/android-kernel"
-cd "$KERNEL_DIR" || error "Could not cd into $KERNEL_DIR — is GITHUB_WORKSPACE set?"
-[ -f "Makefile" ] || error "Makefile not found in $KERNEL_DIR — wrong path?"
+echo ""
+echo -e "${BOLD}${CYAN}============================================================${NC}"
+echo -e "${BOLD}${CYAN} SUSFS Reject Fixer — lineage-23.2 sm8250 / lemonades${NC}"
+echo -e "${BOLD}${CYAN}============================================================${NC}"
+echo ""
 
-info "Working directory: $(pwd)"
-
-# Clean up leftover .rej/.orig files from previous runs
-info "Cleaning up leftover .rej and .orig files..."
-find . -name "*.rej" -delete
-find . -name "*.orig" -delete
-
-BACKUP_DIR="${KERNEL_DIR}/.susfs_fix_backups"
-mkdir -p "$BACKUP_DIR"
-
-backup() {
-    local file="$1"
-    local dest="$BACKUP_DIR/$(echo "$file" | tr '/' '_').bak"
-    cp "$file" "$dest"
-    info "Backed up $file"
-}
-
-# =============================================================================
-# 1. fs/Makefile
-#    The patch adds susfs.o to the obj-y list but fails because the Makefile
-#    line wraps differently in this kernel tree.
-#    Fix: insert 'obj-y += susfs.o' after the obj-y block ends safely.
-# =============================================================================
-MAKEFILE="fs/Makefile"
-info "Patching $MAKEFILE ..."
-[ -f "$MAKEFILE" ] || error "File not found: $MAKEFILE"
-backup "$MAKEFILE"
-
-if grep -q "susfs.o" "$MAKEFILE"; then
-    warn "$MAKEFILE already contains susfs.o, skipping."
-else
-    # The patch adds susfs.o to the obj-y list. We cannot safely inline it into
-    # a multi-line obj-y block (lines ending with \) as that corrupts Makefile
-    # syntax. Instead, find where the first obj-y block ends and insert a
-    # standalone 'obj-y += susfs.o' line immediately after it.
-    python3 - "$MAKEFILE" <<'PYEOF'
-import sys
-filepath = sys.argv[1]
-with open(filepath, 'r') as f:
-    lines = f.readlines()
-
-in_block = False
-insert_after = -1
-for i, line in enumerate(lines):
-    stripped = line.rstrip('\n')
-    if not in_block and 'obj-y' in stripped and ':=' in stripped:
-        in_block = True
-    if in_block:
-        if stripped.rstrip().endswith('\\'):
-            insert_after = i
-        else:
-            insert_after = i
-            break
-
-if insert_after >= 0:
-    lines.insert(insert_after + 1, 'obj-y += susfs.o\n')
-    with open(filepath, 'w') as f:
-        f.writelines(lines)
-    print("[+] fs/Makefile patched — susfs.o added after obj-y block.")
-else:
-    with open(filepath, 'a') as f:
-        f.write('\nobj-y += susfs.o\n')
-    print("[!] fs/Makefile: used fallback append.")
-PYEOF
+if [ ! -f "Makefile" ] || ! grep -qE "KERNELVERSION|PATCHLEVEL" Makefile 2>/dev/null; then
+    echo -e "${RED}ERROR:${NC} Run this from the kernel source root directory."
+    exit 1
 fi
 
 # =============================================================================
-# 2. include/linux/mount.h
-#    Replace ANDROID_KABI_RESERVE(4) with the SuSFS ifdef block
+# FIX 1: fs/Makefile
+#
+# Actual file ends the obj-y block with:
+#   		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+#   		fs_context.o fs_parser.o
+# Then a blank line, then ifeq ($(CONFIG_BLOCK),y)
+#
+# The patch's context only showed up to nsfs.o so it failed to match
+# because fs_context.o fs_parser.o continuation line was not in the
+# patch's expected context.
+#
+# Fix: insert before ifeq ($(CONFIG_BLOCK),y) — always reliable.
 # =============================================================================
-MOUNT_H="include/linux/mount.h"
-info "Patching $MOUNT_H ..."
-[ -f "$MOUNT_H" ] || error "File not found: $MOUNT_H"
-backup "$MOUNT_H"
+echo -e "${BOLD}[1/4]${NC} fs/Makefile — adding susfs.o build target"
 
-if grep -q "CONFIG_KSU_SUSFS" "$MOUNT_H"; then
-    warn "$MOUNT_H already contains SuSFS changes, skipping."
-elif grep -q "ANDROID_KABI_RESERVE(4);" "$MOUNT_H"; then
-    awk '
-    /ANDROID_KABI_RESERVE\(4\);/ && !done {
-        print "#ifdef CONFIG_KSU_SUSFS"
-        print "\tANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);"
-        print "#else"
-        print "\tANDROID_KABI_RESERVE(4);"
-        print "#endif"
-        done=1
-        next
-    }
-    { print }
-    ' "$MOUNT_H" > "${MOUNT_H}.tmp" && mv "${MOUNT_H}.tmp" "$MOUNT_H"
-    info "$MOUNT_H patched successfully."
-else
-    warn "Could not find ANDROID_KABI_RESERVE(4) in $MOUNT_H — manual edit required."
-fi
-
-# =============================================================================
-# 3. fs/namespace.c
-#    3a. Include block at top (after sched/task.h)
-#    3b. Extern declarations before pnode.h
-#    3c. vfs_kern_mount() — mnt_id backup after alloc + SuSFS id on ksu domain
-#    3d. clone_mnt() — SuSFS sus_mount block
-# =============================================================================
-NAMESPACE_C="fs/namespace.c"
-info "Patching $NAMESPACE_C ..."
-[ -f "$NAMESPACE_C" ] || error "File not found: $NAMESPACE_C"
-backup "$NAMESPACE_C"
-
-# 3a + 3b: includes and externs
-if grep -q "CONFIG_KSU_SUSFS_SUS_MOUNT" "$NAMESPACE_C"; then
-    warn "$NAMESPACE_C already has SUS_MOUNT changes, skipping 3a+3b."
-else
-    if grep -q '#include <linux/sched/task.h>' "$NAMESPACE_C"; then
-        awk '
-        /#include <linux\/sched\/task.h>/ && !done {
-            print
-            print ""
-            print "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
-            print "#include <linux/susfs_def.h>"
-            print "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
-            done=1
-            next
-        }
-        { print }
-        ' "$NAMESPACE_C" > "${NAMESPACE_C}.tmp" && mv "${NAMESPACE_C}.tmp" "$NAMESPACE_C"
-        info "$NAMESPACE_C 3a (include) applied."
-    else
-        warn "Could not find '#include <linux/sched/task.h>' in $NAMESPACE_C."
-    fi
-
-    if grep -q '#include "pnode.h"' "$NAMESPACE_C" && ! grep -q "susfs_is_current_ksu_domain" "$NAMESPACE_C"; then
-        awk '
-        /#include "pnode.h"/ && !done {
-            print "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
-            print "extern bool susfs_is_current_ksu_domain(void);"
-            print "extern bool susfs_is_sdcard_android_data_decrypted;"
-            print ""
-            print "static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);"
-            print ""
-            print "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */"
-            print "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
-            print ""
-            done=1
-        }
-        { print }
-        ' "$NAMESPACE_C" > "${NAMESPACE_C}.tmp" && mv "${NAMESPACE_C}.tmp" "$NAMESPACE_C"
-        info "$NAMESPACE_C 3b (externs) applied."
-    fi
-fi
-
-# 3c + 3d: vfs_kern_mount and clone_mnt
-python3 - "$NAMESPACE_C" <<'PYEOF'
+python3 << 'PYEOF'
 import sys
 
-filepath = sys.argv[1]
-with open(filepath, 'r') as f:
+fp = "fs/Makefile"
+with open(fp) as f:
     content = f.read()
 
-changed = False
+MARKER = "obj-$(CONFIG_KSU_SUSFS) += susfs.o"
+if MARKER in content:
+    print("  \033[33m[SKIP]\033[0m Already contains susfs.o entry")
+    sys.exit(0)
 
-# --- 3c hunk ~949: mnt_id backup after alloc_vfsmnt(name) ---
-if 'susfs_mnt_id_backup' not in content:
-    old_949 = (
-        '\tmnt = alloc_vfsmnt(name);\n'
-        '\tif (!mnt)\n'
-        '\t\treturn ERR_PTR(-ENOMEM);\n'
-    )
-    new_949 = (
-        '\tmnt = alloc_vfsmnt(name);\n'
-        '\tif (!mnt)\n'
-        '\t\treturn ERR_PTR(-ENOMEM);\n'
-        '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-        '\tmnt->mnt.susfs_mnt_id_backup = mnt->mnt_id;\n'
-        '#endif\n'
-    )
-    if old_949 in content:
-        content = content.replace(old_949, new_949, 1)
-        print("[+] namespace.c 3c hunk ~949 (mnt_id backup) applied.")
-        changed = True
-    else:
-        print("[!] namespace.c 3c hunk ~949: pattern not found.")
-        print("    Manually add after alloc_vfsmnt(name) success in vfs_kern_mount():")
-        print("    #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT")
-        print("    mnt->mnt.susfs_mnt_id_backup = mnt->mnt_id;")
-        print("    #endif")
-else:
-    print("[!] namespace.c 3c: susfs_mnt_id_backup already present, skipping.")
+INSERT = MARKER + "\n\n"
+ANCHOR = "ifeq ($(CONFIG_BLOCK),y)"
 
-# --- 3c hunk ~979: SuSFS mnt_id assignment in vfs_kern_mount lock block ---
-if 'susfs_get_sus_mnt_id' not in content:
-    old_979 = (
-        '\tmnt->mnt.mnt_sb = root->d_sb;\n'
-        '\tmnt->mnt_mountpoint = mnt->mnt.mnt_root;\n'
-        '\tmnt->mnt_parent = mnt;\n'
-        '\tlock_mount_hash();\n'
-        '\tlist_add_tail(&mnt->mnt_instance, &root->d_sb->s_mounts);\n'
-        '\tunlock_mount_hash();\n'
-    )
-    new_979 = (
-        '\tmnt->mnt.mnt_sb = root->d_sb;\n'
-        '\tmnt->mnt_mountpoint = mnt->mnt.mnt_root;\n'
-        '\tmnt->mnt_parent = mnt;\n'
-        '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-        '\tif (susfs_is_current_ksu_domain()) {\n'
-        '\t\tmnt->mnt_id = susfs_get_sus_mnt_id();\n'
-        '\t\tmnt->mnt.susfs_mnt_id_backup = mnt->mnt_id;\n'
-        '\t}\n'
-        '#endif\n'
-        '\tlock_mount_hash();\n'
-        '\tlist_add_tail(&mnt->mnt_instance, &root->d_sb->s_mounts);\n'
-        '\tunlock_mount_hash();\n'
-    )
-    if old_979 in content:
-        content = content.replace(old_979, new_979, 1)
-        print("[+] namespace.c 3c hunk ~979 (SuSFS mnt_id in lock block) applied.")
-        changed = True
-    else:
-        print("[!] namespace.c 3c hunk ~979: pattern not found.")
-        print("    Manually add SuSFS mnt_id block before lock_mount_hash() in vfs_kern_mount().")
-else:
-    print("[!] namespace.c 3c: susfs_get_sus_mnt_id already present, skipping.")
+if ANCHOR not in content:
+    print("  \033[31m[FAIL]\033[0m 'ifeq ($(CONFIG_BLOCK),y)' not found in fs/Makefile")
+    sys.exit(1)
 
-# --- 3d: clone_mnt SuSFS block ---
-if 'bypass_orig_flow' not in content and 'susfs_reuse_sus_vfsmnt' not in content:
-    old_3d = '\tmnt = alloc_vfsmnt(old->mnt_devname);\n'
-    new_3d = (
-        '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-        '\tif (susfs_is_sdcard_android_data_decrypted) {\n'
-        '\t\tgoto skip_checking_for_ksu_proc;\n'
-        '\t}\n'
-        '\tif (susfs_is_current_ksu_domain()) {\n'
-        '\t\tif (flag & CL_COPY_MNT_NS) {\n'
-        '\t\t\tmnt = susfs_reuse_sus_vfsmnt(old->mnt_devname, old->mnt_id);\n'
-        '\t\t\tgoto bypass_orig_flow;\n'
-        '\t\t}\n'
-        '\t\tmnt = susfs_alloc_sus_vfsmnt(old->mnt_devname);\n'
-        '\t\tgoto bypass_orig_flow;\n'
-        '\t}\n'
-        'skip_checking_for_ksu_proc:\n'
-        '\tif (old->mnt_id == DEFAULT_KSU_MNT_ID) {\n'
-        '\t\tmnt = susfs_alloc_sus_vfsmnt(old->mnt_devname);\n'
-        '\t\tgoto bypass_orig_flow;\n'
-        '\t}\n'
-        '#endif\n'
-        '\tmnt = alloc_vfsmnt(old->mnt_devname);\n'
-        '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-        'bypass_orig_flow:\n'
-        '#endif\n'
-    )
-    if old_3d in content:
-        content = content.replace(old_3d, new_3d, 1)
-        print("[+] namespace.c 3d (clone_mnt SuSFS block) applied.")
-        changed = True
-    else:
-        print("[!] namespace.c 3d: could not find alloc_vfsmnt(old->mnt_devname).")
-else:
-    print("[!] namespace.c 3d: clone_mnt SuSFS block already present, skipping.")
+content = content.replace(ANCHOR, INSERT + ANCHOR, 1)
+with open(fp, 'w') as f:
+    f.write(content)
 
-if changed:
-    with open(filepath, 'w') as f:
-        f.write(content)
+print("  \033[32m[PASS]\033[0m 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' inserted before ifeq ($(CONFIG_BLOCK),y)")
 PYEOF
+[ $? -ne 0 ] && FAILED=$((FAILED+1))
 
 # =============================================================================
-# 4. fs/proc/task_mmu.c
-#    4a. Insert the SUS_MAP block after up_read(&mm->mmap_sem)
-#    4b. Fix compile error: 'unused variable vma' — ensure vma is declared
-#        inside pagemap_read() when the SUS_MAP block is present
+# FIX 2: include/linux/mount.h
+#
+# Actual struct vfsmount:
+#   struct vfsmount {
+#       struct dentry *mnt_root;
+#       struct super_block *mnt_sb;
+#       int mnt_flags;
+#       void *data;              ← BEFORE the KABI reserves
+#       ANDROID_KABI_RESERVE(1);
+#       ANDROID_KABI_RESERVE(2);
+#       ANDROID_KABI_RESERVE(3);
+#       ANDROID_KABI_RESERVE(4); ← patch target
+#   } __randomize_layout;
+#
+# Hunk failed because patch expected void *data AFTER KABI_RESERVE(4).
+# Fix: regex match ANDROID_KABI_RESERVE(4) directly, no context dependency.
+# ANDROID_KABI_USE(4, ...) expands to an anonymous union consuming the same
+# u64 space — struct size and layout are completely unchanged.
 # =============================================================================
-TASK_MMU="fs/proc/task_mmu.c"
-info "Patching $TASK_MMU ..."
-[ -f "$TASK_MMU" ] || error "File not found: $TASK_MMU"
-backup "$TASK_MMU"
+echo ""
+echo -e "${BOLD}[2/4]${NC} include/linux/mount.h — wrapping ANDROID_KABI_RESERVE(4)"
 
-# =============================================================================
-# 4. fs/proc/task_mmu.c
-#    4a. Insert the SUS_MAP block after up_read(&mm->mmap_sem)
-#        Uses strip-based matching to handle blank lines between the two targets
-#    4b. Only declare 'vma' if the SUS_MAP block was actually inserted —
-#        declaring it without the block causes: unused variable 'vma' error
-# =============================================================================
-TASK_MMU="fs/proc/task_mmu.c"
-info "Patching $TASK_MMU ..."
-[ -f "$TASK_MMU" ] || error "File not found: $TASK_MMU"
-backup "$TASK_MMU"
-
-python3 - "$TASK_MMU" <<'PYEOF'
+python3 << 'PYEOF'
 import sys, re
 
-filepath = sys.argv[1]
-with open(filepath, 'r') as f:
+fp = "include/linux/mount.h"
+with open(fp) as f:
     content = f.read()
 
-sus_map_block = (
-    '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-    '\t\tvma = find_vma(mm, start_vaddr);\n'
-    '\t\tif (vma && vma->vm_file) {\n'
-    '\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n'
-    '\t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\n'
-    '\t\t\t\tpm.buffer->pme = 0;\n'
-    '\t\t\t}\n'
-    '\t\t}\n'
-    '#endif\n'
+if "susfs_mnt_id_backup" in content:
+    print("  \033[33m[SKIP]\033[0m Already contains susfs_mnt_id_backup")
+    sys.exit(0)
+
+# Match with any leading whitespace to be tab/space agnostic
+pattern = re.compile(r'([ \t]*)ANDROID_KABI_RESERVE\s*\(\s*4\s*\)\s*;')
+m = pattern.search(content)
+if not m:
+    print("  \033[31m[FAIL]\033[0m ANDROID_KABI_RESERVE(4) not found in include/linux/mount.h")
+    sys.exit(1)
+
+indent = m.group(1)  # preserve original tab indentation
+replacement = (
+    f"#ifdef CONFIG_KSU_SUSFS\n"
+    f"{indent}ANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n"
+    f"#else\n"
+    f"{indent}ANDROID_KABI_RESERVE(4);\n"
+    f"#endif"
 )
 
-sus_map_inserted = False
-
-# 4a: Insert SUS_MAP block using strip-based matching so blank lines between
-#     up_read() and start_vaddr = end; don't break the search.
-if 'CONFIG_KSU_SUSFS_SUS_MAP' not in content and 'BIT_SUS_MAPS' not in content:
-    lines = content.splitlines(keepends=True)
-    new_lines = []
-    inserted = False
-    i = 0
-    while i < len(lines):
-        if lines[i].strip() == 'up_read(&mm->mmap_sem);' and not inserted:
-            # Look ahead up to 10 lines for start_vaddr = end; (skip blanks)
-            found_j = -1
-            for j in range(i + 1, min(i + 10, len(lines))):
-                if lines[j].strip() == 'start_vaddr = end;':
-                    found_j = j
-                    break
-            if found_j >= 0:
-                # Emit up_read line
-                new_lines.append(lines[i])
-                # Emit any lines between up_read and start_vaddr (blank lines etc)
-                for k in range(i + 1, found_j):
-                    new_lines.append(lines[k])
-                # Insert SUS_MAP block before start_vaddr = end
-                new_lines.append(sus_map_block)
-                # Emit start_vaddr = end
-                new_lines.append(lines[found_j])
-                i = found_j + 1
-                inserted = True
-                continue
-        new_lines.append(lines[i])
-        i += 1
-
-    if inserted:
-        content = ''.join(new_lines)
-        sus_map_inserted = True
-        print("[+] task_mmu.c 4a (SUS_MAP block) inserted.")
-    else:
-        print("[!] task_mmu.c 4a: could not find up_read/start_vaddr — manual insert required.")
-else:
-    sus_map_inserted = True
-    print("[!] task_mmu.c 4a: SUS_MAP block already present, skipping.")
-
-# 4b: Add vma declaration inside pagemap_read() ONLY if SUS_MAP block is present.
-#     If we add the declaration without the block, the compiler sees an unused
-#     variable and fails with -Werror. Only declare it if we need it.
-if sus_map_inserted and ('CONFIG_KSU_SUSFS_SUS_MAP' in content or 'BIT_SUS_MAPS' in content):
-    func_match = re.search(r'static ssize_t pagemap_read\s*\([^{]*\{', content, re.DOTALL)
-    if func_match:
-        func_start = func_match.end()
-        snippet = content[func_start:func_start + 3000]
-        if 'vm_area_struct *vma' not in snippet:
-            lines = content.splitlines(keepends=True)
-            in_func = False
-            brace_depth = 0
-            inserted_decl = False
-            new_lines = []
-            for line in lines:
-                new_lines.append(line)
-                if 'static ssize_t pagemap_read' in line:
-                    in_func = True
-                if in_func:
-                    brace_depth += line.count('{') - line.count('}')
-                    if brace_depth > 0 and line.strip().endswith(';') and not inserted_decl:
-                        new_lines.append('\tstruct vm_area_struct *vma = NULL;\n')
-                        inserted_decl = True
-                        in_func = False
-            if inserted_decl:
-                content = ''.join(new_lines)
-                print("[+] task_mmu.c 4b (vma declaration) added.")
-            else:
-                print("[!] task_mmu.c 4b: could not insert vma declaration — manual fix required.")
-        else:
-            print("[!] task_mmu.c 4b: vma already declared, skipping.")
-    else:
-        print("[!] task_mmu.c 4b: could not locate pagemap_read() — manual fix required.")
-elif not sus_map_inserted:
-    print("[!] task_mmu.c 4b: skipping vma declaration — SUS_MAP block not present (would cause unused-variable error).")
-
-with open(filepath, 'w') as f:
+content = content[:m.start()] + replacement + content[m.end():]
+with open(fp, 'w') as f:
     f.write(content)
+
+print("  \033[32m[PASS]\033[0m ANDROID_KABI_RESERVE(4) wrapped with CONFIG_KSU_SUSFS guard")
+print("        Struct size unchanged — ANDROID_KABI_USE consumes same u64 slot")
 PYEOF
+[ $? -ne 0 ] && FAILED=$((FAILED+1))
 
 # =============================================================================
-# Final report
+# FIX 3: fs/namespace.c
+#
+# Actual includes at top (relevant lines):
+#   #include <linux/bootmem.h>      ← patch anchor IS present (correct)
+#   #include <linux/task_work.h>
+#   #include <linux/sched/task.h>
+#   #include <linux/fs_context.h>   ← this extra include shifted line numbers
+#
+# The hunk failed NOT because bootmem.h is missing, but because
+# fs_context.h was added after sched/task.h, pushing all subsequent
+# lines down and breaking the patch's line-number context.
+#
+# "/* Maximum number of mounts in a mount namespace */" IS present exactly.
+#
+# Hunks 7 & 8 only add blank lines inside vfs_kern_mount — cosmetic, skipped.
 # =============================================================================
 echo ""
-info "==================================================="
-info "All patches attempted. Backups in: $BACKUP_DIR/"
-info "==================================================="
-warn "IMPORTANT: This script must run BEFORE the SuSFS patch step."
+echo -e "${BOLD}[3/4]${NC} fs/namespace.c — include and extern declarations"
+
+python3 << 'PYEOF'
+import sys, re
+
+fp = "fs/namespace.c"
+with open(fp) as f:
+    content = f.read()
+
+if "CONFIG_KSU_SUSFS_SUS_MOUNT" in content or "susfs_is_current_ksu_domain" in content:
+    print("  \033[33m[SKIP]\033[0m Already contains SUSFS declarations")
+    sys.exit(0)
+
+# Part A — insert susfs_def.h include after bootmem.h
+# bootmem.h IS confirmed present in this kernel
+ANCHOR_INCLUDE = "#include <linux/bootmem.h>"
+if ANCHOR_INCLUDE not in content:
+    # Should not happen, but safe fallback
+    for fallback in ["#include <linux/memblock.h>",
+                     "#include <linux/sched/task.h>",
+                     "#include <linux/fs_context.h>"]:
+        if fallback in content:
+            ANCHOR_INCLUDE = fallback
+            break
+    else:
+        print("  \033[31m[FAIL]\033[0m Cannot find include anchor in fs/namespace.c")
+        sys.exit(1)
+
+INCLUDE_BLOCK = (
+    "\n"
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+    "#include <linux/susfs_def.h>\n"
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+)
+content = content.replace(ANCHOR_INCLUDE, ANCHOR_INCLUDE + INCLUDE_BLOCK, 1)
+print(f"  \033[32m[PASS]\033[0m susfs_def.h include inserted after: {ANCHOR_INCLUDE}")
+
+# Part B — insert extern block before "/* Maximum number of mounts */"
+# Confirmed present exactly in this kernel
+EXTERN_BLOCK = (
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+    "extern bool susfs_is_current_ksu_domain(void);\n"
+    "extern bool susfs_is_sdcard_android_data_decrypted;\n"
+    "\n"
+    "static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);\n"
+    "\n"
+    "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n"
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+    "\n"
+)
+
+ANCHOR_EXTERN = "/* Maximum number of mounts in a mount namespace */"
+if ANCHOR_EXTERN not in content:
+    print("  \033[31m[FAIL]\033[0m '/* Maximum number of mounts */' not found in fs/namespace.c")
+    sys.exit(1)
+
+content = content.replace(ANCHOR_EXTERN, EXTERN_BLOCK + ANCHOR_EXTERN, 1)
+
+with open(fp, 'w') as f:
+    f.write(content)
+
+print("  \033[32m[PASS]\033[0m Extern declarations inserted before '/* Maximum number of mounts */'")
+print("  \033[33m[SKIP]\033[0m Hunks 7 & 8 — blank lines only in vfs_kern_mount, no functional effect")
+PYEOF
+[ $? -ne 0 ] && FAILED=$((FAILED+1))
+
+# =============================================================================
+# FIX 4: fs/proc/task_mmu.c
+#
+# CRITICAL: This kernel does NOT use up_read(&mm->mmap_sem).
+# It uses the newer mmap locking API:
+#   mmap_read_lock_killable(mm)   instead of down_read(&mm->mmap_sem)
+#   mmap_read_unlock(mm)          instead of up_read(&mm->mmap_sem)
+#
+# The previous script would have SILENTLY FAILED on fix 4 because it
+# searched for up_read(&mm->mmap_sem) which does not exist here.
+#
+# Actual pattern in pagemap_read():
+#   ret = walk_page_range(start_vaddr, end, &pagemap_walk);
+#   mmap_read_unlock(mm);        ← match this
+#   start_vaddr = end;           ← insert between these two lines
+#
+# =============================================================================
 echo ""
-echo "  Correct workflow step order:"
-echo "    1. Checkout kernel source"
-echo "    2. Run: bash \$GITHUB_WORKSPACE/patches/fix3.sh   ← this script"
-echo "    3. Run: <your existing SuSFS patch step>"
-echo "    4. Build"
-info "==================================================="
+echo -e "${BOLD}[4/4]${NC} fs/proc/task_mmu.c — SUS_MAP block in pagemap_read()"
+
+python3 << 'PYEOF'
+import sys, re
+
+fp = "fs/proc/task_mmu.c"
+with open(fp) as f:
+    content = f.read()
+
+if "CONFIG_KSU_SUSFS_SUS_MAP" in content:
+    print("  \033[33m[SKIP]\033[0m Already contains CONFIG_KSU_SUSFS_SUS_MAP")
+    sys.exit(0)
+
+INSERT = (
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
+    "\t\tvma = find_vma(mm, start_vaddr);\n"
+    "\t\tif (vma && vma->vm_file) {\n"
+    "\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n"
+    "\t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\n"
+    "\t\t\t\tpm.buffer->pme = 0;\n"
+    "\t\t\t}\n"
+    "\t\t}\n"
+    "#endif\n"
+)
+
+# Primary pattern: mmap_read_unlock(mm) — confirmed in this kernel
+pattern = re.compile(
+    r'([ \t]*mmap_read_unlock\s*\(\s*mm\s*\)\s*;\s*\n)'  # group 1: mmap_read_unlock line
+    r'([ \t]*start_vaddr\s*=\s*end\s*;)'                  # group 2: start_vaddr = end
+)
+m = pattern.search(content)
+if m:
+    content = content[:m.start()] + m.group(1) + INSERT + m.group(2) + content[m.end():]
+    with open(fp, 'w') as f:
+        f.write(content)
+    print("  \033[32m[PASS]\033[0m SUS_MAP block inserted after mmap_read_unlock(mm)")
+    sys.exit(0)
+
+# Fallback: older kernels with up_read(&mm->mmap_sem)
+pattern2 = re.compile(
+    r'([ \t]*up_read\s*\(\s*&mm->mmap_sem\s*\)\s*;\s*\n)'
+    r'([ \t]*start_vaddr\s*=\s*end\s*;)'
+)
+m2 = pattern2.search(content)
+if m2:
+    content = content[:m2.start()] + m2.group(1) + INSERT + m2.group(2) + content[m2.end():]
+    with open(fp, 'w') as f:
+        f.write(content)
+    print("  \033[32m[PASS]\033[0m SUS_MAP block inserted after up_read(&mm->mmap_sem) [fallback]")
+    sys.exit(0)
+
+# Fallback: up_read(&mm->mmap_lock)
+pattern3 = re.compile(
+    r'([ \t]*up_read\s*\(\s*&mm->mmap_lock\s*\)\s*;\s*\n)'
+    r'([ \t]*start_vaddr\s*=\s*end\s*;)'
+)
+m3 = pattern3.search(content)
+if m3:
+    content = content[:m3.start()] + m3.group(1) + INSERT + m3.group(2) + content[m3.end():]
+    with open(fp, 'w') as f:
+        f.write(content)
+    print("  \033[32m[PASS]\033[0m SUS_MAP block inserted after up_read(&mm->mmap_lock) [fallback]")
+    sys.exit(0)
+
+# None matched — print diagnostic
+print("  \033[31m[FAIL]\033[0m No matching unlock pattern found before 'start_vaddr = end'")
+print("        Searched for: mmap_read_unlock / up_read mmap_sem / up_read mmap_lock")
+m_ctx = re.search(r'static ssize_t pagemap_read', content)
+if m_ctx:
+    lines = content[m_ctx.start():m_ctx.start()+3000].split('\n')
+    print("        Context lines in pagemap_read containing relevant keywords:")
+    for i, line in enumerate(lines):
+        if any(k in line for k in ['unlock', 'up_read', 'mmap', 'start_vaddr', 'walk_page']):
+            print(f"          ~+{i}: {line.rstrip()}")
+sys.exit(1)
+PYEOF
+[ $? -ne 0 ] && FAILED=$((FAILED+1))
 
 # =============================================================================
-# 5. drivers/kernelsu/supercalls.c
-#    The rsuntk KernelSU driver references CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS
-#    and susfs_set_hide_sus_mnts_for_all_procs which don't exist in the sus2.patch.
-#    This is a version mismatch between the KSU driver and the SuSFS patch.
-#    Fix: add a compat stub in include/linux/susfs.h so the driver compiles.
+# Summary
 # =============================================================================
-SUSFS_H="include/linux/susfs.h"
-info "Checking $SUSFS_H for supercalls compat stubs ..."
-
-if [ ! -f "$SUSFS_H" ]; then
-    warn "$SUSFS_H not found — SuSFS patch may not have been applied yet. Skipping."
+echo ""
+echo -e "${BOLD}${CYAN}============================================================${NC}"
+if [ "$FAILED" -eq 0 ]; then
+    echo -e " ${GREEN}${BOLD}All 4 fixes applied successfully!${NC}"
+    echo -e "${BOLD}${CYAN}============================================================${NC}"
+    echo ""
+    echo "  Verify your defconfig has:"
+    echo "    CONFIG_KSU_SUSFS=y"
+    echo "    CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+    echo "    CONFIG_KSU_SUSFS_SUS_MAP=y"
+    echo ""
+    echo "  Then run: git diff   — to review all changes before building"
 else
-    if grep -q "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS\|susfs_set_hide_sus_mnts_for_all_procs" "$SUSFS_H"; then
-        info "supercalls compat already present in $SUSFS_H, skipping."
-    else
-        # Append compat defines and inline stub to the end of susfs.h
-        cat >> "$SUSFS_H" << 'STUBEOF'
-
-/* ---- Compat stubs for rsuntk KernelSU driver version mismatch ---- */
-#ifndef CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS
-#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS 0x55550019
-#endif
-#ifndef susfs_set_hide_sus_mnts_for_all_procs
-static inline void susfs_set_hide_sus_mnts_for_all_procs(u64 enabled) {}
-#endif
-/* ------------------------------------------------------------------ */
-STUBEOF
-        info "$SUSFS_H — compat stubs added for CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS."
-    fi
+    echo -e " ${RED}${BOLD}$FAILED fix(es) FAILED — see output above${NC}"
+    echo -e "${BOLD}${CYAN}============================================================${NC}"
 fi
+echo ""
+[ "$FAILED" -gt 0 ] && exit 1 || exit 0
