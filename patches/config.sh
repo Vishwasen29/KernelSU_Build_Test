@@ -2,7 +2,7 @@
 
 set -e
 
-KSU_KCONFIG="${1:-KernelSU-Next/kernel/Kconfig}"
+KSU_KCONFIG="${1:-KernelSU/kernel/Kconfig}"
 
 if [ ! -f "$KSU_KCONFIG" ]; then
   echo "[ERROR] Kconfig file not found: $KSU_KCONFIG"
