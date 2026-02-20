@@ -65,7 +65,7 @@ jobs:
         wget -q -O- "https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh" | bash
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' \
           security/Kconfig
-        bash "$GITHUB_WORKSPACE/kernel-4.19_5.4-patch.sh"
+        bash "$GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh"
 
     # ── Inject SUSFS Kconfig entries (ROOT CAUSE FIX) ───────────────────────
     #    sus4.patch does not add any Kconfig symbols, so make olddefconfig
