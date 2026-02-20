@@ -55,6 +55,9 @@ jobs:
       run: |
         cd kernel_workspace/android-kernel
         curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
     - name: Relax KSU Kconfig dependencies
