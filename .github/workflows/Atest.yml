@@ -1,4 +1,4 @@
-name: A build Build LineageOS OPlus SM8250 Kernel (KernelSU-Next Legacy + SUSFS)
+name: A BC Build LineageOS OPlus SM8250 Kernel (KernelSU-Next Legacy + SUSFS)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,10 @@ on:
 env:
   TZ: Asia/Shanghai
   CLANG_VERSION: clang-r547379
-  Lineage_VERSION: lineage-23.2
+  LINEAGE_VERSION: lineage-23.2
+  KERNEL_ROOT: ${{ github.workspace }}/kernel_workspace/android-kernel
+  CLANG_BIN:   ${{ github.workspace }}/kernel_workspace/clang-aosp/bin
+  SCRIPTS:     ${{ github.workspace }}/new
 
 jobs:
   build:
@@ -20,14 +23,17 @@ jobs:
       with:
         swap-size-gb: 10
 
+    # ── Dependencies ────────────────────────────────────────────────────────
     - name: Install build dependencies
       run: |
-        sudo apt update
-        sudo apt install -y git bc bison build-essential curl flex gperf \
+        sudo apt-get update -q
+        sudo apt-get install -y \
+          git bc bison build-essential curl flex gperf \
           libncurses5-dev libssl-dev lzop zip unzip \
           libelf-dev clang lld python3 binutils-aarch64-linux-gnu
         mkdir -p kernel_workspace
 
+    # ── Clang toolchain (cached) ─────────────────────────────────────────────
     - name: Cache Clang toolchain
       id: cache-clang
       uses: actions/cache@v4
@@ -35,170 +41,99 @@ jobs:
         path: ${{ github.workspace }}/kernel_workspace/clang-aosp
         key: ${{ env.CLANG_VERSION }}
 
-    - name: Download Clang (if cache miss)
+    - name: Download Clang
       if: steps.cache-clang.outputs.cache-hit != 'true'
       run: |
-        cd kernel_workspace
-        mkdir clang-aosp
-        wget -O ${CLANG_VERSION}.tar.gz \
-          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
-        tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
+        cd kernel_workspace && mkdir clang-aosp
+        wget -q -O clang.tar.gz \
+          "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz"
+        tar -C clang-aosp -zxf clang.tar.gz && rm clang.tar.gz
 
+    # ── Kernel source ────────────────────────────────────────────────────────
     - name: Clone Lineage kernel
       run: |
-        cd kernel_workspace
         git clone --depth=1 --recursive \
           https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-          -b ${{ env.Lineage_VERSION }} android-kernel
+          -b "$LINEAGE_VERSION" "$KERNEL_ROOT"
 
-    - name: Setup KernelSU-Next (legacy)
+    # ── KernelSU-Next + Baseband Guard + compat patches ──────────────────────
+    - name: Setup KernelSU-Next and Baseband Guard
+      working-directory: ${{ env.KERNEL_ROOT }}
       run: |
-        cd kernel_workspace/android-kernel
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-        #sed -i 's/ -dirty//g' scripts/setlocalversion
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+          | bash -s legacy
+        wget -q -O- "https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh" | bash
+        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' \
+          security/Kconfig
+        bash "$SCRIPTS/kernel-4.19_5.4-patch.sh"
 
-    - name: Fix schgm-flash.c clang build error
-      run: |
-        DIR="kernel_workspace/android-kernel/drivers/power/supply/qcom"
-        HDR="$DIR/schgm-flash.h"
-        SRC="$DIR/schgm-flash.c"
+    # ── Inject SUSFS Kconfig entries (ROOT CAUSE FIX) ───────────────────────
+    #    sus4.patch does not add any Kconfig symbols, so make olddefconfig
+    #    silently strips all CONFIG_KSU_SUSFS_* options without this step.
+    - name: Add SUSFS Kconfig entries
+      run: bash "$SCRIPTS/add_susfs_kconfig.sh" "$KERNEL_ROOT"
 
-        # schgm-flash.c uses struct smb_charger members and calls smblib_* functions
-        # all defined in smb5-lib.h. smb5-lib.h must come BEFORE schgm-flash.h so
-        # the full struct definition is visible when schgm-flash.h prototypes are parsed.
-
-        # Step 1: clean up any previously inserted includes from prior attempts
-        sed -i '/#include "smb-lib.h"/d' "$SRC"
-        sed -i '/#include "smb5-lib.h"/d' "$SRC"
-
-        # Step 2: insert smb5-lib.h BEFORE schgm-flash.h
-        sed -i '/#include "schgm-flash.h"/i #include "smb5-lib.h"' "$SRC"
-        echo "[OK] Inserted smb5-lib.h before schgm-flash.h in schgm-flash.c"
-
-        # Step 3: add forward decl to schgm-flash.h for files that include it
-        # without smb5-lib.h (prevents -Wvisibility on the function prototypes)
-        if grep -q "^struct smb_charger;" "$HDR"; then
-          echo "[SKIP] forward decl already in schgm-flash.h"
-        else
-          sed -i '/schgm_flash_get_vreg_ok/i struct smb_charger;' "$HDR"
-          echo "[OK] Added 'struct smb_charger;' forward decl to schgm-flash.h"
-        fi
-
-        echo ""
-        echo "schgm-flash.c include order (smb5-lib.h must be before schgm-flash.h):"
-        grep -n "^#include" "$SRC" | head -10
-        echo "schgm-flash.h forward decls:"
-        grep -n "^struct smb_charger" "$HDR"
-
+    # ── Relax KSU Kconfig dependency constraints ──────────────────────────────
     - name: Relax KSU Kconfig dependencies
+      working-directory: ${{ env.KERNEL_ROOT }}
       run: |
-        cd kernel_workspace/android-kernel
-        mapfile -t KCONFIGS < <(find . -name "Kconfig" \
-          -not -path "./.git/*" \
-          -not -path "./out/*" \
+        while IFS= read -r kconfig; do
+          echo "[INFO] Relaxing: $kconfig"
+          python3 "$SCRIPTS/relax_ksu_kconfig.sh" "$kconfig"
+        done < <(find . -name "Kconfig" \
+          -not -path "./.git/*" -not -path "./out/*" \
           -exec grep -l "^config KSU" {} \; 2>/dev/null)
-        for KCONFIG in "${KCONFIGS[@]}"; do
-          echo "[INFO] Relaxing: $KCONFIG"
-          python3 $GITHUB_WORKSPACE/patches/relax_ksu_kconfig.sh "$KCONFIG"
-        done
 
+    # ── Apply SUSFS patch + fix rejects ─────────────────────────────────────
     - name: Apply SUSFS patch
+      working-directory: ${{ env.KERNEL_ROOT }}
       run: |
-        cd kernel_workspace/android-kernel
-        git apply --reject --whitespace=fix \
-          $GITHUB_WORKSPACE/patches/sus4.patch || true
+        git apply --reject --whitespace=fix "$SCRIPTS/sus4.patch" || true
 
-    - name: Fix SUSFS rejects
-      run: |
-        cd kernel_workspace/android-kernel
-        bash $GITHUB_WORKSPACE/patches/fix3.sh
+    - name: Fix SUSFS patch rejects
+      working-directory: ${{ env.KERNEL_ROOT }}
+      run: bash "$SCRIPTS/fix3.sh"
 
-    - name: Generate defconfig
-      run: |
-        cd kernel_workspace/android-kernel
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-        make O=out CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
-          vendor/kona-perf_defconfig
+    # ── OPlus weak-symbol stubs (LINKER FIX) ────────────────────────────────
+    #    18 OPlus BSP symbols are referenced in core drivers but undefined
+    #    without the OPlus platform SDK. Stubs prevent link failure.
+    - name: Create OPlus weak-symbol stubs
+      run: bash "$SCRIPTS/create_oplus_stubs.sh" "$KERNEL_ROOT"
 
-    - name: Enable KSU + SUSFS correctly
-      run: |
-        cd kernel_workspace/android-kernel
-        export ARCH=arm64
+    # ── Fix schgm-flash.c clang build error ──────────────────────────────────
+    - name: Fix schgm-flash.c include order
+      working-directory: ${{ env.KERNEL_ROOT }}
+      run: bash "$SCRIPTS/fix_schgm_flash.sh"
 
-        make O=out olddefconfig
+    # ── Generate defconfig + enable KSU + SUSFS ──────────────────────────────
+    - name: Configure kernel
+      run: bash "$SCRIPTS/configure_kernel.sh" "$KERNEL_ROOT" "$CLANG_BIN"
 
-        CONFIG=out/.config
-
-        # Base requirements
-        scripts/config --file $CONFIG \
-          -e KSU \
-          -e KSU_MANUAL_HOOK \
-          -e MODULES \
-          -e OVERLAY_FS
-
-        make O=out olddefconfig
-
-        # SUSFS core
-        scripts/config --file $CONFIG \
-          -e KSU_SUSFS \
-          -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-          -e KSU_SUSFS_SUS_PATH \
-          -e KSU_SUSFS_SUS_MOUNT \
-          -e KSU_SUSFS_SUS_KSTAT \
-          -e KSU_SUSFS_SUS_OVERLAYFS \
-          -e KSU_SUSFS_TRY_UMOUNT \
-          -e KSU_SUSFS_SPOOF_UNAME \
-          -e KSU_SUSFS_OPEN_REDIRECT \
-          -e KSU_SUSFS_ENABLE_LOG \
-          -e KSU_SUSFS_SUS_SU \
-          -e KSU_SUSFS_SUS_MAP
-        scripts/config --file $CONFIG \
-          -e CONFIG_QCOM_SMB5 \
-          -e CONFIG_QPNP_SMB5 \
-          -e CONFIG_SMB5_CHARGER \
-          -e CONFIG_QCOM_SMB1390 \
-          -e CONFIG_QCOM_SCHGM_FLASH
-
-        make O=out olddefconfig
-
-    - name: Verify SUSFS config
-      run: |
-        cd kernel_workspace/android-kernel
-        grep CONFIG_KSU_SUSFS out/.config || true
-
+    # ── Build ─────────────────────────────────────────────────────────────────
     - name: Build kernel
+      working-directory: ${{ env.KERNEL_ROOT }}
       run: |
-        cd kernel_workspace/android-kernel
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export PATH="$CLANG_BIN:$PATH"
         make -j$(nproc) O=out CC=clang \
+          ARCH=arm64 SUBARCH=arm64 \
           CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1
 
-    - name: Verify SUSFS compiled
-      run: |
-        cd kernel_workspace/android-kernel
-        echo "Checking for susfs.o..."
-        find out/ -name "susfs.o" || true
-        echo "Checking System.map..."
-        grep susfs_ out/System.map || true
+    # ── Verify SUSFS is in the built kernel ──────────────────────────────────
+    - name: Verify SUSFS integration
+      run: bash "$SCRIPTS/verify_susfs.sh" "$KERNEL_ROOT"
 
+    # ── Package + upload ──────────────────────────────────────────────────────
     - name: Package AnyKernel3
       run: |
-        cd kernel_workspace
-        git clone --depth=1 https://github.com/osm0sis/AnyKernel3
-        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
-        cd AnyKernel3
-        zip -r SM8250-KSU-SUSFS.zip ./*
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3 \
+          kernel_workspace/AnyKernel3
+        cp "$KERNEL_ROOT/out/arch/arm64/boot/Image" kernel_workspace/AnyKernel3/
+        cd kernel_workspace/AnyKernel3
+        zip -r9 ../SM8250-KSU-SUSFS.zip ./*
 
     - name: Upload ZIP
       uses: actions/upload-artifact@v4
       with:
         name: SM8250-KSU-SUSFS
-        path: kernel_workspace/AnyKernel3/*.zip
+        path: kernel_workspace/SM8250-KSU-SUSFS.zip
+        
