@@ -320,6 +320,24 @@ jobs:
         echo "================================================"
         [ "$FAIL" -eq 0 ] || exit 1
 
+    # -------------------------------------------------------------------------
+    # Add weak stub implementations for missing OPlus/SMB symbols
+    #
+    # Several OPlus-specific symbols are referenced by compiled drivers but
+    # their defining drivers (oplus_project, oplus_chg, smb5-lib, etc.) are
+    # either not compiled or not linked due to missing configs in the LineageOS
+    # defconfig. LLD (unlike GNU ld) treats unresolved symbols as hard errors.
+    #
+    # Fix: inject a single C file with __weak stub implementations.
+    # __weak means: use this definition ONLY if no stronger definition exists.
+    # If the real driver IS compiled and exports the symbol, the linker uses
+    # that instead. Stubs return safe no-op values (0, NOTIFY_DONE, -ENODEV).
+    # -------------------------------------------------------------------------
+    - name: Add OPlus symbol stubs
+      run: |
+        bash $GITHUB_WORKSPACE/patches/inject_oplus_stubs.sh \
+          $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
     - name: Build kernel
       run: |
         cd kernel_workspace/android-kernel
@@ -327,8 +345,7 @@ jobs:
         export SUBARCH=arm64
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
         make -j$(nproc) O=out CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
-          KBUILD_LDFLAGS="--allow-multiple-definition"
+          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1
 
     - name: Check kernel output
       run: |
