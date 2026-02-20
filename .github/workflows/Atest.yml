@@ -125,6 +125,12 @@ jobs:
           -e KSU_SUSFS_ENABLE_LOG \
           -e KSU_SUSFS_SUS_SU \
           -e KSU_SUSFS_SUS_MAP
+        scripts/config --file $CONFIG \
+          -e CONFIG_QCOM_SMB5 \
+          -e CONFIG_QPNP_SMB5 \
+          -e CONFIG_SMB5_CHARGER \
+          -e CONFIG_QCOM_SMB1390 \
+          -e CONFIG_QCOM_SCHGM_FLASH
 
         make O=out olddefconfig
 
