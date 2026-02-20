@@ -185,6 +185,20 @@ jobs:
         cd kernel_workspace/android-kernel
         bash $GITHUB_WORKSPACE/patches/fix3.sh
 
+        # Re-run Kconfig relaxation now that the SUSFS patch has added its
+        # own Kconfig file (with 'depends on KSU_SUSFS' entries). The first
+        # relaxation (step 9) ran before the patch, so it never saw these.
+        # Without this, syncconfig strips all CONFIG_KSU_SUSFS* at build time.
+        mapfile -t KCONFIGS < <(find . -name "Kconfig" \
+          -not -path "./.git/*" \
+          -not -path "./out/*" \
+          -exec grep -l "^config KSU" {} \; 2>/dev/null)
+        for KCONFIG in "${KCONFIGS[@]}"; do
+          echo "[INFO] Re-relaxing Kconfig: $KCONFIG"
+          python3 $GITHUB_WORKSPACE/patches/relax_ksu_kconfig.sh "$KCONFIG"
+        done
+        echo "[OK] SUSFS Kconfig dependencies relaxed"
+
     - name: Verify SUSFS source integration (pre-build)
       run: |
         cd kernel_workspace/android-kernel
