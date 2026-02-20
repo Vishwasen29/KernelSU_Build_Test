@@ -1,32 +1,49 @@
 #!/usr/bin/env python3
 # relax_ksu_kconfig.sh — invoked as: python3 relax_ksu_kconfig.sh <path/to/Kconfig>
 #
-# Removes all "depends on KSU..." lines from inside config KSU_* blocks.
+# Removes two kinds of Kconfig constructs that cause syncconfig to silently
+# strip CONFIG_KSU_* and CONFIG_KSU_SUSFS_* entries from .config at build time:
 #
-# WHY THIS IS NEEDED:
-#   KernelSU-Next's Kconfig defines sub-configs with dependency chains like:
+#   1. `depends on KSU*` lines inside config KSU_* blocks
+#   2. `if KSU` / `if KSU_SUSFS` block wrappers and their matching `endif` lines
+#
+# WHY BOTH ARE NEEDED:
+#
+#   KernelSU-Next Kconfig (before SUSFS patch):
 #
 #     config KSU_MANUAL_HOOK
-#         bool "Enable manual hook"
-#         depends on KSU            <-- stripped by this script
-#
-#     config KSU_SUSFS_SUS_MOUNT
 #         bool "..."
-#         depends on KSU_SUSFS      <-- stripped by this script
+#         depends on KSU      <-- type 1: stripped by removing depends line
 #
-#   When 'make' starts a build it runs 'syncconfig' internally before compiling.
-#   syncconfig re-evaluates every config's dependency chain. If a dependency
-#   isn't already resolved in the .config at that moment, the dependent config
-#   gets silently reset to NOT_SET — even if we wrote it directly to .config
-#   in an earlier step.
+#   SUSFS Kconfig (added by sus4.patch inside drivers/kernelsu/Kconfig):
 #
-#   Removing these depends lines makes the KSU configs unconditionally visible
-#   to Kconfig. This is safe because:
-#     - The kernel source files guard all SUSFS/KSU code with #ifdef at compile
-#       time, so the compiler still enforces correct inclusion.
-#     - This kernel is non-GKI (4.19), so there is no ABI enforcement.
-#     - The dependency lines were added for interactive menuconfig UX (to
-#       hide irrelevant sub-options), not for build correctness.
+#     if KSU                  <-- type 2: block wrapper
+#
+#     config KSU_SUSFS
+#         bool "..."
+#         depends on KSU      <-- type 1
+#
+#     if KSU_SUSFS            <-- type 2: nested block wrapper
+#
+#     config KSU_SUSFS_SUS_PATH
+#         bool "..."          <-- no explicit depends, but implicitly gated by
+#                             --  the enclosing `if KSU_SUSFS` block
+#     ...
+#
+#     endif # KSU_SUSFS       <-- type 2: removed to match its `if`
+#     endif # KSU             <-- type 2: removed to match its `if`
+#
+#   The `if KSU` / `if KSU_SUSFS` wrappers are Kconfig MENU STRUCTURES, not
+#   `depends on` lines. Syncconfig evaluates them as implicit dependencies for
+#   every config inside the block. Removing only the `depends on` lines (as the
+#   previous version did) left the `if` wrappers intact, so syncconfig still
+#   stripped the SUSFS configs when KSU_SUSFS wasn't yet resolved.
+#
+# SAFETY:
+#   - All KSU/SUSFS source files use #ifdef CONFIG_KSU_SUSFS guards anyway,
+#     so the compiler enforces correct inclusion regardless of Kconfig.
+#   - This kernel is non-GKI (4.19), so there is no ABI enforcement.
+#   - The dependency lines exist for interactive menuconfig UX only.
 
 import sys
 import re
@@ -44,30 +61,44 @@ with open(path) as f:
 
 print("  Total lines: " + str(len(src)))
 
-# Print all KSU config entries found for diagnostics
 ksu_configs = [l.rstrip() for l in src if re.match(r'^config KSU', l)]
 print("  KSU configs found: " + str(ksu_configs))
 
 out = []
 in_ksu_block = False
-removed = 0
+removed_depends = 0
+removed_if = 0
+ksu_if_depth = 0  # tracks how many `if KSU*` levels deep we are
 
 for line in src:
-    # Detect entry into a config KSU_* block
+
+    # --- Type 2: `if KSU*` block openers ---
+    # Remove the opener and track nesting depth so we can remove the
+    # matching `endif` later.
+    if re.match(r'^if\s+KSU', line):
+        ksu_if_depth += 1
+        print('  REMOVED if:     ' + line.rstrip())
+        removed_if += 1
+        in_ksu_block = False  # `if` resets config-block tracking
+        continue
+
+    # --- Type 2: `endif` matching a removed `if KSU*` ---
+    if re.match(r'^endif', line) and ksu_if_depth > 0:
+        ksu_if_depth -= 1
+        print('  REMOVED endif:  ' + line.rstrip())
+        removed_if += 1
+        continue
+
+    # --- Track entry into config KSU_* blocks ---
     if re.match(r'^config KSU', line):
         in_ksu_block = True
-
-    # Detect entry into any other top-level Kconfig directive -- reset context
-    elif re.match(r'^(config|menuconfig|choice|endchoice|menu|endmenu|source)\b', line):
+    elif re.match(r'^(config|menuconfig|choice|endchoice|menu|endmenu|source|if|endif)\b', line):
         in_ksu_block = False
 
-    elif re.match(r'^(if|endif)\b', line):
-        in_ksu_block = False
-
-    # Inside a KSU_* block: drop any line that says 'depends on KSU...'
+    # --- Type 1: `depends on KSU*` inside a config KSU_* block ---
     if in_ksu_block and re.match(r'^\s+depends on KSU', line):
-        print('  REMOVED: ' + line.rstrip())
-        removed += 1
+        print('  REMOVED depends: ' + line.rstrip())
+        removed_depends += 1
         continue
 
     out.append(line)
@@ -75,4 +106,5 @@ for line in src:
 with open(path, 'w') as f:
     f.writelines(out)
 
-print('  Done: removed ' + str(removed) + ' dependency line(s) from ' + path)
+print('  Done: removed ' + str(removed_depends) + ' depends line(s), ' +
+      str(removed_if) + ' if/endif line(s) from ' + path)
