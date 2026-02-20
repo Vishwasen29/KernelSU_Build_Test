@@ -125,21 +125,21 @@ jobs:
     # -------------------------------------------------------------------------
     # Fix schgm-flash.c / schgm-flash.h clang build errors
     #
-    # Three problems, all from the same root cause â€” missing includes:
-    #   1. schgm-flash.h declares functions taking 'struct smb_charger *' but
-    #      never includes the header that defines it, so clang sees only a
-    #      forward declaration and emits -Wvisibility errors.
-    #   2. schgm-flash.c accesses members of struct smb_charger and
-    #      struct smb_irq_data, and calls smblib_read/smblib_write â€” all
-    #      defined in smb-lib.h which is never included.
-    #   3. Because smb_charger is forward-declared in two different scopes
-    #      (header vs .c file parameter list), clang sees "conflicting types".
+    # schgm-flash.c is the SMB5 flash GPIO driver. It accesses SMB5-specific
+    # members of struct smb_charger (flash_derating_soc, flash_disable_soc,
+    # headroom_mode, flash_active, flash_init_done) that only exist in smb5-lib.h,
+    # not in smb-lib.h. It also uses smblib_read/smblib_write and struct smb_irq_data.
+    # schgm-flash.h declares function prototypes using struct smb_charger * but
+    # never provides a definition or forward declaration of the struct.
+    #
+    # Newer clang (r547379+) rejects all of this with hard errors.
     #
     # Fix:
-    #   - schgm-flash.h: add forward declaration 'struct smb_charger;' so the
-    #     function prototypes are valid without a full struct definition.
-    #   - schgm-flash.c: add '#include "smb-lib.h"' to bring in the full
-    #     struct smb_charger, struct smb_irq_data, smblib_read, smblib_write.
+    #   - schgm-flash.h: add 'struct smb_charger;' forward declaration so the
+    #     function prototypes compile without needing the full struct definition.
+    #   - schgm-flash.c: add '#include "smb5-lib.h"' which defines the complete
+    #     struct smb_charger with all SMB5 flash members, struct smb_irq_data,
+    #     and declares smblib_read / smblib_write.
     # -------------------------------------------------------------------------
     - name: Fix schgm-flash.c clang build error
       run: |
@@ -151,27 +151,29 @@ jobs:
         if grep -q "^struct smb_charger;" "$HDR"; then
           echo "[SKIP] forward decl already in schgm-flash.h"
         else
-          # Insert 'struct smb_charger;' before the first function prototype
-          # that uses it (the line containing 'schgm_flash_get_vreg_ok')
           sed -i '/schgm_flash_get_vreg_ok/i struct smb_charger;' "$HDR"
           echo "[OK] Added 'struct smb_charger;' forward decl to schgm-flash.h"
         fi
 
-        # Fix 2: add #include "smb-lib.h" to schgm-flash.c
-        if grep -q '"smb-lib.h"' "$SRC"; then
-          echo "[SKIP] smb-lib.h already included in schgm-flash.c"
+        # Fix 2: add #include "smb5-lib.h" to schgm-flash.c
+        # smb5-lib.h defines the full struct smb_charger with SMB5 flash members:
+        # flash_derating_soc, flash_disable_soc, headroom_mode, flash_active,
+        # flash_init_done â€” none of which exist in smb-lib.h
+        if grep -q '"smb5-lib.h"' "$SRC"; then
+          echo "[SKIP] smb5-lib.h already included in schgm-flash.c"
         else
-          # Insert after the last existing #include line in the file
-          sed -i '/#include "schgm-flash.h"/a #include "smb-lib.h"' "$SRC"
-          echo "[OK] Added '#include smb-lib.h' to schgm-flash.c"
+          # Remove any previously inserted smb-lib.h (from earlier failed attempt)
+          sed -i '/#include "smb-lib.h"/d' "$SRC"
+          # Insert smb5-lib.h after schgm-flash.h
+          sed -i '/#include "schgm-flash.h"/a #include "smb5-lib.h"' "$SRC"
+          echo "[OK] Added '#include smb5-lib.h' to schgm-flash.c"
         fi
 
         echo ""
-        echo "schgm-flash.h includes:"
-        grep "^#include\|^struct smb_charger" "$HDR" | head -10
-        echo ""
-        echo "schgm-flash.c includes:"
-        grep "^#include" "$SRC" | head -10
+        echo "schgm-flash.h (first lines with struct/include):"
+        grep -n "^#include\|^struct smb_charger" "$HDR" | head -10
+        echo "schgm-flash.c (includes):"
+        grep -n "^#include" "$SRC" | head -10
 
     - name: Apply SUSFS patch
       run: |
