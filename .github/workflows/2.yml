@@ -352,9 +352,40 @@ jobs:
         bash $GITHUB_WORKSPACE/patches/inject_oplus_stubs.sh \
           $GITHUB_WORKSPACE/kernel_workspace/android-kernel
 
-    - name: Finalize and freeze config
+    - name: Finalize config properly
       run: |
         cd kernel_workspace/android-kernel
+
+        # Step 1: let kernel normalize config
+        make O=out olddefconfig
+
+        # Step 2: re-apply SUSFS + KSU configs AFTER olddefconfig
+        CONFIG="out/.config"
+
+        set_config() {
+          local key="$1"
+          sed -i "/^${key}[= ]/d" "$CONFIG"
+          sed -i "/^# ${key} is not set/d" "$CONFIG"
+          echo "${key}=y" >> "$CONFIG"
+        }
+
+        set_config CONFIG_KSU
+        set_config CONFIG_KSU_MANUAL_HOOK
+        set_config CONFIG_KSU_SUSFS
+        set_config CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+        set_config CONFIG_KSU_SUSFS_SUS_PATH
+        set_config CONFIG_KSU_SUSFS_SUS_MOUNT
+        set_config CONFIG_KSU_SUSFS_SUS_KSTAT
+        set_config CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+        set_config CONFIG_KSU_SUSFS_TRY_UMOUNT
+        set_config CONFIG_KSU_SUSFS_SPOOF_UNAME
+        set_config CONFIG_KSU_SUSFS_OPEN_REDIRECT
+        set_config CONFIG_KSU_SUSFS_ENABLE_LOG
+        set_config CONFIG_KSU_SUSFS_SUS_SU
+        set_config CONFIG_KSU_SUSFS_SUS_MAP
+
+        # Step 3: regenerate headers cleanly
+        make O=out olddefconfig
 
         # Regenerate headers once
         make O=out olddefconfig
