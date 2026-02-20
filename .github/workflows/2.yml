@@ -262,40 +262,31 @@ jobs:
     #      which will run syncconfig once, but now with relaxed dependencies
     #      the configs will be retained.
     # -------------------------------------------------------------------------
-    - name: Enable SUSFS configs
+    - name: Enable SUSFS configs properly
       run: |
-        cd kernel_workspace/android-kernel
-        CONFIG="out/.config"
+       cd kernel_workspace/android-kernel
 
-        set_config() {
-          local key="$1"
-          # Remove any existing entry (=y, =n, =m, or "# KEY is not set")
-          sed -i "/^${key}[= ]/d" "$CONFIG"
-          sed -i "/^# ${key} is not set/d" "$CONFIG"
-          echo "${key}=y" >> "$CONFIG"
-          echo "  SET: ${key}=y"
-        }
+       make O=out olddefconfig
 
-        echo "Writing KSU + SUSFS configs directly to out/.config..."
-        # KSU_MANUAL_HOOK required for 4.19 non-GKI â€” write here because
-        # make defconfig strips it if its Kconfig dependency isnt met
-        set_config CONFIG_KSU_MANUAL_HOOK
-        set_config CONFIG_KSU_SUSFS
-        set_config CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
-        set_config CONFIG_KSU_SUSFS_SUS_PATH
-        set_config CONFIG_KSU_SUSFS_SUS_MOUNT
-        set_config CONFIG_KSU_SUSFS_SUS_KSTAT
-        set_config CONFIG_KSU_SUSFS_SUS_OVERLAYFS
-        set_config CONFIG_KSU_SUSFS_TRY_UMOUNT
-        set_config CONFIG_KSU_SUSFS_SPOOF_UNAME
-        set_config CONFIG_KSU_SUSFS_OPEN_REDIRECT
-        set_config CONFIG_KSU_SUSFS_ENABLE_LOG
-        set_config CONFIG_KSU_SUSFS_SUS_SU
-        set_config CONFIG_KSU_SUSFS_SUS_MAP
+       CONFIG=out/.config
 
-        echo ""
-        echo "=== SUSFS entries in .config ==="
-        grep "CONFIG_KSU_SUSFS" "$CONFIG"
+       scripts/config --file $CONFIG \
+       -e KSU \
+       -e KSU_MANUAL_HOOK \
+       -e KSU_SUSFS \
+       -e KSU_SUSFS_HAS_MAGIC_MOUNT \
+       -e KSU_SUSFS_SUS_PATH \
+       -e KSU_SUSFS_SUS_MOUNT \
+       -e KSU_SUSFS_SUS_KSTAT \
+       -e KSU_SUSFS_SUS_OVERLAYFS \
+       -e KSU_SUSFS_TRY_UMOUNT \
+       -e KSU_SUSFS_SPOOF_UNAME \
+       -e KSU_SUSFS_OPEN_REDIRECT \
+       -e KSU_SUSFS_ENABLE_LOG \
+       -e KSU_SUSFS_SUS_SU \
+       -e KSU_SUSFS_SUS_MAP
+
+        make O=out olddefconfig
 
     - name: Verify SUSFS configs in .config (pre-compile)
       run: |
@@ -396,13 +387,12 @@ jobs:
 
     - name: Build kernel
       run: |
-        cd kernel_workspace/android-kernel
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-        make -j$(nproc) O=out CC=clang \
-        CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
-        KCONFIG_NOSILENTUPDATE=1
+       cd kernel_workspace/android-kernel
+       export ARCH=arm64
+       export SUBARCH=arm64
+       export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+       make -j$(nproc) O=out CC=clang \
+       CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1
 
     - name: Check kernel output
       run: |
