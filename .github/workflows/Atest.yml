@@ -60,6 +60,39 @@ jobs:
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
         #sed -i 's/ -dirty//g' scripts/setlocalversion
 
+    - name: Fix schgm-flash.c clang build error
+      run: |
+        DIR="kernel_workspace/android-kernel/drivers/power/supply/qcom"
+        HDR="$DIR/schgm-flash.h"
+        SRC="$DIR/schgm-flash.c"
+
+        # schgm-flash.c uses struct smb_charger members and calls smblib_* functions
+        # all defined in smb5-lib.h. smb5-lib.h must come BEFORE schgm-flash.h so
+        # the full struct definition is visible when schgm-flash.h prototypes are parsed.
+
+        # Step 1: clean up any previously inserted includes from prior attempts
+        sed -i '/#include "smb-lib.h"/d' "$SRC"
+        sed -i '/#include "smb5-lib.h"/d' "$SRC"
+
+        # Step 2: insert smb5-lib.h BEFORE schgm-flash.h
+        sed -i '/#include "schgm-flash.h"/i #include "smb5-lib.h"' "$SRC"
+        echo "[OK] Inserted smb5-lib.h before schgm-flash.h in schgm-flash.c"
+
+        # Step 3: add forward decl to schgm-flash.h for files that include it
+        # without smb5-lib.h (prevents -Wvisibility on the function prototypes)
+        if grep -q "^struct smb_charger;" "$HDR"; then
+          echo "[SKIP] forward decl already in schgm-flash.h"
+        else
+          sed -i '/schgm_flash_get_vreg_ok/i struct smb_charger;' "$HDR"
+          echo "[OK] Added 'struct smb_charger;' forward decl to schgm-flash.h"
+        fi
+
+        echo ""
+        echo "schgm-flash.c include order (smb5-lib.h must be before schgm-flash.h):"
+        grep -n "^#include" "$SRC" | head -10
+        echo "schgm-flash.h forward decls:"
+        grep -n "^struct smb_charger" "$HDR"
+
     - name: Relax KSU Kconfig dependencies
       run: |
         cd kernel_workspace/android-kernel
