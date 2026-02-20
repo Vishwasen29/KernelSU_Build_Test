@@ -69,7 +69,7 @@ jobs:
     # 1. Kbuild:109 checks: ifeq ($(CONFIG_KSU_MANUAL_HOOK)$(CONFIG_KSU_KPROBES_HOOK),)
     #    This is a Makefile-level check that reads .config directly. It fires
     #    when NEITHER hook config is set. We patch it out because we know we are
-    #    using manual hooks â€” the check adds no value in CI and blocks the build.
+    #    using manual hooks — the check adds no value in CI and blocks the build.
     #
     # 2. syncconfig strips CONFIG_KSU_MANUAL_HOOK from .config because the
     #    Kconfig entry has unresolvable dependencies at parse time. We fix this
@@ -99,7 +99,7 @@ jobs:
           echo "[OK] Kbuild hook check patched"
           grep -n "hooks" "$KBUILD" | head -5
         else
-          echo "[WARN] Kbuild not found â€” skipping Kbuild patch"
+          echo "[WARN] Kbuild not found — skipping Kbuild patch"
         fi
 
         echo ""
@@ -147,7 +147,20 @@ jobs:
         HDR="$DIR/schgm-flash.h"
         SRC="$DIR/schgm-flash.c"
 
-        # Fix 1: add forward declaration to schgm-flash.h before first use
+        # schgm-flash.c uses struct smb_charger members and calls smblib_* functions
+        # all defined in smb5-lib.h. smb5-lib.h must come BEFORE schgm-flash.h so
+        # the full struct definition is visible when schgm-flash.h prototypes are parsed.
+
+        # Step 1: clean up any previously inserted includes from prior attempts
+        sed -i '/#include "smb-lib.h"/d' "$SRC"
+        sed -i '/#include "smb5-lib.h"/d' "$SRC"
+
+        # Step 2: insert smb5-lib.h BEFORE schgm-flash.h
+        sed -i '/#include "schgm-flash.h"/i #include "smb5-lib.h"' "$SRC"
+        echo "[OK] Inserted smb5-lib.h before schgm-flash.h in schgm-flash.c"
+
+        # Step 3: add forward decl to schgm-flash.h for files that include it
+        # without smb5-lib.h (prevents -Wvisibility on the function prototypes)
         if grep -q "^struct smb_charger;" "$HDR"; then
           echo "[SKIP] forward decl already in schgm-flash.h"
         else
@@ -155,25 +168,11 @@ jobs:
           echo "[OK] Added 'struct smb_charger;' forward decl to schgm-flash.h"
         fi
 
-        # Fix 2: add #include "smb5-lib.h" to schgm-flash.c
-        # smb5-lib.h defines the full struct smb_charger with SMB5 flash members:
-        # flash_derating_soc, flash_disable_soc, headroom_mode, flash_active,
-        # flash_init_done â€” none of which exist in smb-lib.h
-        if grep -q '"smb5-lib.h"' "$SRC"; then
-          echo "[SKIP] smb5-lib.h already included in schgm-flash.c"
-        else
-          # Remove any previously inserted smb-lib.h (from earlier failed attempt)
-          sed -i '/#include "smb-lib.h"/d' "$SRC"
-          # Insert smb5-lib.h after schgm-flash.h
-          sed -i '/#include "schgm-flash.h"/a #include "smb5-lib.h"' "$SRC"
-          echo "[OK] Added '#include smb5-lib.h' to schgm-flash.c"
-        fi
-
         echo ""
-        echo "schgm-flash.h (first lines with struct/include):"
-        grep -n "^#include\|^struct smb_charger" "$HDR" | head -10
-        echo "schgm-flash.c (includes):"
+        echo "schgm-flash.c include order (smb5-lib.h must be before schgm-flash.h):"
         grep -n "^#include" "$SRC" | head -10
+        echo "schgm-flash.h forward decls:"
+        grep -n "^struct smb_charger" "$HDR"
 
     - name: Apply SUSFS patch
       run: |
@@ -229,7 +228,7 @@ jobs:
     # Enable SUSFS configs by direct write to out/.config
     #
     # WHY NOT KCONFIG_ALLCONFIG + olddefconfig:
-    #   KCONFIG_ALLCONFIG only works with the 'allconfig' make target â€” it has
+    #   KCONFIG_ALLCONFIG only works with the 'allconfig' make target — it has
     #   no effect on 'olddefconfig' or the internal 'syncconfig' that runs
     #   automatically at the start of every normal build. Both strip any config
     #   whose Kconfig 'depends on' chain is unsatisfied.
@@ -239,12 +238,12 @@ jobs:
     #   entries silently. Writing CONFIG_KSU_SUSFS=y to defconfig before
     #   'make defconfig' runs has no effect if the dependency isn't met.
     #
-    # SOLUTION â€” direct write + Kconfig dependency removal (done above):
+    # SOLUTION — direct write + Kconfig dependency removal (done above):
     #   1. We already removed the 'depends on KSU_SUSFS' lines from Kconfig,
     #      so syncconfig no longer has a reason to strip sub-configs.
     #   2. We write directly to out/.config so the configs are present
     #      immediately without going through Kconfig evaluation again.
-    #   3. We do NOT run olddefconfig/syncconfig after this write â€” that
+    #   3. We do NOT run olddefconfig/syncconfig after this write — that
     #      would just undo the work. The next thing that runs is make -j
     #      which will run syncconfig once, but now with relaxed dependencies
     #      the configs will be retained.
@@ -264,7 +263,7 @@ jobs:
         }
 
         echo "Writing KSU + SUSFS configs directly to out/.config..."
-        # KSU_MANUAL_HOOK required for 4.19 non-GKI â€” write here because
+        # KSU_MANUAL_HOOK required for 4.19 non-GKI — write here because
         # make defconfig strips it if its Kconfig dependency isnt met
         set_config CONFIG_KSU_MANUAL_HOOK
         set_config CONFIG_KSU_SUSFS
@@ -298,7 +297,7 @@ jobs:
           if echo "$val" | grep -q "=y$"; then
             echo "  [PASS] ${1}=y"
           else
-            echo "  [FAIL] ${1} â†’ $val"
+            echo "  [FAIL] ${1} → $val"
             FAIL=$((FAIL+1))
           fi
         }
@@ -351,7 +350,7 @@ jobs:
           [ "$2" = "ok" ] && echo "  [PASS] $1" || { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
         }
 
-        # susfs.o â€” find anywhere in out/
+        # susfs.o — find anywhere in out/
         SUSFS_OBJ=$(find out/ -name "susfs.o" 2>/dev/null | head -1)
         [ -n "$SUSFS_OBJ" ] \
           && check "susfs.o compiled ($SUSFS_OBJ)" ok \
@@ -416,3 +415,4 @@ jobs:
         name: build-info
         path: |
           kernel_workspace/android-kernel/out/include/config/kernel.release
+          
