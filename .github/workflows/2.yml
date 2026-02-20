@@ -352,6 +352,17 @@ jobs:
         bash $GITHUB_WORKSPACE/patches/inject_oplus_stubs.sh \
           $GITHUB_WORKSPACE/kernel_workspace/android-kernel
 
+    - name: Finalize and freeze config
+      run: |
+        cd kernel_workspace/android-kernel
+
+        # Regenerate headers once
+        make O=out olddefconfig
+
+        # Prevent future silent syncconfig updates
+        touch out/include/config/auto.conf
+        touch out/include/generated/autoconf.h
+
     - name: Build kernel
       run: |
         cd kernel_workspace/android-kernel
@@ -359,7 +370,8 @@ jobs:
         export SUBARCH=arm64
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
         make -j$(nproc) O=out CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1
+        CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
+        KCONFIG_NOSILENTUPDATE=1
 
     - name: Check kernel output
       run: |
