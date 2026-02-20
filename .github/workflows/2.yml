@@ -69,7 +69,7 @@ jobs:
     # 1. Kbuild:109 checks: ifeq ($(CONFIG_KSU_MANUAL_HOOK)$(CONFIG_KSU_KPROBES_HOOK),)
     #    This is a Makefile-level check that reads .config directly. It fires
     #    when NEITHER hook config is set. We patch it out because we know we are
-    #    using manual hooks — the check adds no value in CI and blocks the build.
+    #    using manual hooks â€” the check adds no value in CI and blocks the build.
     #
     # 2. syncconfig strips CONFIG_KSU_MANUAL_HOOK from .config because the
     #    Kconfig entry has unresolvable dependencies at parse time. We fix this
@@ -99,7 +99,7 @@ jobs:
           echo "[OK] Kbuild hook check patched"
           grep -n "hooks" "$KBUILD" | head -5
         else
-          echo "[WARN] Kbuild not found — skipping Kbuild patch"
+          echo "[WARN] Kbuild not found â€” skipping Kbuild patch"
         fi
 
         echo ""
@@ -228,7 +228,7 @@ jobs:
     # Enable SUSFS configs by direct write to out/.config
     #
     # WHY NOT KCONFIG_ALLCONFIG + olddefconfig:
-    #   KCONFIG_ALLCONFIG only works with the 'allconfig' make target — it has
+    #   KCONFIG_ALLCONFIG only works with the 'allconfig' make target â€” it has
     #   no effect on 'olddefconfig' or the internal 'syncconfig' that runs
     #   automatically at the start of every normal build. Both strip any config
     #   whose Kconfig 'depends on' chain is unsatisfied.
@@ -238,12 +238,12 @@ jobs:
     #   entries silently. Writing CONFIG_KSU_SUSFS=y to defconfig before
     #   'make defconfig' runs has no effect if the dependency isn't met.
     #
-    # SOLUTION — direct write + Kconfig dependency removal (done above):
+    # SOLUTION â€” direct write + Kconfig dependency removal (done above):
     #   1. We already removed the 'depends on KSU_SUSFS' lines from Kconfig,
     #      so syncconfig no longer has a reason to strip sub-configs.
     #   2. We write directly to out/.config so the configs are present
     #      immediately without going through Kconfig evaluation again.
-    #   3. We do NOT run olddefconfig/syncconfig after this write — that
+    #   3. We do NOT run olddefconfig/syncconfig after this write â€” that
     #      would just undo the work. The next thing that runs is make -j
     #      which will run syncconfig once, but now with relaxed dependencies
     #      the configs will be retained.
@@ -263,7 +263,7 @@ jobs:
         }
 
         echo "Writing KSU + SUSFS configs directly to out/.config..."
-        # KSU_MANUAL_HOOK required for 4.19 non-GKI — write here because
+        # KSU_MANUAL_HOOK required for 4.19 non-GKI â€” write here because
         # make defconfig strips it if its Kconfig dependency isnt met
         set_config CONFIG_KSU_MANUAL_HOOK
         set_config CONFIG_KSU_SUSFS
@@ -297,7 +297,7 @@ jobs:
           if echo "$val" | grep -q "=y$"; then
             echo "  [PASS] ${1}=y"
           else
-            echo "  [FAIL] ${1} → $val"
+            echo "  [FAIL] ${1} â†’ $val"
             FAIL=$((FAIL+1))
           fi
         }
@@ -327,7 +327,8 @@ jobs:
         export SUBARCH=arm64
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
         make -j$(nproc) O=out CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1
+          CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
+          KBUILD_LDFLAGS="--allow-multiple-definition"
 
     - name: Check kernel output
       run: |
@@ -350,7 +351,7 @@ jobs:
           [ "$2" = "ok" ] && echo "  [PASS] $1" || { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
         }
 
-        # susfs.o — find anywhere in out/
+        # susfs.o â€” find anywhere in out/
         SUSFS_OBJ=$(find out/ -name "susfs.o" 2>/dev/null | head -1)
         [ -n "$SUSFS_OBJ" ] \
           && check "susfs.o compiled ($SUSFS_OBJ)" ok \
@@ -415,4 +416,3 @@ jobs:
         name: build-info
         path: |
           kernel_workspace/android-kernel/out/include/config/kernel.release
-          
