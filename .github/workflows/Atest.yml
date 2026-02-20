@@ -9,7 +9,7 @@ env:
   LINEAGE_VERSION: lineage-23.2
   KERNEL_ROOT: ${{ github.workspace }}/kernel_workspace/android-kernel
   CLANG_BIN:   ${{ github.workspace }}/kernel_workspace/clang-aosp/bin
-  SCRIPTS:     $$GITHUB_WORKSPACE/test
+  SCRIPTS:     $GITHUB_WORKSPACE/test
 
 jobs:
   build:
