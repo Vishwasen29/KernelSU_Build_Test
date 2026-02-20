@@ -238,6 +238,18 @@ jobs:
           CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1 \
           vendor/kona-perf_defconfig
 
+    - name: Ensure SUSFS is sourced in fs/Kconfig
+      run: |
+       cd kernel_workspace/android-kernel
+
+       if ! grep -q "susfs/Kconfig" fs/Kconfig; then
+        echo ""
+        echo 'source "fs/susfs/Kconfig"' >> fs/Kconfig
+        echo "[OK] Added SUSFS to fs/Kconfig"
+       else
+       echo "[OK] SUSFS already sourced"
+       fi
+
     # -------------------------------------------------------------------------
     # Enable SUSFS configs by direct write to out/.config
     #
