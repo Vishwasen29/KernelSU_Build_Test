@@ -1,22 +1,22 @@
-name: Build Kernel - KSU Next + SUSFS
+name: Lemonades Kernel - KSU Next + SUSFS
 
 on:
   workflow_dispatch:
 
 env:
   TZ: Asia/Shanghai
+  DEFCONFIG: kona-perf_defconfig
   CLANG_VERSION: clang-r547379
-  Lineage_VERSION: lineage-23.2
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout
+    - name: Checkout Repo
       uses: actions/checkout@v4
 
-    - name: Setup Environment
+    - name: Install Dependencies
       run: |
         sudo apt update
         sudo apt install -y bc bison build-essential ccache curl flex git \
@@ -30,40 +30,40 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-ccache-
 
+    ########################################################
+    # Clone Kernel
+    ########################################################
     - name: Clone Kernel Source
       run: |
-        git clone --depth=1 https://github.com/LineageOS/android_kernel_oneplus_sm8250 kernel_workspace/android-kernel
-        cd kernel_workspace/android-kernel
-        echo "Kernel Commit:"
+        git clone --depth=1 https://github.com/LineageOS/android_kernel_oneplus_sm8250 kernel
+        cd kernel
         git rev-parse HEAD
 
+    ########################################################
+    # Setup Clang (Your Style)
+    ########################################################
     - name: Setup Clang
       run: |
-        mkdir clang
-        cd clang
-        curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
-        tar -xf ${CLANG_VERSION}.tar.gz
-        cd ..
-        echo "CLANG_PATH=$PWD/clang/bin" >> $GITHUB_ENV
+        git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang --depth=1
+        echo "CLANG_PATH=$PWD/clang/clang-${CLANG_VERSION}/bin" >> $GITHUB_ENV
 
     ########################################################
-    # 1️⃣ KernelSU-Next Setup (LEGACY MODE)
+    # KernelSU-Next LEGACY
     ########################################################
-    - name: Setup KernelSU-Next (legacy)
+    - name: Setup KernelSU-Next
       run: |
-        cd kernel_workspace/android-kernel
+        cd kernel
         curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s legacy
-        echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/${DEFCONFIG}
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/${DEFCONFIG}
 
     ########################################################
-    # 2️⃣ Apply Manual Hook (ONLY AFTER setup.sh)
+    # Manual Hook (Minimal Safe)
     ########################################################
     - name: Apply Manual Hook
       run: |
-        cd kernel_workspace/android-kernel
+        cd kernel
 
-        # Example safe exec hook (CAF compatible anchor)
         if ! grep -q ksu_handle_execveat fs/exec.c; then
           sed -i '/static int do_execveat_common/i\
 #ifdef CONFIG_KSU\
@@ -79,48 +79,42 @@ if (unlikely(ksu_execveat_hook))\
         fi
 
     ########################################################
-    # 3️⃣ Clone SUSFS (kernel-4.19 branch)
+    # Clone SUSFS 4.19
     ########################################################
-    - name: Clone SUSFS 4.19
+    - name: Clone SUSFS
       run: |
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19 susfs4ksu
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19 susfs
 
-    ########################################################
-    # 4️⃣ Apply SUSFS KernelSU Patch
-    ########################################################
-    - name: Apply SUSFS to KernelSU
+    - name: Apply SUSFS KernelSU Patch
       run: |
-        cd kernel_workspace/android-kernel/KernelSU
-        patch -p1 < ../../../susfs4ksu/kernel_patches/10_enable_susfs_for_ksu.patch || true
+        cd kernel/KernelSU
+        patch -p1 < ../../susfs/kernel_patches/10_enable_susfs_for_ksu.patch || true
 
-    ########################################################
-    # 5️⃣ Apply SUSFS Kernel Patch
-    ########################################################
     - name: Apply SUSFS Kernel Patch
       run: |
-        cd kernel_workspace/android-kernel
-        patch -p1 < ../../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
+        cd kernel
+        patch -p1 < ../susfs/kernel_patches/50_add_susfs_in_kernel-4.19.patch || true
 
     ########################################################
-    # 6️⃣ Upload Rejects If Any
+    # Collect Rejects
     ########################################################
-    - name: Collect Reject Files
+    - name: Collect Rejects
       if: always()
       run: |
-        cd kernel_workspace/android-kernel
+        cd kernel
         find . -name "*.rej" > rejects.txt || true
         tar -czf rejects.tar.gz $(find . -name "*.rej" -o -name "*.orig" 2>/dev/null) || true
 
-    - name: Upload Reject Artifacts
+    - name: Upload Rejects
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: susfs-rejects
-        path: kernel_workspace/android-kernel/rejects.tar.gz
+        path: kernel/rejects.tar.gz
         if-no-files-found: ignore
 
     ########################################################
-    # 7️⃣ Build Kernel
+    # Build Kernel
     ########################################################
     - name: Build Kernel
       run: |
@@ -133,16 +127,29 @@ if (unlikely(ksu_execveat_hook))\
         export USE_CCACHE=1
         export CCACHE_DIR=~/.ccache
 
-        cd kernel_workspace/android-kernel
+        cd kernel
 
-        make O=out kona-perf_defconfig
+        make O=out ${DEFCONFIG}
         make -j$(nproc) O=out
 
     ########################################################
-    # 8️⃣ Upload Image
+    # Clone AnyKernel3
     ########################################################
-    - name: Upload Kernel Image
+    - name: Setup AnyKernel3
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3 AnyKernel
+        cp kernel/out/arch/arm64/boot/Image.gz AnyKernel/
+
+    ########################################################
+    # Create Flashable ZIP
+    ########################################################
+    - name: Package ZIP
+      run: |
+        cd AnyKernel
+        zip -r9 Lemonades-KSU-SUSFS.zip *
+
+    - name: Upload Flashable ZIP
       uses: actions/upload-artifact@v4
       with:
-        name: Image
-        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image*
+        name: Lemonades-KSU-SUSFS
+        path: AnyKernel/Lemonades-KSU-SUSFS.zip
