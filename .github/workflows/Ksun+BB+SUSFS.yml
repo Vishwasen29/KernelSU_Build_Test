@@ -15,7 +15,6 @@ jobs:
       matrix:
         ks: [rsuntk, backslashxx, next]
 
-
     env:
       CLANG_VERSION: clang-r547379
       Lineage_VERSION: lineage-23.2
@@ -32,10 +31,10 @@ jobs:
       run: |
         echo "BUILD_TIME=$(TZ=Asia/Kolkata date "+%y%m%d")" >> $GITHUB_ENV
         echo "BUILD_TIME_1=$(TZ=Asia/Kolkata date "+%Y-%m-%d")" >> $GITHUB_ENV
-        #echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
-        #echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
         sudo apt-get update
-        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl \
+          zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev \
+          libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
     - name: Cache Clang toolchain
@@ -60,41 +59,66 @@ jobs:
         git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    - name: Setup KSUN + BB
+    # FIX 4: Use matrix.ks to select the correct KSU variant per job
+    - name: Setup KSU (rsuntk) + BB
+      if: matrix.ks == 'rsuntk'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        #curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
         curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-rksu-master
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
         sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
         bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
-        
-        #bash $GITHUB_WORKSPACE/patches/syacall_hook.sh
-        #bash $GITHUB_WORKSPACE/patches/sus_inline.sh
 
+    - name: Setup KSU (backslashxx) + BB
+      if: matrix.ks == 'backslashxx'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/main/kernel/setup.sh" | bash -s main
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
+
+    - name: Setup KSU (next) + BB
+      if: matrix.ks == 'next'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh
 
     - name: Applying susfs fixes
       run: |
-
         bash $GITHUB_WORKSPACE/patches/fix3.sh
-        
+
     - name: Apply SUSFS patch
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         set +e
         git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus2.patch || true
 
-        #bash $GITHUB_WORKSPACE/patches/fix1.sh
-    
-
-  
+    # FIX 3: Remove orphaned unused 'vma' variable left behind when the
+    # SUS_MAP hunk in sus2.patch fails to apply (task_mmu.c:1614 reject).
+    # Clang treats -Wunused-variable as -Werror, causing a fatal build error.
+    - name: Fix orphaned vma variable from partial SUSFS patch
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        # If the SUS_MAP block did not apply but a 'struct vm_area_struct *vma'
+        # declaration was left in task_mmu.c, remove it to prevent -Werror.
+        if grep -q "struct vm_area_struct \*vma" fs/proc/task_mmu.c; then
+          # Only remove if the variable is actually unused (no SUS_MAP reference nearby)
+          if ! grep -q "SUS_MAP\|sus_map" fs/proc/task_mmu.c; then
+            echo "[fix] Removing unused 'vma' declaration from task_mmu.c"
+            sed -i '/struct vm_area_struct \*vma[[:space:]]*;/d' fs/proc/task_mmu.c
+          fi
+        fi
 
     - name: Upload reject files
       if: always()
       uses: actions/upload-artifact@v4
       with:
-       name: patch-reject-files
-       path: kernel_workspace/android-kernel/**/*.rej
+        name: patch-reject-files-${{ matrix.ks }}
+        path: kernel_workspace/android-kernel/**/*.rej
 
     - name: Check for patch reject files
       if: always()
@@ -102,27 +126,30 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         echo "Searching for .rej files..."
         find . -name "*.rej"
-        echo "Exit code: $?"
+
+    # FIX 2: Remove leading spaces from all CONFIG lines inside the heredoc.
+    # With <<EOF (no dash), the shell includes indentation literally, so the
+    # kernel Kconfig parser sees "   CONFIG_KSU=y" instead of "CONFIG_KSU=y"
+    # and prints "unexpected data" — the option is silently ignored.
     - name: Enable SUSFS configs
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        cat <<EOF >> arch/arm64/configs/vendor/kona-perf_defconfig
-           CONFIG_KSU_MANUAL_HOOK=y
-           CONFIG_KSU_SUSFS=y
-           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-           CONFIG_KSU_SUSFS_SUS_PATH=y
-           CONFIG_KSU_SUSFS_SUS_MOUNT=y
-           CONFIG_KSU_SUSFS_SUS_KSTAT=y
-           CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-           CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-           CONFIG_KSU_SUSFS_ENABLE_LOG=y
-           CONFIG_KSU_SUSFS_SUS_SU=y
-        EOF
+        cat >> arch/arm64/configs/vendor/kona-perf_defconfig << 'EOF'
+         CONFIG_KSU_MANUAL_HOOK=y
+         CONFIG_KSU_SUSFS=y
+         CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+         CONFIG_KSU_SUSFS_SUS_PATH=y
+         CONFIG_KSU_SUSFS_SUS_MOUNT=y
+         CONFIG_KSU_SUSFS_SUS_KSTAT=y
+         CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+         CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+         CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+         CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+         CONFIG_KSU_SUSFS_ENABLE_LOG=y
+         CONFIG_KSU_SUSFS_SUS_SU=y
+          EOF
         echo "[✓] SUSFS configs enabled"
 
-    
     - name: Build kernel
       run: |
         cd kernel_workspace/android-kernel
@@ -138,9 +165,7 @@ jobs:
         DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
 
         make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
-        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD   
-
-        
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
 
     - name: Check kernel output
       run: |
@@ -156,11 +181,12 @@ jobs:
       if: ${{ env.CHECK_IMAGE == 'true' }}
       uses: actions/upload-artifact@v4
       with:
-        name: Image
+        name: Image-${{ matrix.ks }}
         path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
 
+    # FIX 1: actions/upload-artifact@v6 does not exist — use @v4
     - name: Upload AnyKernel3 ZIP
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v4
       with:
         name: AK3-${{ matrix.ks }}
         path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_*.zip
@@ -180,8 +206,9 @@ jobs:
           } > build-info-${{ matrix.ks }}.txt
         fi
 
+    # FIX 1 (continued): Same @v6 → @v4 fix
     - name: Upload build info
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v4
       with:
         name: INFO-${{ matrix.ks }}
         path: kernel_workspace/build-info-${{ matrix.ks }}.txt
