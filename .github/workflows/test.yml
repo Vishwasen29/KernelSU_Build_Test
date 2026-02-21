@@ -97,7 +97,7 @@ jobs:
     - name: Fix SUSFS rejects
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        bash $GITHUB_WORKSPACE/patches/fix3.sh
+        bash $GITHUB_WORKSPACE/patches/fix5.sh
 
     - name: Verify SUSFS source integration (pre-build)
       run: |
