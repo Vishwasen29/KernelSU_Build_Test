@@ -98,6 +98,10 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         bash $GITHUB_WORKSPACE/patches/fix5.sh
+    - name: Fix sus_fix
+      run: |
+       bash $GITHUB_WORKSPACE/patches/ksu_susfs_fix.sh
+       
 
     - name: Verify SUSFS source integration (pre-build)
       run: |
