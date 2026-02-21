@@ -86,21 +86,8 @@ jobs:
     - name: Enable SUSFS configs
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        cat >> arch/arm64/configs/vendor/kona-perf_defconfig << 'EOF'
-         CONFIG_KSU_MANUAL_HOOK=y
-         CONFIG_KSU_SUSFS=y
-         CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-         CONFIG_KSU_SUSFS_SUS_PATH=y
-         CONFIG_KSU_SUSFS_SUS_MOUNT=y
-         CONFIG_KSU_SUSFS_SUS_KSTAT=y
-         CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
-         CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-         CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-         CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-         CONFIG_KSU_SUSFS_ENABLE_LOG=y
-         CONFIG_KSU_SUSFS_SUS_SU=y
-          EOF
-        echo "[✓] SUSFS configs enabled"
+        bash $GITHUB_WORKSPACE/patches/kconfig.sh
+        #echo "[✓] SUSFS configs enabled"
     - name: Apply SUSFS patch
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
