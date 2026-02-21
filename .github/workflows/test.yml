@@ -1,4 +1,4 @@
-name: A
+name: A Build
 
 on:
   workflow_dispatch:
@@ -44,7 +44,7 @@ jobs:
         key: ${{ env.CLANG_VERSION }}
 
     - name: Download & extract Clang-aosp (if cache miss)
-      if: ${{ steps.cache-clang.outputs.cache-hit != 'true' }}
+      if: steps.cache-clang.outputs.cache-hit != 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         mkdir -p clang-aosp
@@ -60,7 +60,7 @@ jobs:
           -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
     - name: Clone susfs4ksu (kernel-4.19 patches)
-      if: ${{ matrix.ks == 'rsuntk' }}
+      if: matrix.ks == 'rsuntk'
       run: |
         git clone --depth=1 \
           https://gitlab.com/simonpunk/susfs4ksu.git \
@@ -96,10 +96,10 @@ jobs:
           cd ..
 
           # KernelSU config
-          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+          DEFCONFIG_PATH="arch/arm64/configs/vendor/kona-perf_defconfig"
+          echo "CONFIG_KSU_MANUAL_HOOK=y"          >> $DEFCONFIG_PATH
 
           # SUSFS defconfig options
-          DEFCONFIG_PATH="arch/arm64/configs/vendor/kona-perf_defconfig"
           echo "CONFIG_KSU_SUSFS=y"               >> $DEFCONFIG_PATH
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y"      >> $DEFCONFIG_PATH
           echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"     >> $DEFCONFIG_PATH
@@ -172,7 +172,7 @@ jobs:
         fi
 
     - name: Upload Image artifact
-      if: ${{ env.CHECK_IMAGE == 'true' }}
+      if: env.CHECK_IMAGE == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: Image-${{ matrix.ks }}
