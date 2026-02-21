@@ -1,43 +1,70 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  patch_ksu_kconfig.sh
-#  Injects SUSFS Kconfig entries into KernelSU/kernel/Kconfig when absent.
+#  kconfig.sh — SUSFS setup for KernelSU kernel builds
 #
-#  Usage:
-#    bash patch_ksu_kconfig.sh [path/to/KernelSU/kernel/Kconfig]
+#  Does TWO things that are BOTH required for SUSFS to compile:
 #
-#  If no argument is given the script looks for the Kconfig relative to
-#  the current working directory (expected: kernel source root).
+#    1. Injects "config KSU_SUSFS ..." stanzas into KernelSU/kernel/Kconfig
+#       so the build system recognises the CONFIG_KSU_SUSFS_* symbols.
+#
+#    2. Appends CONFIG_KSU_SUSFS=y (and siblings) to the defconfig
+#       so the build system actually enables them.
+#
+#  Both steps are necessary. Kconfig tells the build system the symbols
+#  exist; the defconfig tells it to set them to =y. Without step 2 the
+#  kernel config system sees the symbols but leaves them at their default
+#  value (n), so susfs.c is never compiled regardless of what Kconfig says.
+#
+#  Usage (run from the kernel source root):
+#    bash patches/kconfig.sh [DEFCONFIG_PATH]
+#
+#  DEFCONFIG_PATH defaults to:
+#    arch/arm64/configs/vendor/kona-perf_defconfig
 # =============================================================================
 
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Resolve Kconfig path
-# ---------------------------------------------------------------------------
-KCONFIG="${1:-KernelSU/kernel/Kconfig}"
+KERNEL_ROOT="$(pwd)"
+KCONFIG="KernelSU/kernel/Kconfig"
+DEFCONFIG="${1:-arch/arm64/configs/vendor/kona-perf_defconfig}"
 
-if [ ! -f "$KCONFIG" ]; then
-    echo "  [ERROR] Kconfig not found: $KCONFIG"
-    echo "          Run this script from the kernel source root, or pass the"
-    echo "          Kconfig path as the first argument."
+# Resolve to absolute paths so we can cd safely later
+ABS_KCONFIG="${KERNEL_ROOT}/${KCONFIG}"
+ABS_DEFCONFIG="${KERNEL_ROOT}/${DEFCONFIG}"
+
+echo ""
+echo "============================================================"
+echo " SUSFS kconfig.sh"
+echo "============================================================"
+echo "  Kconfig  : ${ABS_KCONFIG}"
+echo "  defconfig: ${ABS_DEFCONFIG}"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Sanity checks
+# ---------------------------------------------------------------------------
+if [ ! -f "${ABS_KCONFIG}" ]; then
+    echo "  [ERROR] KernelSU Kconfig not found: ${ABS_KCONFIG}"
+    echo "          Run this script from the kernel source root after"
+    echo "          the KernelSU setup step has completed."
+    exit 1
+fi
+
+if [ ! -f "${ABS_DEFCONFIG}" ]; then
+    echo "  [ERROR] defconfig not found: ${ABS_DEFCONFIG}"
+    echo "          Pass the correct path as the first argument."
     exit 1
 fi
 
 # ---------------------------------------------------------------------------
-# Idempotency check — skip if SUSFS entries are already present
+# STEP 1 — Inject SUSFS stanzas into KernelSU/kernel/Kconfig
 # ---------------------------------------------------------------------------
-if grep -q "config KSU_SUSFS" "$KCONFIG" 2>/dev/null; then
-    echo "  [SKIP] KernelSU Kconfig already has SUSFS entries — nothing to do."
-    exit 0
-fi
+echo "  [1/2] Patching KernelSU Kconfig..."
 
-# ---------------------------------------------------------------------------
-# Inject SUSFS Kconfig stanzas
-# ---------------------------------------------------------------------------
-echo "  [+] Appending SUSFS Kconfig entries to: $KCONFIG"
-
-cat >> "$KCONFIG" << 'EOF'
+if grep -q "config KSU_SUSFS" "${ABS_KCONFIG}" 2>/dev/null; then
+    echo "        [SKIP] SUSFS entries already present in Kconfig."
+else
+    cat >> "${ABS_KCONFIG}" << 'EOF'
 
 config KSU_SUSFS
 	bool "Enable SUSFS for KernelSU"
@@ -123,12 +150,59 @@ config KSU_SUSFS_SUS_SU
 	  keeping the standard su path hidden from detection.
 EOF
 
-# ---------------------------------------------------------------------------
-# Verify injection succeeded
-# ---------------------------------------------------------------------------
-if grep -q "config KSU_SUSFS" "$KCONFIG"; then
-    echo "  [DONE] SUSFS Kconfig entries added successfully."
-else
-    echo "  [ERROR] Injection appeared to succeed but verification failed."
-    exit 1
+    # Verify
+    if grep -q "config KSU_SUSFS" "${ABS_KCONFIG}"; then
+        echo "        [PASS] Kconfig stanzas added."
+    else
+        echo "        [ERROR] Kconfig write appeared to succeed but verification failed."
+        exit 1
+    fi
 fi
+
+# ---------------------------------------------------------------------------
+# STEP 2 — Append CONFIG_KSU_SUSFS=y entries to the defconfig
+#
+# THIS IS THE STEP THAT WAS MISSING.
+#
+# The Kconfig stanzas above tell the build system that CONFIG_KSU_SUSFS_*
+# symbols exist. But "make defconfig" resolves their values from the defconfig
+# file — if no entry is present, each symbol falls back to its Kconfig
+# default, which is "n". Without this step susfs.c is never compiled even
+# though all the Kconfig stanzas are perfectly in place.
+# ---------------------------------------------------------------------------
+echo "  [2/2] Writing SUSFS entries to defconfig..."
+
+if grep -q "CONFIG_KSU_SUSFS=y" "${ABS_DEFCONFIG}" 2>/dev/null; then
+    echo "        [SKIP] CONFIG_KSU_SUSFS=y already present in defconfig."
+else
+    # No leading spaces — Kconfig parser silently ignores indented lines
+    cat >> "${ABS_DEFCONFIG}" << 'EOF'
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=y
+CONFIG_KSU_SUSFS_SUS_SU=y
+EOF
+
+    # Verify
+    if grep -q "CONFIG_KSU_SUSFS=y" "${ABS_DEFCONFIG}"; then
+        echo "        [PASS] defconfig entries written."
+    else
+        echo "        [ERROR] defconfig write appeared to succeed but verification failed."
+        exit 1
+    fi
+fi
+
+echo ""
+echo "============================================================"
+echo " [DONE] Both steps completed successfully."
+echo "  Kconfig symbols are declared and defconfig enables them."
+echo "  SUSFS will be compiled into the kernel on next build."
+echo "============================================================"
+echo ""
