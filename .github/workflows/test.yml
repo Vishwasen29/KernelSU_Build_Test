@@ -1,4 +1,4 @@
-name: Build
+name: Build Kernel
 
 on:
   workflow_dispatch:
@@ -30,10 +30,7 @@ jobs:
         echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
         echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
         sudo apt-get update
-        sudo apt-get install -y git ccache automake flex lzop bison gperf \
-          build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev \
-          liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc \
-          libc6-dev-i386 libncurses5-dev
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
     - name: Cache Clang toolchain
@@ -43,92 +40,80 @@ jobs:
         path: ${{ github.workspace }}/kernel_workspace/clang-aosp
         key: ${{ env.CLANG_VERSION }}
 
-    - name: Download & extract Clang-aosp (if cache miss)
+    - name: Download and extract Clang-aosp
       if: steps.cache-clang.outputs.cache-hit != 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         mkdir -p clang-aosp
-        wget -O ${CLANG_VERSION}.tar.gz \
-          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        wget -O ${CLANG_VERSION}.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
         tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
 
     - name: Download kernel source
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone --recursive \
-          https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-          -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
+        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    - name: Clone susfs4ksu (kernel-4.19 patches)
-      if: matrix.ks == 'rsuntk'
+    - name: Set up KernelSU
       run: |
-        git clone --depth=1 \
-          https://gitlab.com/simonpunk/susfs4ksu.git \
-          -b kernel-4.19 \
-          $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu
-
-    - name: Set up KernelSU (${{ matrix.ks }})
-      run: |
-        cd kernel_workspace/android-kernel
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
 
         if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-          curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh \
-            | bash -s susfs-rksu-master
 
+          # Setup KernelSU with susfs branch
+          curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s susfs-rksu-master
+
+          # Apply any existing kernel patches
           bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
 
-          # Apply SUSFS kernel patches
-          cp -v $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/fs/susfs.c \
-            fs/
-          cp -v $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/include/linux/susfs.h \
-            include/linux/
-          cp -v $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/include/linux/sus_su.h \
-            include/linux/ 2>/dev/null || true
+          # Clone susfs4ksu patches
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.19 $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu
 
-          patch -p1 --forward \
-            < $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch \
-            || echo "WARNING: Some kernel patch hunks failed, check .rej files"
+          SUSFS_PATCHES="$GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches"
 
+          # Copy susfs source files into kernel tree
+          cp -v $SUSFS_PATCHES/fs/susfs.c fs/
+          cp -v $SUSFS_PATCHES/include/linux/susfs.h include/linux/
+          cp -v $SUSFS_PATCHES/include/linux/sus_su.h include/linux/ 2>/dev/null || true
+
+          # Apply kernel susfs patch
+          patch -p1 --forward < $SUSFS_PATCHES/50_add_susfs_in_kernel-4.19.patch || echo "WARNING: Some kernel patch hunks failed"
+
+          # Apply KernelSU susfs patch
           cd KernelSU
-          patch -p1 --forward \
-            < $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch \
-            || echo "WARNING: Some KSU patch hunks failed, check .rej files"
+          patch -p1 --forward < $SUSFS_PATCHES/KernelSU/10_enable_susfs_for_ksu.patch || echo "WARNING: Some KSU patch hunks failed"
           cd ..
 
-          # KernelSU config
-          DEFCONFIG_PATH="arch/arm64/configs/vendor/kona-perf_defconfig"
-          echo "CONFIG_KSU_MANUAL_HOOK=y"          >> $DEFCONFIG_PATH
-
-          # SUSFS defconfig options
-          echo "CONFIG_KSU_SUSFS=y"               >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y"      >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"     >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"     >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"    >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"   >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"    >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n"        >> $DEFCONFIG_PATH
-          # Uncomment if your manager uses magic mount (KSU v1.0+):
-          # echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEFCONFIG_PATH
+          # Write defconfig options
+          DEFCONFIG="arch/arm64/configs/vendor/kona-perf_defconfig"
+          echo "CONFIG_KSU_MANUAL_HOOK=y"          >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS=y"               >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y"      >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"     >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"     >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"    >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"   >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"    >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_SU=n"        >> $DEFCONFIG
 
           RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
 
         else
-          curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh \
-            | bash -s master
+
+          curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh | bash -s master
           echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
           XXKSUVER=$(grep -oP 'KSU_VERSION\s*=\s*\K\d+' KernelSU/kernel/Makefile | tail -n1)
           echo "XXKSUVER=$XXKSUVER" >> $GITHUB_ENV
+
         fi
 
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
-    - name: Build kernel (${{ matrix.ks }})
+    - name: Build kernel
       run: |
-        cd kernel_workspace/android-kernel
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         export ARCH=arm64
         export SUBARCH=arm64
         export BRAND_SHOW_FLAG=oneplus
@@ -156,7 +141,7 @@ jobs:
 
     - name: Prepare AnyKernel3 and package
       run: |
-        cd kernel_workspace
+        cd $GITHUB_WORKSPACE/kernel_workspace
         git clone --depth=1 https://github.com/osm0sis/AnyKernel3
         sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
         sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
@@ -176,7 +161,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: Image-${{ matrix.ks }}
-        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+        path: ${{ github.workspace }}/kernel_workspace/android-kernel/out/arch/arm64/boot/Image
 
     - name: Upload AnyKernel3 ZIP
       uses: actions/upload-artifact@v4
@@ -186,22 +171,18 @@ jobs:
 
     - name: Save build info
       run: |
-        cd kernel_workspace
+        cd $GITHUB_WORKSPACE/kernel_workspace
         if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-          {
-            echo "RSKSUVER=${{ env.RSKSUVER }}"
-            echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
-            echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
-            echo "SUSFS=enabled"
-          } > build-info-${{ matrix.ks }}.txt
+          echo "RSKSUVER=${{ env.RSKSUVER }}" > build-info-${{ matrix.ks }}.txt
+          echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}" >> build-info-${{ matrix.ks }}.txt
+          echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}" >> build-info-${{ matrix.ks }}.txt
+          echo "SUSFS=enabled" >> build-info-${{ matrix.ks }}.txt
         else
-          {
-            echo "XXKSUVER=${{ env.XXKSUVER }}"
-          } > build-info-${{ matrix.ks }}.txt
+          echo "XXKSUVER=${{ env.XXKSUVER }}" > build-info-${{ matrix.ks }}.txt
         fi
 
     - name: Upload build info
       uses: actions/upload-artifact@v4
       with:
         name: INFO-${{ matrix.ks }}
-        path: kernel_workspace/build-info-${{ matrix.ks }}.txt
+        path: ${{ github.workspace }}/kernel_workspace/build-info-${{ matrix.ks }}.txt
