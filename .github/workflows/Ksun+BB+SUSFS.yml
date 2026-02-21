@@ -89,6 +89,7 @@ jobs:
 
     - name: Applying susfs fixes
       run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         bash $GITHUB_WORKSPACE/patches/fix3.sh
 
     - name: Apply SUSFS patch
