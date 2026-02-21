@@ -1,4 +1,4 @@
-name: BKL
+name: Build
 
 on:
   workflow_dispatch:
