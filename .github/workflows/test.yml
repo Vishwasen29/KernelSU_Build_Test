@@ -7,8 +7,6 @@ env:
   TZ: Asia/Shanghai
   CLANG_VERSION: clang-r547379
   Lineage_VERSION: lineage-23.2
-  # ── SUSFS: pin a stable release tag from simonpunk/susfs4ksu ──────────────
-  SUSFS_TAG: v1.5.9
 
 jobs:
   build:
@@ -46,7 +44,7 @@ jobs:
         key: ${{ env.CLANG_VERSION }}
 
     - name: Download & extract Clang-aosp (if cache miss)
-      if: steps.cache-clang.outputs.cache-hit != 'true'
+      if: ${{ steps.cache-clang.outputs.cache-hit != 'true' }}
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         mkdir -p clang-aosp
@@ -61,9 +59,8 @@ jobs:
           https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
-    # ── NEW: clone susfs4ksu once, reused by the rsuntk branch ────────────────
     - name: Clone susfs4ksu (kernel-4.19 patches)
-      if: matrix.ks == 'rsuntk'
+      if: ${{ matrix.ks == 'rsuntk' }}
       run: |
         git clone --depth=1 \
           https://gitlab.com/simonpunk/susfs4ksu.git \
@@ -75,15 +72,12 @@ jobs:
         cd kernel_workspace/android-kernel
 
         if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-          # ── CHANGED: use susfs-rksu-master branch instead of main ───────────
-          # This branch of rsuntk KernelSU already includes KSU-side SUSFS hooks
           curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh \
             | bash -s susfs-rksu-master
 
           bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
 
-          # ── NEW: apply SUSFS kernel patches (fs + include + main patch) ─────
-          # Copy the susfs source files into the kernel tree
+          # Apply SUSFS kernel patches
           cp -v $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/fs/susfs.c \
             fs/
           cp -v $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/include/linux/susfs.h \
@@ -91,36 +85,33 @@ jobs:
           cp -v $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/include/linux/sus_su.h \
             include/linux/ 2>/dev/null || true
 
-          # Apply the main kernel patch (may have rejects on first use — fix manually)
           patch -p1 --forward \
             < $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch \
-            || echo "⚠️  Some hunks failed — review .rej files before merging"
+            || echo "WARNING: Some kernel patch hunks failed, check .rej files"
 
-          # Apply the KSU-side SUSFS enablement patch (patches KernelSU/ folder)
           cd KernelSU
           patch -p1 --forward \
             < $GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch \
-            || echo "⚠️  KSU susfs patch had rejects"
+            || echo "WARNING: Some KSU patch hunks failed, check .rej files"
           cd ..
-          # ── END SUSFS patches ──────────────────────────────────────────────
 
+          # KernelSU config
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
-          # ── NEW: enable SUSFS features in defconfig ──────────────────────────
+          # SUSFS defconfig options
           DEFCONFIG_PATH="arch/arm64/configs/vendor/kona-perf_defconfig"
-          echo "CONFIG_KSU_SUSFS=y"                >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y"       >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"      >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"      >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n"  >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"     >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"    >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"     >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"  >> $DEFCONFIG_PATH
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n"         >> $DEFCONFIG_PATH
-          # Uncomment below if your manager uses magic mount (KSU v1.0+):
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEFCONFIG_PATH
-          # ── END SUSFS defconfig ───────────────────────────────────────────────
+          echo "CONFIG_KSU_SUSFS=y"               >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y"      >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"     >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"     >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"    >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"   >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"    >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEFCONFIG_PATH
+          echo "CONFIG_KSU_SUSFS_SUS_SU=n"        >> $DEFCONFIG_PATH
+          # Uncomment if your manager uses magic mount (KSU v1.0+):
+          # echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEFCONFIG_PATH
 
           RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
@@ -175,14 +166,13 @@ jobs:
 
         cd AnyKernel3
         if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-          # ── CHANGED: filename now includes SUSFS to distinguish it ────────────
           zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-rsuntk_KSU_${{ env.RSKSUVER }}-SUSFS.zip ./*
         else
           zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-backslashxx_KSU_${{ env.XXKSUVER }}.zip ./*
         fi
 
     - name: Upload Image artifact
-      if: env.CHECK_IMAGE == 'true'
+      if: ${{ env.CHECK_IMAGE == 'true' }}
       uses: actions/upload-artifact@v4
       with:
         name: Image-${{ matrix.ks }}
