@@ -1,4 +1,4 @@
-name: A susfs test
+name: A KernelSU-Next + SUSFS Build
 
 on:
   workflow_dispatch:
@@ -6,178 +6,183 @@ on:
 env:
   TZ: Asia/Shanghai
   CLANG_VERSION: clang-r547379
-  Lineage_VERSION: lineage-23.2
+  LINEAGE_VERSION: lineage-23.2
 
 jobs:
   build:
-    name: Build Kernel (${{ matrix.ks }})
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        ks: [rsuntk, backslashxx]
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set swap to 10G
+    - name: Set Swap (10G)
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 10
 
-    - name: Setup build environment
+    - name: Install Dependencies
       run: |
-        echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
-        echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
         sudo apt-get update
-        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 libncurses5-dev
-        mkdir -p kernel_workspace
+        sudo apt-get install -y git bc bison build-essential curl flex g++-multilib \
+        gcc-multilib git-lfs gnupg gperf imagemagick libncurses5-dev \
+        libssl-dev libxml2-utils lzop pngcrush rsync schedtool \
+        squashfs-tools xsltproc zip zlib1g-dev
 
-    - name: Cache Clang
-      uses: actions/cache@v3
-      id: cache-clang
-      with:
-        path: kernel_workspace/clang-aosp
-        key: ${{ env.CLANG_VERSION }}
+        echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
 
-    - name: Download Clang (if needed)
-      if: steps.cache-clang.outputs.cache-hit != 'true'
+    # =========================================================
+    # Download Clang
+    # =========================================================
+
+    - name: Download Clang
       run: |
-        cd kernel_workspace
-        mkdir clang-aosp
-        wget -O ${CLANG_VERSION}.tar.gz \
-        https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
-        tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
+        mkdir toolchain
+        cd toolchain
+        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -xf ${CLANG_VERSION}.tar.gz
+        echo "$PWD/bin" >> $GITHUB_PATH
 
-    - name: Clone kernel source
+    # =========================================================
+    # Clone Kernel
+    # =========================================================
+
+    - name: Clone Kernel Source
       run: |
-        cd kernel_workspace
-        git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-        -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
+        git clone --depth=1 --recursive \
+        https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+        -b ${LINEAGE_VERSION} kernel
 
-    # =====================================================
-    # KernelSU Setup
-    # =====================================================
+    # =========================================================
+    # Setup KernelSU-Next (LEGACY)
+    # =========================================================
 
-    - name: Setup KernelSU (${{ matrix.ks }})
+    - name: Setup KernelSU-Next (legacy)
       run: |
-        cd kernel_workspace/android-kernel
+        cd kernel
 
-        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-          echo "[+] Using KernelSU-Next (legacy)"
-          curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s legacy
-          KSU_DIR="KernelSU-Next"
-          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          RSKSUVER=$(cd $KSU_DIR && expr $(git rev-list --count HEAD) + 30000)
-          echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
-        else
-          echo "[+] Using backslashxx KernelSU"
-          curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh | bash -s master
-          KSU_DIR="KernelSU"
-          echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          XXKSUVER=$(grep -oP 'KSU_VERSION\s*=\s*\K\d+' $KSU_DIR/kernel/Makefile | tail -n1)
-          echo "XXKSUVER=$XXKSUVER" >> $GITHUB_ENV
-        fi
+        echo "[+] Installing KernelSU-Next legacy..."
+        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -s legacy
 
-        echo "KSU_DIR=$KSU_DIR" >> $GITHUB_ENV
+        # Enable manual hook (required)
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # Remove dirty tag
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
-    # =====================================================
-    # SUSFS Patch
-    # =====================================================
+        # Calculate version
+        RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+        echo "KSU_VERSION=$RSKSUVER" >> $GITHUB_ENV
 
-    - name: Apply SUSFS patch
+    # =========================================================
+    # Apply SUSFS Patch
+    # =========================================================
+
+    - name: Apply SUSFS Patch
       run: |
-        cd kernel_workspace/android-kernel
+        cd kernel
         git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/sus4.patch || true
 
+    - name: Collect Patch Rejects (if any)
+      run: |
+        cd kernel
+
+        mkdir -p $GITHUB_WORKSPACE/reject_dump
+
+        # Copy all reject files
+        find . -name "*.rej" -exec cp --parents {} $GITHUB_WORKSPACE/reject_dump/ \; || true
+
+        # Copy corresponding original files
+        for rej in $(find . -name "*.rej"); do
+          orig=$(echo $rej | sed 's/\.rej$//')
+          if [ -f "$orig" ]; then
+            cp --parents "$orig" $GITHUB_WORKSPACE/reject_dump/
+          fi
+        done
+
+        # Copy SUSFS patch for reference
+        cp $GITHUB_WORKSPACE/patches/sus4.patch $GITHUB_WORKSPACE/reject_dump/ || true
+
+        # Create archive
+        cd $GITHUB_WORKSPACE
+        tar -czf susfs_rejects.tar.gz reject_dump || true
+
+    - name: Upload Reject Artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: susfs-reject-dump
+        path: susfs_rejects.tar.gz
     - name: Run fix5.sh
       run: |
-        cd kernel_workspace/android-kernel
+        cd kernel
         bash $GITHUB_WORKSPACE/patches/fix5.sh
 
-    # =====================================================
+    # =========================================================
     # Verify SUSFS Before Build
-    # =====================================================
+    # =========================================================
 
-    - name: Verify SUSFS integration
+    - name: Verify SUSFS Integration
       run: |
-        cd kernel_workspace/android-kernel
-        echo "Checking SUSFS integration..."
+        cd kernel
+
         FAIL=0
 
-        check() {
-          if [ "$2" = "ok" ]; then
-            echo "[PASS] $1"
-          else
-            echo "[FAIL] $1"
-            FAIL=$((FAIL+1))
-          fi
-        }
+        [ -f fs/susfs.c ] && echo "[PASS] susfs.c exists" || FAIL=1
+        [ -f include/linux/susfs.h ] && echo "[PASS] susfs.h exists" || FAIL=1
 
-        [ -f "fs/susfs.c" ] && check "fs/susfs.c exists" ok || check "fs/susfs.c exists" fail
-        [ -f "include/linux/susfs.h" ] && check "susfs.h exists" ok || check "susfs.h exists" fail
-
-        grep -q "susfs" fs/Makefile && check "fs/Makefile updated" ok || check "fs/Makefile updated" fail
-
-        grep -q "config KSU_SUSFS" $KSU_DIR/kernel/Kconfig 2>/dev/null \
-          && check "$KSU_DIR Kconfig has SUSFS entries" ok \
-          || check "$KSU_DIR Kconfig has SUSFS entries" fail
+        grep -q "susfs" fs/Makefile && echo "[PASS] fs/Makefile OK" || FAIL=1
+        grep -q "CONFIG_KSU_SUSFS" arch/arm64/configs/vendor/kona-perf_defconfig && echo "[PASS] defconfig OK" || FAIL=1
 
         [ "$FAIL" -eq 0 ] || exit 1
 
-    # =====================================================
+    # =========================================================
     # Build Kernel
-    # =====================================================
+    # =========================================================
 
-    - name: Build kernel
+    - name: Build Kernel
       run: |
-        cd kernel_workspace/android-kernel
+        cd kernel
+
         export ARCH=arm64
         export SUBARCH=arm64
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-        export KBUILD_BUILD_HOST=Github-Action
-        export KBUILD_BUILD_USER=${{ github.actor }}
 
         make O=out vendor/kona-perf_defconfig vendor/oplus.config
-        make -j$(nproc) O=out CC=clang LD=ld.lld LLVM=1
 
-    # =====================================================
-    # Post Build Verify
-    # =====================================================
+        make -j$(nproc) O=out \
+        CC=clang \
+        LD=ld.lld \
+        LLVM=1 \
+        LLVM_IAS=1
 
-    - name: Verify SUSFS compiled
+    # =========================================================
+    # Verify SUSFS Compiled
+    # =========================================================
+
+    - name: Verify Build Output
       run: |
-        cd kernel_workspace/android-kernel
+        cd kernel
+
         FAIL=0
 
-        [ -f "out/fs/susfs.o" ] && echo "[PASS] susfs.o compiled" || { echo "[FAIL] susfs.o missing"; FAIL=1; }
-
-        grep -q "CONFIG_KSU_SUSFS=y" out/.config \
-          && echo "[PASS] SUSFS enabled in .config" \
-          || { echo "[FAIL] SUSFS not enabled"; FAIL=1; }
+        [ -f out/fs/susfs.o ] && echo "[PASS] susfs.o compiled" || FAIL=1
+        grep -q "CONFIG_KSU_SUSFS=y" out/.config && echo "[PASS] SUSFS enabled in config" || FAIL=1
 
         [ "$FAIL" -eq 0 ] || exit 1
 
-    # =====================================================
+    # =========================================================
     # Package AnyKernel3
-    # =====================================================
+    # =========================================================
 
     - name: Package AnyKernel3
       run: |
-        cd kernel_workspace
         git clone --depth=1 https://github.com/osm0sis/AnyKernel3
-        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+        cp kernel/out/arch/arm64/boot/Image AnyKernel3/
+
         cd AnyKernel3
+        zip -r AK3-KSU-Next-SUSFS-${KSU_VERSION}.zip ./*
 
-        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-          zip -r AK3-${{ env.Lineage_VERSION }}-rsuntk_KSU_${{ env.RSKSUVER }}.zip ./*
-        else
-          zip -r AK3-${{ env.Lineage_VERSION }}-backslashxx_KSU_${{ env.XXKSUVER }}.zip ./*
-        fi
-
-    - name: Upload ZIP
+    - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: AK3-${{ matrix.ks }}
-        path: kernel_workspace/AnyKernel3/*.zip
+        name: KernelSU-Next-SUSFS
+        path: AnyKernel3/*.zip
