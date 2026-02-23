@@ -79,18 +79,6 @@ jobs:
           if [ -d "$GITHUB_WORKSPACE/SUSFS" ]; then
             cp -rp $GITHUB_WORKSPACE/SUSFS/*.c fs/
             cp -rp $GITHUB_WORKSPACE/SUSFS/*.h include/linux/
-
-            # Wire SUSFS Kconfig into fs/Kconfig so CONFIG_KSU_SUSFS is a
-            # recognized symbol and is not silently dropped during defconfig merge
-            if [ -f "$GITHUB_WORKSPACE/SUSFS/Kconfig" ]; then
-              cp -p $GITHUB_WORKSPACE/SUSFS/Kconfig fs/susfs_kconfig
-              if ! grep -q "susfs_kconfig" fs/Kconfig; then
-                echo 'source "fs/susfs_kconfig"' >> fs/Kconfig
-              fi
-            else
-              echo "⚠️  SUSFS/Kconfig not found – skipping Kconfig wiring"
-              echo "   susfs options will be force-injected via scripts/config instead"
-            fi
           else
             echo "SUSFS folder not found!"
             exit 1
@@ -99,6 +87,97 @@ jobs:
           if ! grep -q "susfs.o" fs/Makefile; then
             echo "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" >> fs/Makefile
           fi
+
+      - name: Inject SUSFS Kconfig entries
+        run: |
+          cd kernel_workspace/android-kernel
+
+          # The SUSFS config symbols MUST be declared in the Kconfig tree.
+          # Without a declaration, olddefconfig treats them as unknown and
+          # silently removes them — which is exactly why susfs.o never compiled.
+          #
+          # We write the Kconfig fragment ourselves since the SUSFS repo does
+          # not ship one, then source it from inside the KernelSU driver
+          # Kconfig (so "depends on KSU" resolves correctly), falling back to
+          # fs/Kconfig if KernelSU has no Kconfig file of its own.
+
+          cat > /tmp/susfs.Kconfig << 'KCONFIG_EOF'
+          config KSU_SUSFS
+          	bool "Enable SUSFS for KernelSU"
+          	depends on KSU
+          	default n
+          	help
+          	  Filesystem spoofing and syscall hook support for KernelSU (SUSFS).
+
+          if KSU_SUSFS
+
+          config KSU_SUSFS_HAS_MAGIC_MOUNT
+          	bool "SUSFS: magic mount support"
+          	default n
+
+          config KSU_SUSFS_SUS_PATH
+          	bool "SUSFS: sus_path"
+          	default n
+
+          config KSU_SUSFS_SUS_MOUNT
+          	bool "SUSFS: sus_mount"
+          	default n
+
+          config KSU_SUSFS_SUS_KSTAT
+          	bool "SUSFS: sus_kstat"
+          	default n
+
+          config KSU_SUSFS_SUS_OVERLAYFS
+          	bool "SUSFS: sus_overlayfs"
+          	default n
+
+          config KSU_SUSFS_TRY_UMOUNT
+          	bool "SUSFS: try_umount"
+          	default n
+
+          config KSU_SUSFS_SPOOF_UNAME
+          	bool "SUSFS: spoof_uname"
+          	default n
+
+          config KSU_SUSFS_OPEN_REDIRECT
+          	bool "SUSFS: open_redirect"
+          	default n
+
+          config KSU_SUSFS_ENABLE_LOG
+          	bool "SUSFS: enable logging"
+          	default n
+
+          config KSU_SUSFS_SUS_SU
+          	bool "SUSFS: sus_su"
+          	default n
+
+          endif # KSU_SUSFS
+          KCONFIG_EOF
+
+          # Prefer to attach to the KernelSU Kconfig so the dependency chain
+          # (KSU_SUSFS depends on KSU) resolves in the correct menu context.
+          KSU_KCONFIG=$(find drivers/kernelsu -name Kconfig 2>/dev/null | head -1)
+
+          if [ -n "$KSU_KCONFIG" ]; then
+            TARGET_DIR=$(dirname "$KSU_KCONFIG")
+            TARGET_KCONFIG="$KSU_KCONFIG"
+            echo "📋 Attaching SUSFS Kconfig to KernelSU: $TARGET_KCONFIG"
+          else
+            TARGET_DIR="fs"
+            TARGET_KCONFIG="fs/Kconfig"
+            echo "📋 KernelSU Kconfig not found — attaching SUSFS to fs/Kconfig"
+          fi
+
+          cp /tmp/susfs.Kconfig "${TARGET_DIR}/susfs.Kconfig"
+
+          # Avoid duplicate sourcing on re-runs
+          if ! grep -q "susfs.Kconfig" "$TARGET_KCONFIG"; then
+            echo "source \"${TARGET_DIR}/susfs.Kconfig\"" >> "$TARGET_KCONFIG"
+          fi
+
+          echo "✅ SUSFS Kconfig injected into $TARGET_KCONFIG"
+          echo "--- Verifying symbols are reachable ---"
+          grep -r "config KSU_SUSFS" "${TARGET_DIR}/" || true
 
       - name: Add KernelSU & SUSFS configs
         run: |
@@ -139,7 +218,12 @@ jobs:
           fi
 
           if ! grep -q "CONFIG_KSU_SUSFS=y" arch/arm64/configs/vendor/kona-perf_defconfig; then
-            echo "❌ CONFIG_KSU_SUSFS not enabled"
+            echo "❌ CONFIG_KSU_SUSFS not in defconfig"
+            exit 1
+          fi
+
+          if ! grep -rq "config KSU_SUSFS" drivers/ fs/ 2>/dev/null; then
+            echo "❌ SUSFS Kconfig symbols not found in source tree"
             exit 1
           fi
 
@@ -155,16 +239,16 @@ jobs:
           export KBUILD_BUILD_HOST=Github-Action
           export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
 
-          # Step 1: Generate base .config from defconfig + oplus fragment
-          make O=out CC=clang \
+          # Step 1: Generate base .config from defconfig + oplus fragment.
+          # Pipe through "yes ''" to auto-answer any interactive NEW prompts
+          # (the previous run showed KSU prompting interactively here).
+          yes "" | make O=out CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             LD=ld.lld LLVM=1 \
             vendor/kona-perf_defconfig vendor/oplus.config
 
-          # Step 2: Force-enable SUSFS options directly into out/.config.
-          # This is necessary because oplus.config can override/strip values
-          # added to the defconfig, and any unknown Kconfig symbol is silently
-          # dropped during the merge step.
+          # Step 2: Force-enable all SUSFS options directly into out/.config.
+          # Now that the symbols exist in Kconfig, olddefconfig will keep them.
           ./scripts/config --file out/.config \
             --enable CONFIG_KSU \
             --enable CONFIG_KSU_SUSFS \
@@ -179,21 +263,26 @@ jobs:
             --enable CONFIG_KSU_SUSFS_ENABLE_LOG \
             --enable CONFIG_KSU_SUSFS_SUS_SU
 
-          # Step 3: Re-resolve Kconfig dependencies so nothing is dropped
+          # Step 3: Re-resolve dependencies — symbols are now registered so
+          # olddefconfig will honour them rather than strip them.
           make O=out CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             LD=ld.lld LLVM=1 \
             olddefconfig
 
-          # Step 4: Confirm CONFIG_KSU_SUSFS survived — fail fast before the
-          # full compile if something is still wrong with Kconfig wiring
+          # Step 4: Hard assert before the 4-minute compile
+          echo "--- SUSFS entries in final .config ---"
+          grep "KSU_SUSFS" out/.config || true
+          echo "--------------------------------------"
+
           if ! grep -q "CONFIG_KSU_SUSFS=y" out/.config; then
             echo "❌ CONFIG_KSU_SUSFS was dropped from final .config"
-            echo "   Check that fs/susfs_kconfig is sourced in fs/Kconfig"
-            echo "   and that all Kconfig dependencies are met"
+            echo "   KSU_SUSFS depends on KSU — check CONFIG_KSU state:"
+            grep "CONFIG_KSU" out/.config || echo "   CONFIG_KSU not found"
             exit 1
           fi
-          echo "✅ CONFIG_KSU_SUSFS=y confirmed in final .config"
+
+          echo "✅ CONFIG_KSU_SUSFS=y confirmed — starting full build"
 
           # Step 5: Full build
           make -j$(nproc --all) O=out CC=clang \
