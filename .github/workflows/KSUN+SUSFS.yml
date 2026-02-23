@@ -63,7 +63,9 @@ jobs:
       - name: Setup KernelSU (Legacy)
         run: |
           cd kernel_workspace/android-kernel
-          curl -LSs https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh | bash - legacy
+          curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy
+          bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
           RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
