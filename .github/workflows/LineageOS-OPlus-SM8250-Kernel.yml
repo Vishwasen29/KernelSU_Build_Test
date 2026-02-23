@@ -1,4 +1,4 @@
-name: Build LineageOS OPlus SM8250 Kernel
+name: A Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
@@ -59,9 +59,9 @@ jobs:
         cd kernel_workspace/android-kernel
 
         if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-          curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
-          bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
-          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+          bash $GITHUB_WORKSPACE/KernelSU-Next/kernel/setup.sh -legacy
+          #bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
+          #echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
           RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         else
@@ -73,6 +73,27 @@ jobs:
 
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
+    - name: Copy SUSFS files
+      run: |    
+         cd kernel_workspace/android-kernel
+         cp -rp $GITHUB_WORKSPACE/SUFS/*.c fs/
+         cp -rp $GITHUB_WORKSPACE/SUFS/*.h include/linux
+    - name: Add to defconfig
+      run: |
+       cd kernel_workspace/android-kernel
+        echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+       echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
     - name: Build kernel (${{ matrix.ks }})
       run: |
         cd kernel_workspace/android-kernel
@@ -165,39 +186,3 @@ jobs:
     - uses: actions/download-artifact@v4
       with:
         path: artifacts
-
-    - name: Prepare Telegram media and send
-      run: |
-        source artifacts/INFO-rsuntk/build-info-rsuntk.txt 2>/dev/null || true
-        source artifacts/INFO-backslashxx/build-info-backslashxx.txt 2>/dev/null || true
-
-        RS_AK3=$(ls artifacts/AK3-rsuntk/*.zip 2>/dev/null || true)
-        XX_AK3=$(ls artifacts/AK3-backslashxx/*.zip 2>/dev/null || true)
-
-        caption1="\
-        <blockquote><a href=\"https://github.com/rsuntk/KernelSU\"><b>Unofficial KernelSU (rsuntk)</b> - $RSKSUVER</a></blockquote>
-        Manager: <blockquote>https://t.me/rsukrnlsu</blockquote>"
-        caption2="\
-        <blockquote><a href=\"https://github.com/backslashxx/KernelSU\"><b>Unofficial KernelSU (backslashxx)</b> - $XXKSUVER</a></blockquote>
-        Manager: <blockquote>https://github.com/backslashxx/KernelSU/releases</blockquote>
-
-        ROM:<blockquote><b>${{ env.Lineage_VERSION }}</b></blockquote>
-        Device:<blockquote>OnePlus 8 | OnePlus 8 Pro | OnePlus 8T | OnePlus 9R</blockquote>
-        Kernel Version:<blockquote>$KERNEL_VERSION</blockquote>
-        Build Time:<blockquote>$BUILD_TIME_1</blockquote>
-        Change Log:<blockquote>Only Test.</blockquote>
-        
-        <a href=\"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\">Github Action</a>"
-
-        media=$(jq -n \
-          --arg media1 "attach://rsak3" \
-          --arg media2 "attach://xxak3" \
-          --arg caption1 "$caption1" \
-          --arg caption2 "$caption2" \
-          '[{type: "document", media: $media1, caption: $caption1, parse_mode: "HTML"},
-            {type: "document", media: $media2, caption: $caption2, parse_mode: "HTML"}]')
-
-          curl "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMediaGroup?chat_id=$TELEGRAM_CHAT_ID" \
-            -F "media=$media" \
-            -F rsak3="@$RS_AK3" \
-            -F xxak3="@$XX_AK3"
