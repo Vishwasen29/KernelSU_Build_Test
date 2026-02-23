@@ -79,6 +79,18 @@ jobs:
           if [ -d "$GITHUB_WORKSPACE/SUSFS" ]; then
             cp -rp $GITHUB_WORKSPACE/SUSFS/*.c fs/
             cp -rp $GITHUB_WORKSPACE/SUSFS/*.h include/linux/
+
+            # Wire SUSFS Kconfig into fs/Kconfig so CONFIG_KSU_SUSFS is a
+            # recognized symbol and is not silently dropped during defconfig merge
+            if [ -f "$GITHUB_WORKSPACE/SUSFS/Kconfig" ]; then
+              cp -p $GITHUB_WORKSPACE/SUSFS/Kconfig fs/susfs_kconfig
+              if ! grep -q "susfs_kconfig" fs/Kconfig; then
+                echo 'source "fs/susfs_kconfig"' >> fs/Kconfig
+              fi
+            else
+              echo "⚠️  SUSFS/Kconfig not found – skipping Kconfig wiring"
+              echo "   susfs options will be force-injected via scripts/config instead"
+            fi
           else
             echo "SUSFS folder not found!"
             exit 1
@@ -143,11 +155,47 @@ jobs:
           export KBUILD_BUILD_HOST=Github-Action
           export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
 
+          # Step 1: Generate base .config from defconfig + oplus fragment
           make O=out CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             LD=ld.lld LLVM=1 \
             vendor/kona-perf_defconfig vendor/oplus.config
 
+          # Step 2: Force-enable SUSFS options directly into out/.config.
+          # This is necessary because oplus.config can override/strip values
+          # added to the defconfig, and any unknown Kconfig symbol is silently
+          # dropped during the merge step.
+          ./scripts/config --file out/.config \
+            --enable CONFIG_KSU \
+            --enable CONFIG_KSU_SUSFS \
+            --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
+            --enable CONFIG_KSU_SUSFS_SUS_PATH \
+            --enable CONFIG_KSU_SUSFS_SUS_MOUNT \
+            --enable CONFIG_KSU_SUSFS_SUS_KSTAT \
+            --enable CONFIG_KSU_SUSFS_SUS_OVERLAYFS \
+            --enable CONFIG_KSU_SUSFS_TRY_UMOUNT \
+            --enable CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+            --enable CONFIG_KSU_SUSFS_ENABLE_LOG \
+            --enable CONFIG_KSU_SUSFS_SUS_SU
+
+          # Step 3: Re-resolve Kconfig dependencies so nothing is dropped
+          make O=out CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LD=ld.lld LLVM=1 \
+            olddefconfig
+
+          # Step 4: Confirm CONFIG_KSU_SUSFS survived — fail fast before the
+          # full compile if something is still wrong with Kconfig wiring
+          if ! grep -q "CONFIG_KSU_SUSFS=y" out/.config; then
+            echo "❌ CONFIG_KSU_SUSFS was dropped from final .config"
+            echo "   Check that fs/susfs_kconfig is sourced in fs/Kconfig"
+            echo "   and that all Kconfig dependencies are met"
+            exit 1
+          fi
+          echo "✅ CONFIG_KSU_SUSFS=y confirmed in final .config"
+
+          # Step 5: Full build
           make -j$(nproc --all) O=out CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             LD=ld.lld LLVM=1
