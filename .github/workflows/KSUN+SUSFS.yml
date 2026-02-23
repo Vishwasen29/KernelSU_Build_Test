@@ -72,6 +72,25 @@ jobs:
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
+      - name: Patch KernelSU for kernel 4.19 compatibility
+        run: |
+          cd kernel_workspace/android-kernel
+
+          ALLOWLIST=drivers/kernelsu/allowlist.c
+
+          # Fix 1: TWA_RESUME was introduced in kernel 5.7.
+          # On 4.19, task_work_add() takes a plain bool — use `true` instead.
+          if grep -q "TWA_RESUME" "$ALLOWLIST"; then
+            sed -i 's/TWA_RESUME/true/g' "$ALLOWLIST"
+            echo "✅ Patched TWA_RESUME → true in $ALLOWLIST"
+          fi
+
+          # Fix 2: put_task_struct() is declared in <linux/sched/task.h>,
+          # which is not pulled in transitively on 4.19.
+          if ! grep -q "linux/sched/task.h" "$ALLOWLIST"; then
+            sed -i '1s|^|#include <linux/sched/task.h>\n|' "$ALLOWLIST"
+            echo "✅ Added #include <linux/sched/task.h> to $ALLOWLIST"
+          fi
       - name: Copy SUSFS files
         run: |
           cd kernel_workspace/android-kernel
