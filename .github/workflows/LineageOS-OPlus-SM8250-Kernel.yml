@@ -59,7 +59,7 @@ jobs:
       run: |
         cd kernel_workspace/android-kernel
         
-          bash $GITHUB_WORKSPACE/KernelSU-Next/kernel/setup.sh -legacy
+          bash $GITHUB_WORKSPACE/KernelSU-Next/kernel/setup.sh 
           #bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
           #echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
           RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
