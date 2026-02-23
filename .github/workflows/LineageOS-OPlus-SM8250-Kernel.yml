@@ -1,6 +1,9 @@
 name: A Build LineageOS OPlus SM8250 Kernel
 
 on:
+  push:
+    branches:
+      - master
   workflow_dispatch:
 
 env:
