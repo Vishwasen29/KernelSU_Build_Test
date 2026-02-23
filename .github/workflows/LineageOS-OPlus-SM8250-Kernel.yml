@@ -13,12 +13,10 @@ env:
 
 jobs:
   build:
-    name: Build Kernel (${{ matrix.ks }})
+    name: Build Kernel
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
-      matrix:
-        ks: [rsuntk, backslashxx]
+   
 
     steps:
     - uses: actions/checkout@v6
@@ -60,20 +58,13 @@ jobs:
     - name: Set up KernelSU (${{ matrix.ks }})
       run: |
         cd kernel_workspace/android-kernel
-
-        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+        
           bash $GITHUB_WORKSPACE/KernelSU-Next/kernel/setup.sh -legacy
           #bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
           #echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
+          RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
-        else
-          curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh | bash -s master
-          echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          XXKSUVER=$(grep -oP 'KSU_VERSION\s*=\s*\K\d+' KernelSU/kernel/Makefile | tail -n1)
-          echo "XXKSUVER=$XXKSUVER" >> $GITHUB_ENV
-        fi
-
+        
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
     - name: Copy SUSFS files
