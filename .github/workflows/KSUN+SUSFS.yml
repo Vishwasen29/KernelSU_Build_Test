@@ -70,10 +70,6 @@ jobs:
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
-    - name: Clone SUSFS
-      run: |
-        cd $GITHUB_WORKSPACE
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git SUSFS
 
     - name: Copy SUSFS files
       run: |
@@ -112,6 +108,34 @@ jobs:
         echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $DEF
         echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> $DEF
 
+        - name: Pre-Build SUSFS Verification
+      run: |
+        cd kernel_workspace/android-kernel
+
+        echo "Checking SUSFS source files..."
+
+        if [ ! -f fs/susfs.c ]; then
+          echo "❌ susfs.c not found in fs/"
+          exit 1
+        fi
+
+        if [ ! -f include/linux/susfs.h ]; then
+          echo "❌ susfs.h not found in include/linux/"
+          exit 1
+        fi
+
+        if ! grep -q "susfs.o" fs/Makefile; then
+          echo "❌ susfs.o not found in fs/Makefile"
+          exit 1
+        fi
+
+        if ! grep -q "CONFIG_KSU_SUSFS=y" arch/arm64/configs/vendor/kona-perf_defconfig; then
+          echo "❌ CONFIG_KSU_SUSFS not enabled in defconfig"
+          exit 1
+        fi
+
+        echo "✅ Pre-build SUSFS verification PASSED"
+    
     - name: Build Kernel
       run: |
         cd kernel_workspace/android-kernel
@@ -142,6 +166,27 @@ jobs:
           echo "Kernel build failed"
           exit 1
         fi
+
+        - name: Post-Build SUSFS Verification
+      if: env.CHECK_IMAGE == 'true'
+      run: |
+        cd kernel_workspace/android-kernel
+
+        echo "Checking compiled objects..."
+
+        if ! find out -name "susfs.o" | grep -q susfs.o; then
+          echo "❌ susfs.o was NOT compiled"
+          exit 1
+        fi
+
+        echo "Checking kernel image for susfs symbol..."
+
+        if ! strings out/arch/arm64/boot/Image | grep -i susfs > /dev/null; then
+          echo "❌ SUSFS symbol not found in Image"
+          exit 1
+        fi
+
+        echo "✅ Post-build SUSFS verification PASSED"
 
     - name: Package AnyKernel3
       if: env.CHECK_IMAGE == 'true'
