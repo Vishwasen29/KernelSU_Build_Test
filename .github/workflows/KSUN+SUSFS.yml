@@ -89,6 +89,11 @@ jobs:
             echo "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" >> fs/Makefile
           fi
 
+      - name: Inject SUSFS Kconfig symbols
+        run: |
+          chmod +x $GITHUB_WORKSPACE/patches/kconfig.sh
+          $GITHUB_WORKSPACE/patches/kconfig.sh kernel_workspace/android-kernel
+
       
       - name: Add KernelSU & SUSFS configs
         run: |
