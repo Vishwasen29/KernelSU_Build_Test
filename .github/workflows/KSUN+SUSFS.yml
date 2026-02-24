@@ -77,17 +77,49 @@ jobs:
         run: |
           cd kernel_workspace/android-kernel
 
-          if [ -d "$GITHUB_WORKSPACE/SUSFS" ]; then
-            cp -rp $GITHUB_WORKSPACE/SUSFS/*.c fs/
-            cp -rp $GITHUB_WORKSPACE/SUSFS/*.h include/linux/
-          else
-            echo "SUSFS folder not found!"
-            exit 1
-          fi
+          # Determine which SUSFS commit rsuntk/KernelSU is pinned to
+          RKSU_SUSFS_BRANCH="susfs-rksu-master"
+
+          # Clone the matching SUSFS source (simonpunk is the canonical upstream)
+          git clone --depth=1 \
+            https://gitlab.com/simonpunk/susfs4ksu.git \
+            -b $RKSU_SUSFS_BRANCH \
+            /tmp/susfs4ksu || \
+          git clone --depth=1 \
+            https://github.com/sidex15/susfs4ksu.git \
+            -b $RKSU_SUSFS_BRANCH \
+            /tmp/susfs4ksu
+
+          # Copy kernel-side files
+          cp /tmp/susfs4ksu/kernel_patches/fs/susfs.c  fs/
+          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h  include/linux/
+          # Some versions also ship a sus_su.c
+          [ -f /tmp/susfs4ksu/kernel_patches/fs/sus_su.c ] && cp /tmp/susfs4ksu/kernel_patches/fs/sus_su.c fs/ || true
 
           if ! grep -q "susfs.o" fs/Makefile; then
             echo "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" >> fs/Makefile
           fi
+
+          echo "✅ SUSFS files copied from matching upstream"
+          grep "susfs_set_hide_sus_mnts_for_all_procs\|CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS" include/linux/susfs.h \
+            && echo "✅ New API symbols confirmed in susfs.h" \
+            || echo "⚠️  New API symbols not found — branch may still be mismatched"
+
+      #- name: Copy SUSFS files
+      #  run: |
+         # cd kernel_workspace/android-kernel
+
+         # if [ -d "$GITHUB_WORKSPACE/SUSFS" ]; then
+           # cp -rp $GITHUB_WORKSPACE/SUSFS/*.c fs/
+           # cp -rp $GITHUB_WORKSPACE/SUSFS/*.h include/linux/
+         # else
+            #echo "SUSFS folder not found!"
+            #exit 1
+         # fi
+
+         # if ! grep -q "susfs.o" fs/Makefile; then
+          #  echo "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" >> fs/Makefile
+          #fi
 
       - name: Inject SUSFS Kconfig symbols
         run: |
