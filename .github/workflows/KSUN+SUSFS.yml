@@ -73,74 +73,6 @@ jobs:
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
-      - name: Patch KernelSU for kernel 4.19 compatibility
-        run: |
-          cd kernel_workspace/android-kernel
-
-          ALLOWLIST=drivers/kernelsu/allowlist.c
-          APP_PROFILE=drivers/kernelsu/app_profile.c
-          SECCOMP_H=include/linux/seccomp.h
-
-          # Fix 1: TWA_RESUME was introduced in kernel 5.7.
-          # On 4.19, task_work_add() takes a plain bool — use `true` instead.
-          if grep -q "TWA_RESUME" "$ALLOWLIST"; then
-            sed -i 's/TWA_RESUME/true/g' "$ALLOWLIST"
-            echo "✅ Patched TWA_RESUME → true in $ALLOWLIST"
-          fi
-
-          # Fix 2: put_task_struct() requires <linux/sched/task.h> on 4.19.
-          if ! grep -q "linux/sched/task.h" "$ALLOWLIST"; then
-            sed -i '1s|^|#include <linux/sched/task.h>\n|' "$ALLOWLIST"
-            echo "✅ Added #include <linux/sched/task.h> to $ALLOWLIST"
-          fi
-
-          # Fix 3: struct seccomp has no filter_count on 4.19 — it was added
-          # later for KernelSU. The patch script targets this but can miss on
-          # some tree states, so we patch seccomp.h directly and defensively.
-          #
-          # We add `atomic_t filter_count;` right after the `int mode;` field
-          # inside struct seccomp, guarded by a check so it is idempotent.
-          if ! grep -q "filter_count" "$SECCOMP_H"; then
-            # Locate the struct seccomp { block and insert after `int mode;`
-            sed -i '/^struct seccomp {/{
-              :loop
-              n
-              /int mode;/a\\tatomic_t filter_count;
-              /};/b end
-              b loop
-              :end
-            }' "$SECCOMP_H"
-
-            # Verify the patch landed
-            if grep -q "filter_count" "$SECCOMP_H"; then
-              echo "✅ Added filter_count to struct seccomp in $SECCOMP_H"
-            else
-              echo "❌ sed pattern missed — applying fallback patch"
-              # Fallback: replace the struct definition wholesale
-              python3 - << 'PYEOF'
-          import re, pathlib
-          h = pathlib.Path("include/linux/seccomp.h")
-          txt = h.read_text()
-          # Insert atomic_t filter_count; after `int mode;` in struct seccomp
-          txt = re.sub(
-              r'(struct seccomp \{[^}]*?int mode;)',
-              r'\1\n\tatomic_t filter_count;',
-              txt, flags=re.DOTALL
-          )
-          h.write_text(txt)
-          PYEOF
-              grep -q "filter_count" "$SECCOMP_H" && \
-                echo "✅ Fallback patch applied" || \
-                { echo "❌ Could not patch seccomp.h — manual inspection needed"; exit 1; }
-            fi
-          else
-            echo "ℹ️  filter_count already present in $SECCOMP_H (patch script succeeded)"
-          fi
-
-          # Sanity-check: app_profile.c must now be able to find filter_count
-          echo "--- struct seccomp in seccomp.h ---"
-          grep -A 10 "^struct seccomp {" "$SECCOMP_H" || true
-          echo "-----------------------------------"
       - name: Copy SUSFS files
         run: |
           cd kernel_workspace/android-kernel
@@ -225,28 +157,6 @@ jobs:
 
           # Prefer to attach to the KernelSU Kconfig so the dependency chain
           # (KSU_SUSFS depends on KSU) resolves in the correct menu context.
-          KSU_KCONFIG=$(find drivers/kernelsu -name Kconfig 2>/dev/null | head -1)
-
-          if [ -n "$KSU_KCONFIG" ]; then
-            TARGET_DIR=$(dirname "$KSU_KCONFIG")
-            TARGET_KCONFIG="$KSU_KCONFIG"
-            echo "📋 Attaching SUSFS Kconfig to KernelSU: $TARGET_KCONFIG"
-          else
-            TARGET_DIR="fs"
-            TARGET_KCONFIG="fs/Kconfig"
-            echo "📋 KernelSU Kconfig not found — attaching SUSFS to fs/Kconfig"
-          fi
-
-          cp /tmp/susfs.Kconfig "${TARGET_DIR}/susfs.Kconfig"
-
-          # Avoid duplicate sourcing on re-runs
-          if ! grep -q "susfs.Kconfig" "$TARGET_KCONFIG"; then
-            echo "source \"${TARGET_DIR}/susfs.Kconfig\"" >> "$TARGET_KCONFIG"
-          fi
-
-          echo "✅ SUSFS Kconfig injected into $TARGET_KCONFIG"
-          echo "--- Verifying symbols are reachable ---"
-          grep -r "config KSU_SUSFS" "${TARGET_DIR}/" || true
 
       - name: Add KernelSU & SUSFS configs
         run: |
