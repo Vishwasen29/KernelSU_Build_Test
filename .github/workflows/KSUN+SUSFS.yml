@@ -69,7 +69,7 @@ jobs:
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-          RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+          RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
