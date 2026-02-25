@@ -87,10 +87,10 @@ jobs:
          patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
 
          # Collect reject files and their originals
-         mkdir -p $GITHUB_WORKSPACE/susfs_debug
+         mkdir -p "$GITHUB_WORKSPACE/susfs_debug"
 
          for rej in $(find . -name "*.rej"); do
-           cp "$rej" $GITHUB_WORKSPACE/susfs_debug/"
+           cp "$rej" "$GITHUB_WORKSPACE/susfs_debug/"
 
            orig="${rej%.rej}"
            if [ -f "$orig" ]; then
