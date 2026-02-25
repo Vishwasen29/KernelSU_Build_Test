@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# apply_susfs_patch.sh  (v8 — mmap_read_unlock(mm) support)
+# apply_susfs_patch.sh  (v9 — no re-exec, base64-only, mmap_read_unlock support)
 #
 # Adjusts susfs_patch_to_4_19.patch for the rsuntk/KernelSU workflow and
 # applies it to the kernel source tree.
@@ -23,17 +23,6 @@
 # =============================================================================
 
 set -euo pipefail
-
-# Strip Windows CRLF line-endings that GitHub Actions may inject when
-# git.autocrlf=true -- a bare "PYEOF\r" will NOT match the "PYEOF" heredoc
-# terminator, causing bash to feed a truncated heredoc to Python.
-# We re-exec through sed only once (SUSFS_CRLF_FIXED prevents recursion).
-if [ -z "${SUSFS_CRLF_FIXED:-}" ]; then
-    CLEANED="$(mktemp /tmp/susfs_fix_XXXXXX.sh)"
-    sed 's/\r//' "$0" > "$CLEANED"
-    chmod +x "$CLEANED"
-    SUSFS_CRLF_FIXED=1 exec bash "$CLEANED" "$@"
-fi
 
 KERNEL_DIR="${1:-}"
 PATCH_FILE="${2:-}"
@@ -151,4 +140,4 @@ else
 fi
 
 # ── 4b. Declaration in susfs.h — must be inside #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-echo 'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmZuX3NpZyA9ICJzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzIgpkZWNsICAgPSAidm9pZCBzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzKHZvaWQgX191c2VyICoqdXNlcl9pbmZvKTsiCmlmb
+echo 'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmZuX3NpZyA9ICJzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzIgpkZWNsICAgPSAidm9pZCBzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzKHZvaWQgX191c2VyICoqdXNlcl9pbmZvKTsiCmlmbmRlZiA9ICIjZW5kaWYgLy8gI2lmZGVmIENPTkZJR19LU1VfU1VTRlNfU1VTX01PVU5UIgoKIyBGaW5kIHRoZSBzdXNfbW91bnQgI2lmZGVmIGJsb2NrCm1vdW50X2lmZGVmID0gY29udGVudC5maW5kKCIjaWZkZWYgQ09ORklHX0tTVV9TVVNGU19TVVNfTU9VTlQiLCBjb250ZW50LmZpbmQoIi8qIHN1c19tb3VudCAqLyIpKQojIEZpbmQgaXRzIGNsb3NpbmcgI2VuZGlmCm1vdW50X2VuZGlmID0gY29udGVudC5maW5kKGlmbmRlZiwgbW91bnRfaWZkZWYpCgpmbl9wb3MgPSBjb250ZW50LmZpbmQoZm5fc2lnKQoKaWYgZm5fcG9zID09IC0xOgogICAgIyBOb3QgcHJlc2VudCBhdCBhbGwg4oCUIGluc2VydCBiZWZvcm
