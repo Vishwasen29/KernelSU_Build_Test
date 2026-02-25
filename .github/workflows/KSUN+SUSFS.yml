@@ -101,7 +101,7 @@ jobs:
          #chmod +x patches/susfs_fix.sh
          #bash patches/susfs_fix.sh \
          #kernel_workspace/android-kernel \
-         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
+         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
          bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
          
 
