@@ -73,6 +73,24 @@ jobs:
           RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
           sed -i 's/ -dirty//g' scripts/setlocalversion
+      - name: Upload KernelSU Modified Files
+        run: |
+          cd kernel_workspace/android-kernel
+
+          mkdir -p $GITHUB_WORKSPACE/ksu_artifacts
+
+          cp fs/namei.c $GITHUB_WORKSPACE/ksu_artifacts/ || true
+          cp fs/proc/base.c $GITHUB_WORKSPACE/ksu_artifacts/ || true
+          cp fs/proc/task_mmu.c $GITHUB_WORKSPACE/ksu_artifacts/ || true
+          cp fs/proc_namespace.c $GITHUB_WORKSPACE/ksu_artifacts/ 2>/dev/null || true
+          cp include/linux/mount.h $GITHUB_WORKSPACE/ksu_artifacts/ || true
+          cp include/linux/fs.h $GITHUB_WORKSPACE/ksu_artifacts/ || true
+
+      - name: Upload KernelSU Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: KernelSU-Modified-Files
+          path: ksu_artifacts
 
 
       - name: Apply SUSFS integration (CI safe)
