@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# apply_susfs_patch.sh  (v5 — CRLF-safe, goto out_free context patterns)
+# apply_susfs_patch.sh  (v6 — heredoc-free, base64-embedded Python)
 #
 # Adjusts susfs_patch_to_4_19.patch for the rsuntk/KernelSU workflow and
 # applies it to the kernel source tree.
@@ -69,80 +69,7 @@ echo ""
 ADJUSTED_PATCH="$(mktemp /tmp/susfs_adjusted_XXXXXX.patch)"
 trap 'rm -f "$ADJUSTED_PATCH"' EXIT
 
-python3 - "$PATCH_FILE" "$ADJUSTED_PATCH" << 'PYEOF'
-import sys, re
-
-src_path  = sys.argv[1]
-dest_path = sys.argv[2]
-
-DROP_ENTIRELY = {
-    "fs/susfs.c",
-    "include/linux/susfs.h",
-    "include/linux/susfs_def.h",
-}
-
-# These are handled manually in later steps due to context mismatches.
-# NOTE: fs/proc/task_mmu.c is intentionally NOT in this set — git apply handles
-# most of its hunks fine. Only the pagemap_read hunk is fixed manually in Step 3b.
-MANUAL_APPLY = {
-    "include/linux/mount.h",
-}
-
-with open(src_path, 'r', errors='replace') as f:
-    raw = f.read()
-
-sections = re.split(r'(?=^diff --git )', raw, flags=re.MULTILINE)
-out_parts = []
-
-for sec in sections:
-    if not sec.strip():
-        continue
-    m = re.match(r'diff --git a/(\S+)', sec)
-    if not m:
-        out_parts.append(sec)
-        continue
-    filepath = m.group(1)
-
-    if filepath in DROP_ENTIRELY:
-        print(f"  ⏭  SKIP (workflow handles): {filepath}")
-        continue
-
-    if filepath == "fs/Makefile":
-        if "obj-$(CONFIG_KSU_SUSFS) += susfs.o" in sec:
-            print(f"  ⏭  SKIP (workflow handles): {filepath}  [susfs.o hunk]")
-            continue
-
-    if filepath in MANUAL_APPLY:
-        print(f"  🔧 MANUAL: {filepath}  [applied in Step 3]")
-        continue
-
-    # avc.c — drop the UB sad.tsid hunk, keep only the bool definition
-    if filepath == "security/selinux/avc.c":
-        print(f"  ✂  PARTIAL: {filepath}  [drop UB sad hunk; keep bool definition only]")
-        minimal_avc = (
-            "diff --git a/security/selinux/avc.c b/security/selinux/avc.c\n"
-            "--- a/security/selinux/avc.c\n"
-            "+++ b/security/selinux/avc.c\n"
-            "@@ -164,6 +164,9 @@ static void avc_dump_av(struct audit_buffer *ab, u16 tclass, u32 av)\n"
-            " \n"
-            " \taudit_log_format(ab, \" }\");\n"
-            " }\n"
-            "+#ifdef CONFIG_KSU_SUSFS\n"
-            "+bool susfs_is_avc_log_spoofing_enabled = false;\n"
-            "+#endif\n"
-            " \n"
-            " /**\n"
-            "  * avc_dump_query - Display a SID pair and a class in human-readable form.\n"
-        )
-        out_parts.append(minimal_avc)
-        continue
-
-    print(f"  ✅ KEEP: {filepath}")
-    out_parts.append(sec)
-
-with open(dest_path, 'w') as f:
-    f.write(''.join(out_parts))
-PYEOF
+echo 'aW1wb3J0IHN5cywgcmUKCnNyY19wYXRoICA9IHN5cy5hcmd2WzFdCmRlc3RfcGF0aCA9IHN5cy5hcmd2WzJdCgpEUk9QX0VOVElSRUxZID0gewogICAgImZzL3N1c2ZzLmMiLAogICAgImluY2x1ZGUvbGludXgvc3VzZnMuaCIsCiAgICAiaW5jbHVkZS9saW51eC9zdXNmc19kZWYuaCIsCn0KCiMgVGhlc2UgYXJlIGhhbmRsZWQgbWFudWFsbHkgaW4gbGF0ZXIgc3RlcHMgZHVlIHRvIGNvbnRleHQgbWlzbWF0Y2hlcy4KIyBOT1RFOiBmcy9wcm9jL3Rhc2tfbW11LmMgaXMgaW50ZW50aW9uYWxseSBOT1QgaW4gdGhpcyBzZXQg4oCUIGdpdCBhcHBseSBoYW5kbGVzCiMgbW9zdCBvZiBpdHMgaHVua3MgZmluZS4gT25seSB0aGUgcGFnZW1hcF9yZWFkIGh1bmsgaXMgZml4ZWQgbWFudWFsbHkgaW4gU3RlcCAzYi4KTUFOVUFMX0FQUExZID0gewogICAgImluY2x1ZGUvbGludXgvbW91bnQuaCIsCn0KCndpdGggb3BlbihzcmNfcGF0aCwgJ3InLCBlcnJvcnM9J3JlcGxhY2UnKSBhcyBmOgogICAgcmF3ID0gZi5yZWFkKCkKCnNlY3Rpb25zID0gcmUuc3BsaXQocicoPz1eZGlmZiAtLWdpdCApJywgcmF3LCBmbGFncz1yZS5NVUxUSUxJTkUpCm91dF9wYXJ0cyA9IFtdCgpmb3Igc2VjIGluIHNlY3Rpb25zOgogICAgaWYgbm90IHNlYy5zdHJpcCgpOgogICAgICAgIGNvbnRpbnVlCiAgICBtID0gcmUubWF0Y2gocidkaWZmIC0tZ2l0IGEvKFxTKyknLCBzZWMpCiAgICBpZiBub3QgbToKICAgICAgICBvdXRfcGFydHMuYXBwZW5kKHNlYykKICAgICAgICBjb250aW51ZQogICAgZmlsZXBhdGggPSBtLmdyb3VwKDEpCgogICAgaWYgZmlsZXBhdGggaW4gRFJPUF9FTlRJUkVMWToKICAgICAgICBwcmludChmIiAg4o+tICBTS0lQICh3b3JrZmxvdyBoYW5kbGVzKToge2ZpbGVwYXRofSIpCiAgICAgICAgY29udGludWUKCiAgICBpZiBmaWxlcGF0aCA9PSAiZnMvTWFrZWZpbGUiOgogICAgICAgIGlmICJvYmotJChDT05GSUdfS1NVX1NVU0ZTKSArPSBzdXNmcy5vIiBpbiBzZWM6CiAgICAgICAgICAgIHByaW50KGYiICDij60gIFNLSVAgKHdvcmtmbG93IGhhbmRsZXMpOiB7ZmlsZXBhdGh9ICBbc3VzZnMubyBodW5rXSIpCiAgICAgICAgICAgIGNvbnRpbnVlCgogICAgaWYgZmlsZXBhdGggaW4gTUFOVUFMX0FQUExZOgogICAgICAgIHByaW50KGYiICDwn5SnIE1BTlVBTDoge2ZpbGVwYXRofSAgW2FwcGxpZWQgaW4gU3RlcCAzXSIpCiAgICAgICAgY29udGludWUKCiAgICAjIGF2Yy5jIOKAlCBkcm9wIHRoZSBVQiBzYWQudHNpZCBodW5rLCBrZWVwIG9ubHkgdGhlIGJvb2wgZGVmaW5pdGlvbgogICAgaWYgZmlsZXBhdGggPT0gInNlY3VyaXR5L3NlbGludXgvYXZjLmMiOgogICAgICAgIHByaW50KGYiICDinIIgIFBBUlRJQUw6IHtmaWxlcGF0aH0gIFtkcm9wIFVCIHNhZCBodW5rOyBrZWVwIGJvb2wgZGVmaW5pdGlvbiBvbmx5XSIpCiAgICAgICAgbWluaW1hbF9hdmMgPSAoCiAgICAgICAgICAgICJkaWZmIC0tZ2l0IGEvc2VjdXJpdHkvc2VsaW51eC9hdmMuYyBiL3NlY3VyaXR5L3NlbGludXgvYXZjLmNcbiIKICAgICAgICAgICAgIi0tLSBhL3NlY3VyaXR5L3NlbGludXgvYXZjLmNcbiIKICAgICAgICAgICAgIisrKyBiL3NlY3VyaXR5L3NlbGludXgvYXZjLmNcbiIKICAgICAgICAgICAgIkBAIC0xNjQsNiArMTY0LDkgQEAgc3RhdGljIHZvaWQgYXZjX2R1bXBfYXYoc3RydWN0IGF1ZGl0X2J1ZmZlciAqYWIsIHUxNiB0Y2xhc3MsIHUzMiBhdilcbiIKICAgICAgICAgICAgIiBcbiIKICAgICAgICAgICAgIiBcdGF1ZGl0X2xvZ19mb3JtYXQoYWIsIFwiIH1cIik7XG4iCiAgICAgICAgICAgICIgfVxuIgogICAgICAgICAgICAiKyNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTXG4iCiAgICAgICAgICAgICIrYm9vbCBzdXNmc19pc19hdmNfbG9nX3Nwb29maW5nX2VuYWJsZWQgPSBmYWxzZTtcbiIKICAgICAgICAgICAgIisjZW5kaWZcbiIKICAgICAgICAgICAgIiBcbiIKICAgICAgICAgICAgIiAvKipcbiIKICAgICAgICAgICAgIiAgKiBhdmNfZHVtcF9xdWVyeSAtIERpc3BsYXkgYSBTSUQgcGFpciBhbmQgYSBjbGFzcyBpbiBodW1hbi1yZWFkYWJsZSBmb3JtLlxuIgogICAgICAgICkKICAgICAgICBvdXRfcGFydHMuYXBwZW5kKG1pbmltYWxfYXZjKQogICAgICAgIGNvbnRpbnVlCgogICAgcHJpbnQoZiIgIOKchSBLRUVQOiB7ZmlsZXBhdGh9IikKICAgIG91dF9wYXJ0cy5hcHBlbmQoc2VjKQoKd2l0aCBvcGVuKGRlc3RfcGF0aCwgJ3cnKSBhcyBmOgogICAgZi53cml0ZSgnJy5qb2luKG91dF9wYXJ0cykpCg==' | base64 -d | python3 - "$PATCH_FILE" "$ADJUSTED_PATCH"
 
 echo ""
 
@@ -187,54 +114,7 @@ echo ""
 # The LineageOS tree's vfsmount struct may have a different layout around the
 # ANDROID_KABI_RESERVE(4) line. We do a direct string replacement which is
 # immune to line-number drift.
-python3 - "include/linux/mount.h" << 'PYEOF'
-import sys
-path = sys.argv[1]
-with open(path) as f:
-    content = f.read()
-
-if "susfs_mnt_id_backup" in content:
-    print(f"  ℹ️  mount.h already patched (susfs_mnt_id_backup present)")
-    sys.exit(0)
-
-old = "\tANDROID_KABI_RESERVE(4);"
-new = (
-    "#ifdef CONFIG_KSU_SUSFS\n"
-    "\tANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n"
-    "#else\n"
-    "\tANDROID_KABI_RESERVE(4);\n"
-    "#endif"
-)
-
-if old in content:
-    content = content.replace(old, new, 1)
-    with open(path, 'w') as f:
-        f.write(content)
-    print(f"  ✅ mount.h: ANDROID_KABI_RESERVE(4) replaced with KABI_USE block")
-else:
-    # Fallback: the tree may not use ANDROID_KABI_RESERVE at all.
-    # In that case the field must be added directly to the struct.
-    if "void *data;" in content and "susfs_mnt_id_backup" not in content:
-        # Insert before `void *data;` inside struct vfsmount
-        old2 = "\tvoid *data;"
-        new2 = (
-            "#ifdef CONFIG_KSU_SUSFS\n"
-            "\tu64 susfs_mnt_id_backup;\n"
-            "#endif\n"
-            "\tvoid *data;"
-        )
-        if old2 in content:
-            content = content.replace(old2, new2, 1)
-            with open(path, 'w') as f:
-                f.write(content)
-            print(f"  ✅ mount.h: susfs_mnt_id_backup added before void *data (fallback)")
-        else:
-            print(f"  ❌ mount.h: could not find insertion point — patch manually")
-            sys.exit(1)
-    else:
-        print(f"  ❌ mount.h: ANDROID_KABI_RESERVE(4) not found — patch manually")
-        sys.exit(1)
-PYEOF
+echo 'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmlmICJzdXNmc19tbnRfaWRfYmFja3VwIiBpbiBjb250ZW50OgogICAgcHJpbnQoZiIgIOKEue+4jyAgbW91bnQuaCBhbHJlYWR5IHBhdGNoZWQgKHN1c2ZzX21udF9pZF9iYWNrdXAgcHJlc2VudCkiKQogICAgc3lzLmV4aXQoMCkKCm9sZCA9ICJcdEFORFJPSURfS0FCSV9SRVNFUlZFKDQpOyIKbmV3ID0gKAogICAgIiNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTXG4iCiAgICAiXHRBTkRST0lEX0tBQklfVVNFKDQsIHU2NCBzdXNmc19tbnRfaWRfYmFja3VwKTtcbiIKICAgICIjZWxzZVxuIgogICAgIlx0QU5EUk9JRF9LQUJJX1JFU0VSVkUoNCk7XG4iCiAgICAiI2VuZGlmIgopCgppZiBvbGQgaW4gY29udGVudDoKICAgIGNvbnRlbnQgPSBjb250ZW50LnJlcGxhY2Uob2xkLCBuZXcsIDEpCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgbW91bnQuaDogQU5EUk9JRF9LQUJJX1JFU0VSVkUoNCkgcmVwbGFjZWQgd2l0aCBLQUJJX1VTRSBibG9jayIpCmVsc2U6CiAgICAjIEZhbGxiYWNrOiB0aGUgdHJlZSBtYXkgbm90IHVzZSBBTkRST0lEX0tBQklfUkVTRVJWRSBhdCBhbGwuCiAgICAjIEluIHRoYXQgY2FzZSB0aGUgZmllbGQgbXVzdCBiZSBhZGRlZCBkaXJlY3RseSB0byB0aGUgc3RydWN0LgogICAgaWYgInZvaWQgKmRhdGE7IiBpbiBjb250ZW50IGFuZCAic3VzZnNfbW50X2lkX2JhY2t1cCIgbm90IGluIGNvbnRlbnQ6CiAgICAgICAgIyBJbnNlcnQgYmVmb3JlIGB2b2lkICpkYXRhO2AgaW5zaWRlIHN0cnVjdCB2ZnNtb3VudAogICAgICAgIG9sZDIgPSAiXHR2b2lkICpkYXRhOyIKICAgICAgICBuZXcyID0gKAogICAgICAgICAgICAiI2lmZGVmIENPTkZJR19LU1VfU1VTRlNcbiIKICAgICAgICAgICAgIlx0dTY0IHN1c2ZzX21udF9pZF9iYWNrdXA7XG4iCiAgICAgICAgICAgICIjZW5kaWZcbiIKICAgICAgICAgICAgIlx0dm9pZCAqZGF0YTsiCiAgICAgICAgKQogICAgICAgIGlmIG9sZDIgaW4gY29udGVudDoKICAgICAgICAgICAgY29udGVudCA9IGNvbnRlbnQucmVwbGFjZShvbGQyLCBuZXcyLCAxKQogICAgICAgICAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgICAgICAgICAgZi53cml0ZShjb250ZW50KQogICAgICAgICAgICBwcmludChmIiAg4pyFIG1vdW50Lmg6IHN1c2ZzX21udF9pZF9iYWNrdXAgYWRkZWQgYmVmb3JlIHZvaWQgKmRhdGEgKGZhbGxiYWNrKSIpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgcHJpbnQoZiIgIOKdjCBtb3VudC5oOiBjb3VsZCBub3QgZmluZCBpbnNlcnRpb24gcG9pbnQg4oCUIHBhdGNoIG1hbnVhbGx5IikKICAgICAgICAgICAgc3lzLmV4aXQoMSkKICAgIGVsc2U6CiAgICAgICAgcHJpbnQoZiIgIOKdjCBtb3VudC5oOiBBTkRST0lEX0tBQklfUkVTRVJWRSg0KSBub3QgZm91bmQg4oCUIHBhdGNoIG1hbnVhbGx5IikKICAgICAgICBzeXMuZXhpdCgxKQo=' | base64 -d | python3 - "include/linux/mount.h"
 
 # ── 3b. fs/proc/task_mmu.c (pagemap_read hunks) ──────────────────────────────
 # Most task_mmu.c hunks are applied by git apply (show_map_vma, show_smap,
@@ -243,194 +123,7 @@ PYEOF
 #   - Kernels with mmap_sem (4.19 vanilla)
 #   - Kernels with mmap_lock backport
 #   - Kernels with or without a blank line between up_read and start_vaddr
-python3 - "fs/proc/task_mmu.c" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path) as f:
-    content = f.read()
-
-already_maps  = "BIT_SUS_MAPS" in content
-already_pme   = "pm.buffer->pme = 0" in content
-already_decl  = "CONFIG_KSU_SUSFS_SUS_MAP" in content and "struct vm_area_struct *vma;" in content
-
-# ── Hunk A: add vma declaration inside pagemap_read ────────────────────────
-# Look for the local-variable block at the top of pagemap_read.
-# Try several anchor lines in order of specificity.
-hunk_a_applied = False
-if already_decl:
-    print("  ℹ️  task_mmu.c: vma declaration already present")
-    hunk_a_applied = True
-else:
-    # Candidates: lines that appear right before the `if (!mm || !mmget_not_zero` guard
-    candidates_a = [
-        # Original patch context
-        (
-            "\tint ret = 0, copied = 0;\n"
-            "\n"
-            "\tif (!mm || !mmget_not_zero(mm))\n"
-        ),
-        # Variant without blank line
-        (
-            "\tint ret = 0, copied = 0;\n"
-            "\tif (!mm || !mmget_not_zero(mm))\n"
-        ),
-        # Some kernels spell it slightly differently
-        (
-            "\tint ret = 0, copied = 0;\n"
-            "\n"
-            "\tif (!mm || !mmget_not_zero(mm)) {\n"
-        ),
-    ]
-    for old_a in candidates_a:
-        # Build the replacement preserving the exact original ending
-        # We insert the guard before the blank+if block
-        new_a = (
-            "\tint ret = 0, copied = 0;\n"
-            "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-            "\tstruct vm_area_struct *vma;\n"
-            "#endif\n"
-        ) + old_a[len("\tint ret = 0, copied = 0;\n"):]
-        if old_a in content:
-            content = content.replace(old_a, new_a, 1)
-            hunk_a_applied = True
-            print("  ✅ task_mmu.c: pagemap_read vma declaration added")
-            break
-    if not hunk_a_applied:
-        print("  ⚠️  task_mmu.c: could not add vma declaration — trying without it")
-
-# ── Hunk B: add the SUS_MAP check after walk_page_range/up_read ────────────
-if already_pme and already_maps:
-    print("  ℹ️  task_mmu.c: pagemap_read SUS_MAP check already applied")
-else:
-    # Multiple candidate patterns — some kernels have a blank line between
-    # up_read and start_vaddr = end; some don't.
-    # The rejected hunk context from the CI log shows "goto out_free;" appears
-    # as the line BEFORE walk_page_range in the actual kernel source.
-    # We must include it in some patterns; other patterns start from walk_page_range.
-    candidates_b = [
-        # With goto out_free; + no blank line (matches CI log exactly)
-        (
-            "\t\t\tgoto out_free;\n"
-            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
-            "\t\tup_read(&mm->mmap_sem);\n"
-            "\t\tstart_vaddr = end;\n"
-        ),
-        # With goto out_free; + blank line between up_read and start_vaddr
-        (
-            "\t\t\tgoto out_free;\n"
-            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
-            "\t\tup_read(&mm->mmap_sem);\n"
-            "\n"
-            "\t\tstart_vaddr = end;\n"
-        ),
-        # With goto out_free; + mmap_lock backport
-        (
-            "\t\t\tgoto out_free;\n"
-            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
-            "\t\tup_read(&mm->mmap_lock);\n"
-            "\t\tstart_vaddr = end;\n"
-        ),
-        # Without goto out_free; + no blank line (most common 4.19 layout)
-        (
-            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
-            "\t\tup_read(&mm->mmap_sem);\n"
-            "\t\tstart_vaddr = end;\n"
-        ),
-        # Without goto out_free; + blank line
-        (
-            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
-            "\t\tup_read(&mm->mmap_sem);\n"
-            "\n"
-            "\t\tstart_vaddr = end;\n"
-        ),
-        # Without goto out_free; + mmap_lock backport
-        (
-            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
-            "\t\tup_read(&mm->mmap_lock);\n"
-            "\t\tstart_vaddr = end;\n"
-        ),
-        (
-            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
-            "\t\tup_read(&mm->mmap_lock);\n"
-            "\n"
-            "\t\tstart_vaddr = end;\n"
-        ),
-    ]
-
-    # The replacement inserts the SUS_MAP block between up_read and start_vaddr
-    def make_replacement_b(old_b, lock_name):
-        """Build new content preserving the trailing start_vaddr line,
-        and the leading goto out_free; line if it was part of the context."""
-        # Preserve leading "goto out_free;" if present in the matched context
-        leading = ""
-        if old_b.startswith("\t\t\tgoto out_free;\n"):
-            leading = "\t\t\tgoto out_free;\n"
-        # Determine where 'start_vaddr = end' begins within old_b
-        trailing = old_b[old_b.rfind("\t\tstart_vaddr"):]
-        return (
-            leading +
-            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
-            f"\t\tup_read(&mm->{lock_name});\n"
-            "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-            "\t\tvma = find_vma(mm, start_vaddr);\n"
-            "\t\tif (vma && vma->vm_file) {\n"
-            "\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n"
-            "\t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\n"
-            "\t\t\t\tpm.buffer->pme = 0;\n"
-            "\t\t\t}\n"
-            "\t\t}\n"
-            "#endif\n"
-        ) + trailing
-
-    applied_b = False
-    for old_b in candidates_b:
-        if old_b in content:
-            lock = "mmap_lock" if "mmap_lock" in old_b else "mmap_sem"
-            new_b = make_replacement_b(old_b, lock)
-            content = content.replace(old_b, new_b, 1)
-            applied_b = True
-            print("  ✅ task_mmu.c: pagemap_read SUS_MAP check applied")
-            break
-
-    if not applied_b:
-        # Last-resort: use regex to find walk_page_range in pagemap_read context.
-        # Also captures an optional leading "goto out_free;" line.
-        m = re.search(
-            r'((?:\t{3}goto out_free;\n)?'
-            r'\t\tret = walk_page_range\(start_vaddr, end, &pagemap_walk\);\n'
-            r'\t\tup_read\(&mm->mmap_(?:sem|lock)\);\n)'
-            r'(\n?)'
-            r'(\t\tstart_vaddr = end;\n)',
-            content
-        )
-        if m:
-            lock = "mmap_lock" if "mmap_lock" in m.group(1) else "mmap_sem"
-            leading = "\t\t\tgoto out_free;\n" if "goto out_free;" in m.group(1) else ""
-            new_b = (
-                leading +
-                f"\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
-                f"\t\tup_read(&mm->{lock});\n"
-                "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
-                "\t\tvma = find_vma(mm, start_vaddr);\n"
-                "\t\tif (vma && vma->vm_file) {\n"
-                "\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n"
-                "\t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\n"
-                "\t\t\t\tpm.buffer->pme = 0;\n"
-                "\t\t\t}\n"
-                "\t\t}\n"
-                "#endif\n"
-                "\t\tstart_vaddr = end;\n"
-            )
-            content = content[:m.start()] + new_b + content[m.end():]
-            print("  ✅ task_mmu.c: pagemap_read SUS_MAP check applied (regex fallback)")
-            applied_b = True
-
-    if not applied_b:
-        print("  ⚠️  task_mmu.c: pagemap_read context not found — minor feature missing")
-
-with open(path, 'w') as f:
-    f.write(content)
-PYEOF
+echo 'aW1wb3J0IHN5cywgcmUKcGF0aCA9IHN5cy5hcmd2WzFdCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgY29udGVudCA9IGYucmVhZCgpCgphbHJlYWR5X21hcHMgID0gIkJJVF9TVVNfTUFQUyIgaW4gY29udGVudAphbHJlYWR5X3BtZSAgID0gInBtLmJ1ZmZlci0+cG1lID0gMCIgaW4gY29udGVudAphbHJlYWR5X2RlY2wgID0gIkNPTkZJR19LU1VfU1VTRlNfU1VTX01BUCIgaW4gY29udGVudCBhbmQgInN0cnVjdCB2bV9hcmVhX3N0cnVjdCAqdm1hOyIgaW4gY29udGVudAoKIyDilIDilIAgSHVuayBBOiBhZGQgdm1hIGRlY2xhcmF0aW9uIGluc2lkZSBwYWdlbWFwX3JlYWQg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACiMgTG9vayBmb3IgdGhlIGxvY2FsLXZhcmlhYmxlIGJsb2NrIGF0IHRoZSB0b3Agb2YgcGFnZW1hcF9yZWFkLgojIFRyeSBzZXZlcmFsIGFuY2hvciBsaW5lcyBpbiBvcmRlciBvZiBzcGVjaWZpY2l0eS4KaHVua19hX2FwcGxpZWQgPSBGYWxzZQppZiBhbHJlYWR5X2RlY2w6CiAgICBwcmludCgiICDihLnvuI8gIHRhc2tfbW11LmM6IHZtYSBkZWNsYXJhdGlvbiBhbHJlYWR5IHByZXNlbnQiKQogICAgaHVua19hX2FwcGxpZWQgPSBUcnVlCmVsc2U6CiAgICAjIENhbmRpZGF0ZXM6IGxpbmVzIHRoYXQgYXBwZWFyIHJpZ2h0IGJlZm9yZSB0aGUgYGlmICghbW0gfHwgIW1tZ2V0X25vdF96ZXJvYCBndWFyZAogICAgY2FuZGlkYXRlc19hID0gWwogICAgICAgICMgT3JpZ2luYWwgcGF0Y2ggY29udGV4dAogICAgICAgICgKICAgICAgICAgICAgIlx0aW50IHJldCA9IDAsIGNvcGllZCA9IDA7XG4iCiAgICAgICAgICAgICJcbiIKICAgICAgICAgICAgIlx0aWYgKCFtbSB8fCAhbW1nZXRfbm90X3plcm8obW0pKVxuIgogICAgICAgICksCiAgICAgICAgIyBWYXJpYW50IHdpdGhvdXQgYmxhbmsgbGluZQogICAgICAgICgKICAgICAgICAgICAgIlx0aW50IHJldCA9IDAsIGNvcGllZCA9IDA7XG4iCiAgICAgICAgICAgICJcdGlmICghbW0gfHwgIW1tZ2V0X25vdF96ZXJvKG1tKSlcbiIKICAgICAgICApLAogICAgICAgICMgU29tZSBrZXJuZWxzIHNwZWxsIGl0IHNsaWdodGx5IGRpZmZlcmVudGx5CiAgICAgICAgKAogICAgICAgICAgICAiXHRpbnQgcmV0ID0gMCwgY29waWVkID0gMDtcbiIKICAgICAgICAgICAgIlxuIgogICAgICAgICAgICAiXHRpZiAoIW1tIHx8ICFtbWdldF9ub3RfemVybyhtbSkpIHtcbiIKICAgICAgICApLAogICAgXQogICAgZm9yIG9sZF9hIGluIGNhbmRpZGF0ZXNfYToKICAgICAgICAjIEJ1aWxkIHRoZSByZXBsYWNlbWVudCBwcmVzZXJ2aW5nIHRoZSBleGFjdCBvcmlnaW5hbCBlbmRpbmcKICAgICAgICAjIFdlIGluc2VydCB0aGUgZ3VhcmQgYmVmb3JlIHRoZSBibGFuaytpZiBibG9jawogICAgICAgIG5ld19hID0gKAogICAgICAgICAgICAiXHRpbnQgcmV0ID0gMCwgY29waWVkID0gMDtcbiIKICAgICAgICAgICAgIiNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTX1NVU19NQVBcbiIKICAgICAgICAgICAgIlx0c3RydWN0IHZtX2FyZWFfc3RydWN0ICp2bWE7XG4iCiAgICAgICAgICAgICIjZW5kaWZcbiIKICAgICAgICApICsgb2xkX2FbbGVuKCJcdGludCByZXQgPSAwLCBjb3BpZWQgPSAwO1xuIik6XQogICAgICAgIGlmIG9sZF9hIGluIGNvbnRlbnQ6CiAgICAgICAgICAgIGNvbnRlbnQgPSBjb250ZW50LnJlcGxhY2Uob2xkX2EsIG5ld19hLCAxKQogICAgICAgICAgICBodW5rX2FfYXBwbGllZCA9IFRydWUKICAgICAgICAgICAgcHJpbnQoIiAg4pyFIHRhc2tfbW11LmM6IHBhZ2VtYXBfcmVhZCB2bWEgZGVjbGFyYXRpb24gYWRkZWQiKQogICAgICAgICAgICBicmVhawogICAgaWYgbm90IGh1bmtfYV9hcHBsaWVkOgogICAgICAgIHByaW50KCIgIOKaoO+4jyAgdGFza19tbXUuYzogY291bGQgbm90IGFkZCB2bWEgZGVjbGFyYXRpb24g4oCUIHRyeWluZyB3aXRob3V0IGl0IikKCiMg4pSA4pSAIEh1bmsgQjogYWRkIHRoZSBTVVNfTUFQIGNoZWNrIGFmdGVyIHdhbGtfcGFnZV9yYW5nZS91cF9yZWFkIOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgAppZiBhbHJlYWR5X3BtZSBhbmQgYWxyZWFkeV9tYXBzOgogICAgcHJpbnQoIiAg4oS577iPICB0YXNrX21tdS5jOiBwYWdlbWFwX3JlYWQgU1VTX01BUCBjaGVjayBhbHJlYWR5IGFwcGxpZWQiKQplbHNlOgogICAgIyBNdWx0aXBsZSBjYW5kaWRhdGUgcGF0dGVybnMg4oCUIHNvbWUga2VybmVscyBoYXZlIGEgYmxhbmsgbGluZSBiZXR3ZWVuCiAgICAjIHVwX3JlYWQgYW5kIHN0YXJ0X3ZhZGRyID0gZW5kOyBzb21lIGRvbid0LgogICAgIyBUaGUgcmVqZWN0ZWQgaHVuayBjb250ZXh0IGZyb20gdGhlIENJIGxvZyBzaG93cyAiZ290byBvdXRfZnJlZTsiIGFwcGVhcnMKICAgICMgYXMgdGhlIGxpbmUgQkVGT1JFIHdhbGtfcGFnZV9yYW5nZSBpbiB0aGUgYWN0dWFsIGtlcm5lbCBzb3VyY2UuCiAgICAjIFdlIG11c3QgaW5jbHVkZSBpdCBpbiBzb21lIHBhdHRlcm5zOyBvdGhlciBwYXR0ZXJucyBzdGFydCBmcm9tIHdhbGtfcGFnZV9yYW5nZS4KICAgIGNhbmRpZGF0ZXNfYiA9IFsKICAgICAgICAjIFdpdGggZ290byBvdXRfZnJlZTsgKyBubyBibGFuayBsaW5lIChtYXRjaGVzIENJIGxvZyBleGFjdGx5KQogICAgICAgICgKICAgICAgICAgICAgIlx0XHRcdGdvdG8gb3V0X2ZyZWU7XG4iCiAgICAgICAgICAgICJcdFx0cmV0ID0gd2Fsa19wYWdlX3JhbmdlKHN0YXJ0X3ZhZGRyLCBlbmQsICZwYWdlbWFwX3dhbGspO1xuIgogICAgICAgICAgICAiXHRcdHVwX3JlYWQoJm1tLT5tbWFwX3NlbSk7XG4iCiAgICAgICAgICAgICJcdFx0c3RhcnRfdmFkZHIgPSBlbmQ7XG4iCiAgICAgICAgKSwKICAgICAgICAjIFdpdGggZ290byBvdXRfZnJlZTsgKyBibGFuayBsaW5lIGJldHdlZW4gdXBfcmVhZCBhbmQgc3RhcnRfdmFkZHIKICAgICAgICAoCiAgICAgICAgICAgICJcdFx0XHRnb3RvIG91dF9mcmVlO1xuIgogICAgICAgICAgICAiXHRcdHJldCA9IHdhbGtfcGFnZV9yYW5nZShzdGFydF92YWRkciwgZW5kLCAmcGFnZW1hcF93YWxrKTtcbiIKICAgICAgICAgICAgIlx0XHR1cF9yZWFkKCZtbS0+bW1hcF9zZW0pO1xuIgogICAgICAgICAgICAiXG4iCiAgICAgICAgICAgICJcdFx0c3RhcnRfdmFkZHIgPSBlbmQ7XG4iCiAgICAgICAgKSwKICAgICAgICAjIFdpdGggZ290byBvdXRfZnJlZTsgKyBtbWFwX2xvY2sgYmFja3BvcnQKICAgICAgICAoCiAgICAgICAgICAgICJcdFx0XHRnb3RvIG91dF9mcmVlO1xuIgogICAgICAgICAgICAiXHRcdHJldCA9IHdhbGtfcGFnZV9yYW5nZShzdGFydF92YWRkciwgZW5kLCAmcGFnZW1hcF93YWxrKTtcbiIKICAgICAgICAgICAgIlx0XHR1cF9yZWFkKCZtbS0+bW1hcF9sb2NrKTtcbiIKICAgICAgICAgICAgIlx0XHRzdGFydF92YWRkciA9IGVuZDtcbiIKICAgICAgICApLAogICAgICAgICMgV2l0aG91dCBnb3RvIG91dF9mcmVlOyArIG5vIGJsYW5rIGxpbmUgKG1vc3QgY29tbW9uIDQuMTkgbGF5b3V0KQogICAgICAgICgKICAgICAgICAgICAgIlx0XHRyZXQgPSB3YWxrX3BhZ2VfcmFuZ2Uoc3RhcnRfdmFkZHIsIGVuZCwgJnBhZ2VtYXBfd2Fsayk7XG4iCiAgICAgICAgICAgICJcdFx0dXBfcmVhZCgmbW0tPm1tYXBfc2VtKTtcbiIKICAgICAgICAgICAgIlx0XHRzdGFydF92YWRkciA9IGVuZDtcbiIKICAgICAgICApLAogICAgICAgICMgV2l0aG91dCBnb3RvIG91dF9mcmVlOyArIGJsYW5rIGxpbmUKICAgICAgICAoCiAgICAgICAgICAgICJcdFx0cmV0ID0gd2Fsa19wYWdlX3JhbmdlKHN0YXJ0X3ZhZGRyLCBlbmQsICZwYWdlbWFwX3dhbGspO1xuIgogICAgICAgICAgICAiXHRcdHVwX3JlYWQoJm1tLT5tbWFwX3NlbSk7XG4iCiAgICAgICAgICAgICJcbiIKICAgICAgICAgICAgIlx0XHRzdGFydF92YWRkciA9IGVuZDtcbiIKICAgICAgICApLAogICAgICAgICMgV2l0aG91dCBnb3RvIG91dF9mcmVlOyArIG1tYXBfbG9jayBiYWNrcG9ydAogICAgICAgICgKICAgICAgICAgICAgIlx0XHRyZXQgPSB3YWxrX3BhZ2VfcmFuZ2Uoc3RhcnRfdmFkZHIsIGVuZCwgJnBhZ2VtYXBfd2Fsayk7XG4iCiAgICAgICAgICAgICJcdFx0dXBfcmVhZCgmbW0tPm1tYXBfbG9jayk7XG4iCiAgICAgICAgICAgICJcdFx0c3RhcnRfdmFkZHIgPSBlbmQ7XG4iCiAgICAgICAgKSwKICAgICAgICAoCiAgICAgICAgICAgICJcdFx0cmV0ID0gd2Fsa19wYWdlX3JhbmdlKHN0YXJ0X3ZhZGRyLCBlbmQsICZwYWdlbWFwX3dhbGspO1xuIgogICAgICAgICAgICAiXHRcdHVwX3JlYWQoJm1tLT5tbWFwX2xvY2spO1xuIgogICAgICAgICAgICAiXG4iCiAgICAgICAgICAgICJcdFx0c3RhcnRfdmFkZHIgPSBlbmQ7XG4iCiAgICAgICAgKSwKICAgIF0KCiAgICAjIFRoZSByZXBsYWNlbWVudCBpbnNlcnRzIHRoZSBTVVNfTUFQIGJsb2NrIGJldHdlZW4gdXBfcmVhZCBhbmQgc3RhcnRfdmFkZHIKICAgIGRlZiBtYWtlX3JlcGxhY2VtZW50X2Iob2xkX2IsIGxvY2tfbmFtZSk6CiAgICAgICAgIiIiQnVpbGQgbmV3IGNvbnRlbnQgcHJlc2VydmluZyB0aGUgdHJhaWxpbmcgc3RhcnRfdmFkZHIgbGluZSwKICAgICAgICBhbmQgdGhlIGxlYWRpbmcgZ290byBvdXRfZnJlZTsgbGluZSBpZiBpdCB3YXMgcGFydCBvZiB0aGUgY29udGV4dC4iIiIKICAgICAgICAjIFByZXNlcnZlIGxlYWRpbmcgImdvdG8gb3V0X2ZyZWU7IiBpZiBwcmVzZW50IGluIHRoZSBtYXRjaGVkIGNvbnRleHQKICAgICAgICBsZWFkaW5nID0gIiIKICAgICAgICBpZiBvbGRfYi5zdGFydHN3aXRoKCJcdFx0XHRnb3RvIG91dF9mcmVlO1xuIik6CiAgICAgICAgICAgIGxlYWRpbmcgPSAiXHRcdFx0Z290byBvdXRfZnJlZTtcbiIKICAgICAgICAjIERldGVybWluZSB3aGVyZSAnc3RhcnRfdmFkZHIgPSBlbmQnIGJlZ2lucyB3aXRoaW4gb2xkX2IKICAgICAgICB0cmFpbGluZyA9IG9sZF9iW29sZF9iLnJmaW5kKCJcdFx0c3RhcnRfdmFkZHIiKTpdCiAgICAgICAgcmV0dXJuICgKICAgICAgICAgICAgbGVhZGluZyArCiAgICAgICAgICAgICJcdFx0cmV0ID0gd2Fsa19wYWdlX3JhbmdlKHN0YXJ0X3ZhZGRyLCBlbmQsICZwYWdlbWFwX3dhbGspO1xuIgogICAgICAgICAgICBmIlx0XHR1cF9yZWFkKCZtbS0+e2xvY2tfbmFtZX0pO1xuIgogICAgICAgICAgICAiI2lmZGVmIENPTkZJR19LU1VfU1VTRlNfU1VTX01BUFxuIgogICAgICAgICAgICAiXHRcdHZtYSA9IGZpbmRfdm1hKG1tLCBzdGFydF92YWRkcik7XG4iCiAgICAgICAgICAgICJcdFx0aWYgKHZtYSAmJiB2bWEtPnZtX2ZpbGUpIHtcbiIKICAgICAgICAgICAgIlx0XHRcdHN0cnVjdCBpbm9kZSAqaW5vZGUgPSBmaWxlX2lub2RlKHZtYS0+dm1fZmlsZSk7XG4iCiAgICAgICAgICAgICJcdFx0XHRpZiAodW5saWtlbHkoaW5vZGUtPmlfbWFwcGluZy0+ZmxhZ3MgJiBCSVRfU1VTX01BUFMpICYmIHN1c2ZzX2lzX2N1cnJlbnRfcHJvY191bW91bnRlZCgpKSB7XG4iCiAgICAgICAgICAgICJcdFx0XHRcdHBtLmJ1ZmZlci0+cG1lID0gMDtcbiIKICAgICAgICAgICAgIlx0XHRcdH1cbiIKICAgICAgICAgICAgIlx0XHR9XG4iCiAgICAgICAgICAgICIjZW5kaWZcbiIKICAgICAgICApICsgdHJhaWxpbmcKCiAgICBhcHBsaWVkX2IgPSBGYWxzZQogICAgZm9yIG9sZF9iIGluIGNhbmRpZGF0ZXNfYjoKICAgICAgICBpZiBvbGRfYiBpbiBjb250ZW50OgogICAgICAgICAgICBsb2NrID0gIm1tYXBfbG9jayIgaWYgIm1tYXBfbG9jayIgaW4gb2xkX2IgZWxzZSAibW1hcF9zZW0iCiAgICAgICAgICAgIG5ld19iID0gbWFrZV9yZXBsYWNlbWVudF9iKG9sZF9iLCBsb2NrKQogICAgICAgICAgICBjb250ZW50ID0gY29udGVudC5yZXBsYWNlKG9sZF9iLCBuZXdfYiwgMSkKICAgICAgICAgICAgYXBwbGllZF9iID0gVHJ1ZQogICAgICAgICAgICBwcmludCgiICDinIUgdGFza19tbXUuYzogcGFnZW1hcF9yZWFkIFNVU19NQVAgY2hlY2sgYXBwbGllZCIpCiAgICAgICAgICAgIGJyZWFrCgogICAgaWYgbm90IGFwcGxpZWRfYjoKICAgICAgICAjIExhc3QtcmVzb3J0OiB1c2UgcmVnZXggdG8gZmluZCB3YWxrX3BhZ2VfcmFuZ2UgaW4gcGFnZW1hcF9yZWFkIGNvbnRleHQuCiAgICAgICAgIyBBbHNvIGNhcHR1cmVzIGFuIG9wdGlvbmFsIGxlYWRpbmcgImdvdG8gb3V0X2ZyZWU7IiBsaW5lLgogICAgICAgIG0gPSByZS5zZWFyY2goCiAgICAgICAgICAgIHInKCg/Olx0ezN9Z290byBvdXRfZnJlZTtcbik/JwogICAgICAgICAgICByJ1x0XHRyZXQgPSB3YWxrX3BhZ2VfcmFuZ2VcKHN0YXJ0X3ZhZGRyLCBlbmQsICZwYWdlbWFwX3dhbGtcKTtcbicKICAgICAgICAgICAgcidcdFx0dXBfcmVhZFwoJm1tLT5tbWFwXyg/OnNlbXxsb2NrKVwpO1xuKScKICAgICAgICAgICAgcicoXG4/KScKICAgICAgICAgICAgcicoXHRcdHN0YXJ0X3ZhZGRyID0gZW5kO1xuKScsCiAgICAgICAgICAgIGNvbnRlbnQKICAgICAgICApCiAgICAgICAgaWYgbToKICAgICAgICAgICAgbG9jayA9ICJtbWFwX2xvY2siIGlmICJtbWFwX2xvY2siIGluIG0uZ3JvdXAoMSkgZWxzZSAibW1hcF9zZW0iCiAgICAgICAgICAgIGxlYWRpbmcgPSAiXHRcdFx0Z290byBvdXRfZnJlZTtcbiIgaWYgImdvdG8gb3V0X2ZyZWU7IiBpbiBtLmdyb3VwKDEpIGVsc2UgIiIKICAgICAgICAgICAgbmV3X2IgPSAoCiAgICAgICAgICAgICAgICBsZWFkaW5nICsKICAgICAgICAgICAgICAgIGYiXHRcdHJldCA9IHdhbGtfcGFnZV9yYW5nZShzdGFydF92YWRkciwgZW5kLCAmcGFnZW1hcF93YWxrKTtcbiIKICAgICAgICAgICAgICAgIGYiXHRcdHVwX3JlYWQoJm1tLT57bG9ja30pO1xuIgogICAgICAgICAgICAgICAgIiNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTX1NVU19NQVBcbiIKICAgICAgICAgICAgICAgICJcdFx0dm1hID0gZmluZF92bWEobW0sIHN0YXJ0X3ZhZGRyKTtcbiIKICAgICAgICAgICAgICAgICJcdFx0aWYgKHZtYSAmJiB2bWEtPnZtX2ZpbGUpIHtcbiIKICAgICAgICAgICAgICAgICJcdFx0XHRzdHJ1Y3QgaW5vZGUgKmlub2RlID0gZmlsZV9pbm9kZSh2bWEtPnZtX2ZpbGUpO1xuIgogICAgICAgICAgICAgICAgIlx0XHRcdGlmICh1bmxpa2VseShpbm9kZS0+aV9tYXBwaW5nLT5mbGFncyAmIEJJVF9TVVNfTUFQUykgJiYgc3VzZnNfaXNfY3VycmVudF9wcm9jX3Vtb3VudGVkKCkpIHtcbiIKICAgICAgICAgICAgICAgICJcdFx0XHRcdHBtLmJ1ZmZlci0+cG1lID0gMDtcbiIKICAgICAgICAgICAgICAgICJcdFx0XHR9XG4iCiAgICAgICAgICAgICAgICAiXHRcdH1cbiIKICAgICAgICAgICAgICAgICIjZW5kaWZcbiIKICAgICAgICAgICAgICAgICJcdFx0c3RhcnRfdmFkZHIgPSBlbmQ7XG4iCiAgICAgICAgICAgICkKICAgICAgICAgICAgY29udGVudCA9IGNvbnRlbnRbOm0uc3RhcnQoKV0gKyBuZXdfYiArIGNvbnRlbnRbbS5lbmQoKTpdCiAgICAgICAgICAgIHByaW50KCIgIOKchSB0YXNrX21tdS5jOiBwYWdlbWFwX3JlYWQgU1VTX01BUCBjaGVjayBhcHBsaWVkIChyZWdleCBmYWxsYmFjaykiKQogICAgICAgICAgICBhcHBsaWVkX2IgPSBUcnVlCgogICAgaWYgbm90IGFwcGxpZWRfYjoKICAgICAgICBwcmludCgiICDimqDvuI8gIHRhc2tfbW11LmM6IHBhZ2VtYXBfcmVhZCBjb250ZXh0IG5vdCBmb3VuZCDigJQgbWlub3IgZmVhdHVyZSBtaXNzaW5nIikKCndpdGggb3BlbihwYXRoLCAndycpIGFzIGY6CiAgICBmLndyaXRlKGNvbnRlbnQpCg==' | base64 -d | python3 - "fs/proc/task_mmu.c"
 
 echo ""
 
@@ -452,80 +145,86 @@ SUSFS_C="fs/susfs.c"
 
 # ── 4a. CMD define in susfs_def.h (unconditional, no guard needed) ────────────
 if ! grep -q "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS" "$SUSFS_DEF_H" 2>/dev/null; then
-    python3 - "$SUSFS_DEF_H" << 'PYEOF'
-import sys
-path = sys.argv[1]
-with open(path) as f:
-    content = f.read()
-
-anchor = "#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS 0x55561"
-replacement = (
-    "#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS 0x55561\n"
-    "#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS     0x55563"
-)
-if anchor in content:
-    content = content.replace(anchor, replacement, 1)
-    with open(path, 'w') as f:
-        f.write(content)
-    print(f"  ✅ CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS added to {path}")
-else:
-    fallback = "#define SUSFS_MAX_LEN_PATHNAME"
-    content = content.replace(
-        fallback,
-        "#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS     0x55563\n" + fallback, 1)
-    with open(path, 'w') as f:
-        f.write(content)
-    print(f"  ✅ CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS added (fallback) to {path}")
-PYEOF
+    echo 'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmFuY2hvciA9ICIjZGVmaW5lIENNRF9TVVNGU19ISURFX1NVU19NTlRTX0ZPUl9OT05fU1VfUFJPQ1MgMHg1NTU2MSIKcmVwbGFjZW1lbnQgPSAoCiAgICAiI2RlZmluZSBDTURfU1VTRlNfSElERV9TVVNfTU5UU19GT1JfTk9OX1NVX1BST0NTIDB4NTU1NjFcbiIKICAgICIjZGVmaW5lIENNRF9TVVNGU19ISURFX1NVU19NTlRTX0ZPUl9BTExfUFJPQ1MgICAgIDB4NTU1NjMiCikKaWYgYW5jaG9yIGluIGNvbnRlbnQ6CiAgICBjb250ZW50ID0gY29udGVudC5yZXBsYWNlKGFuY2hvciwgcmVwbGFjZW1lbnQsIDEpCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgQ01EX1NVU0ZTX0hJREVfU1VTX01OVFNfRk9SX0FMTF9QUk9DUyBhZGRlZCB0byB7cGF0aH0iKQplbHNlOgogICAgZmFsbGJhY2sgPSAiI2RlZmluZSBTVVNGU19NQVhfTEVOX1BBVEhOQU1FIgogICAgY29udGVudCA9IGNvbnRlbnQucmVwbGFjZSgKICAgICAgICBmYWxsYmFjaywKICAgICAgICAiI2RlZmluZSBDTURfU1VTRlNfSElERV9TVVNfTU5UU19GT1JfQUxMX1BST0NTICAgICAweDU1NTYzXG4iICsgZmFsbGJhY2ssIDEpCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgQ01EX1NVU0ZTX0hJREVfU1VTX01OVFNfRk9SX0FMTF9QUk9DUyBhZGRlZCAoZmFsbGJhY2spIHRvIHtwYXRofSIpCg==' | base64 -d | python3 - "$SUSFS_DEF_H"
 else
     echo "  ℹ️  CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS already present"
 fi
 
 # ── 4b. Declaration in susfs.h — must be inside #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-python3 - "$SUSFS_H" << 'PYEOF'
-import sys
-path = sys.argv[1]
-with open(path) as f:
-    content = f.read()
-
-fn_sig = "susfs_set_hide_sus_mnts_for_all_procs"
-decl   = "void susfs_set_hide_sus_mnts_for_all_procs(void __user **user_info);"
-ifndef = "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
-
-# Find the sus_mount #ifdef block
-mount_ifdef = content.find("#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT", content.find("/* sus_mount */"))
-# Find its closing #endif
-mount_endif = content.find(ifndef, mount_ifdef)
-
-fn_pos = content.find(fn_sig)
-
-if fn_pos == -1:
-    # Not present at all — insert before the #endif
-    content = content[:mount_endif] + decl + "\n" + content[mount_endif:]
-    with open(path, 'w') as f:
-        f.write(content)
-    print(f"  ✅ susfs.h: declaration added inside #ifdef guard")
-
-elif fn_pos < mount_endif:
-    # Already inside the guard — nothing to do
-    print(f"  ✅ susfs.h: declaration already inside #ifdef guard")
-
-else:
-    # Outside the guard — remove and re-insert inside
-    content = content.replace(decl + "\n", "", 1)
-    content = content.replace(decl, "", 1)          # handle missing trailing \n
-    # Recalculate positions after removal
-    mount_ifdef = content.find("#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT", content.find("/* sus_mount */"))
-    mount_endif = content.find(ifndef, mount_ifdef)
-    content = content[:mount_endif] + decl + "\n" + content[mount_endif:]
-    with open(path, 'w') as f:
-        f.write(content)
-    print(f"  ✅ susfs.h: declaration moved inside #ifdef guard")
-PYEOF
+echo 'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmZuX3NpZyA9ICJzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzIgpkZWNsICAgPSAidm9pZCBzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzKHZvaWQgX191c2VyICoqdXNlcl9pbmZvKTsiCmlmbmRlZiA9ICIjZW5kaWYgLy8gI2lmZGVmIENPTkZJR19LU1VfU1VTRlNfU1VTX01PVU5UIgoKIyBGaW5kIHRoZSBzdXNfbW91bnQgI2lmZGVmIGJsb2NrCm1vdW50X2lmZGVmID0gY29udGVudC5maW5kKCIjaWZkZWYgQ09ORklHX0tTVV9TVVNGU19TVVNfTU9VTlQiLCBjb250ZW50LmZpbmQoIi8qIHN1c19tb3VudCAqLyIpKQojIEZpbmQgaXRzIGNsb3NpbmcgI2VuZGlmCm1vdW50X2VuZGlmID0gY29udGVudC5maW5kKGlmbmRlZiwgbW91bnRfaWZkZWYpCgpmbl9wb3MgPSBjb250ZW50LmZpbmQoZm5fc2lnKQoKaWYgZm5fcG9zID09IC0xOgogICAgIyBOb3QgcHJlc2VudCBhdCBhbGwg4oCUIGluc2VydCBiZWZvcmUgdGhlICNlbmRpZgogICAgY29udGVudCA9IGNvbnRlbnRbOm1vdW50X2VuZGlmXSArIGRlY2wgKyAiXG4iICsgY29udGVudFttb3VudF9lbmRpZjpdCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgc3VzZnMuaDogZGVjbGFyYXRpb24gYWRkZWQgaW5zaWRlICNpZmRlZiBndWFyZCIpCgplbGlmIGZuX3BvcyA8IG1vdW50X2VuZGlmOgogICAgIyBBbHJlYWR5IGluc2lkZSB0aGUgZ3VhcmQg4oCUIG5vdGhpbmcgdG8gZG8KICAgIHByaW50KGYiICDinIUgc3VzZnMuaDogZGVjbGFyYXRpb24gYWxyZWFkeSBpbnNpZGUgI2lmZGVmIGd1YXJkIikKCmVsc2U6CiAgICAjIE91dHNpZGUgdGhlIGd1YXJkIOKAlCByZW1vdmUgYW5kIHJlLWluc2VydCBpbnNpZGUKICAgIGNvbnRlbnQgPSBjb250ZW50LnJlcGxhY2UoZGVjbCArICJcbiIsICIiLCAxKQogICAgY29udGVudCA9IGNvbnRlbnQucmVwbGFjZShkZWNsLCAiIiwgMSkgICAgICAgICAgIyBoYW5kbGUgbWlzc2luZyB0cmFpbGluZyBcbgogICAgIyBSZWNhbGN1bGF0ZSBwb3NpdGlvbnMgYWZ0ZXIgcmVtb3ZhbAogICAgbW91bnRfaWZkZWYgPSBjb250ZW50LmZpbmQoIiNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTX1NVU19NT1VOVCIsIGNvbnRlbnQuZmluZCgiLyogc3VzX21vdW50ICovIikpCiAgICBtb3VudF9lbmRpZiA9IGNvbnRlbnQuZmluZChpZm5kZWYsIG1vdW50X2lmZGVmKQogICAgY29udGVudCA9IGNvbnRlbnRbOm1vdW50X2VuZGlmXSArIGRlY2wgKyAiXG4iICsgY29udGVudFttb3VudF9lbmRpZjpdCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgc3VzZnMuaDogZGVjbGFyYXRpb24gbW92ZWQgaW5zaWRlICNpZmRlZiBndWFyZCIpCg==' | base64 -d | python3 - "$SUSFS_H"
 
 # ── 4c. Implementation in susfs.c — must be inside #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-python3 - "$SUSFS_C" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path) as f:
-    
+echo 'aW1wb3J0IHN5cywgcmUKcGF0aCA9IHN5cy5hcmd2WzFdCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgY29udGVudCA9IGYucmVhZCgpCgpmbl9zaWcgICA9ICJzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzIgppZm5kZWYgICA9ICIjZW5kaWYgLy8gI2lmZGVmIENPTkZJR19LU1VfU1VTRlNfU1VTX01PVU5UIgojIExvY2F0ZSB0aGUgc3VzX21vdW50IGJsb2NrIGJvdW5kYXJpZXMKbW91bnRfaWZkZWZfcG9zID0gY29udGVudC5maW5kKCIjaWZkZWYgQ09ORklHX0tTVV9TVVNGU19TVVNfTU9VTlQiLCBjb250ZW50LmZpbmQoIi8qIHN1c19tb3VudCAqLyIpKQptb3VudF9lbmRpZl9wb3MgPSBjb250ZW50LmZpbmQoaWZuZGVmLCBtb3VudF9pZmRlZl9wb3MpCgpuZXdfaW1wbCA9ICgKICAgICJcbnZvaWQgc3VzZnNfc2V0X2hpZGVfc3VzX21udHNfZm9yX2FsbF9wcm9jcyh2b2lkIF9fdXNlciAqKnVzZXJfaW5mbykge1xuIgogICAgIlx0c3RydWN0IHN0X3N1c2ZzX2hpZGVfc3VzX21udHNfZm9yX25vbl9zdV9wcm9jcyBpbmZvID0gezB9O1xuXG4iCiAgICAiXHRpZiAoY29weV9mcm9tX3VzZXIoJmluZm8sIChzdHJ1Y3Qgc3Rfc3VzZnNfaGlkZV9zdXNfbW50c19mb3Jfbm9uX3N1X3Byb2NzIF9fdXNlciopKnVzZXJfaW5mbywgc2l6ZW9mKGluZm8pKSkge1xuIgogICAgIlx0XHRpbmZvLmVyciA9IC1FRkFVTFQ7XG4iCiAgICAiXHRcdGdvdG8gb3V0X2NvcHlfdG9fdXNlcjtcbiIKICAgICJcdH1cbiIKICAgICJcdHNwaW5fbG9jaygmc3VzZnNfc3Bpbl9sb2NrX3N1c19tb3VudCk7XG4iCiAgICAiXHRzdXNmc19oaWRlX3N1c19tbnRzX2Zvcl9ub25fc3VfcHJvY3MgPSBpbmZvLmVuYWJsZWQ7XG4iCiAgICAiXHRzcGluX3VubG9jaygmc3VzZnNfc3Bpbl9sb2NrX3N1c19tb3VudCk7XG4iCiAgICAnXHRTVVNGU19MT0dJKCJzdXNmc19oaWRlX3N1c19tbnRzX2Zvcl9hbGxfcHJvY3M6ICVkXFxuIiwgaW5mby5lbmFibGVkKTtcbicKICAgICJcdGluZm8uZXJyID0gMDtcbiIKICAgICJvdXRfY29weV90b191c2VyOlxuIgogICAgIlx0aWYgKGNvcHlfdG9fdXNlcigmKChzdHJ1Y3Qgc3Rfc3VzZnNfaGlkZV9zdXNfbW50c19mb3Jfbm9uX3N1X3Byb2NzIF9fdXNlciopKnVzZXJfaW5mbyktPmVyciwgJmluZm8uZXJyLCBzaXplb2YoaW5mby5lcnIpKSkge1xuIgogICAgIlx0XHRpbmZvLmVyciA9IC1FRkFVTFQ7XG4iCiAgICAiXHR9XG4iCiAgICAnXHRTVVNGU19MT0dJKCJDTURfU1VTRlNfSElERV9TVVNfTU5UU19GT1JfQUxMX1BST0NTIC0+IHJldDogJWRcXG4iLCBpbmZvLmVycik7XG4nCiAgICAifVxuIgopCgpmbl9wb3MgPSBjb250ZW50LmZpbmQoZm5fc2lnKQoKaWYgZm5fcG9zID09IC0xOgogICAgIyBOb3QgcHJlc2VudCDigJQgaW5zZXJ0IGJlZm9yZSB0aGUgI2VuZGlmCiAgICBjb250ZW50ID0gY29udGVudFs6bW91bnRfZW5kaWZfcG9zXSArIG5ld19pbXBsICsgY29udGVudFttb3VudF9lbmRpZl9wb3M6XQogICAgd2l0aCBvcGVuKHBhdGgsICd3JykgYXMgZjoKICAgICAgICBmLndyaXRlKGNvbnRlbnQpCiAgICBwcmludChmIiAg4pyFIHN1c2ZzLmM6IGltcGxlbWVudGF0aW9uIGFkZGVkIGluc2lkZSAjaWZkZWYgZ3VhcmQiKQoKZWxpZiBmbl9wb3MgPCBtb3VudF9lbmRpZl9wb3M6CiAgICBwcmludChmIiAg4pyFIHN1c2ZzLmM6IGltcGxlbWVudGF0aW9uIGFscmVhZHkgaW5zaWRlICNpZmRlZiBndWFyZCIpCgplbHNlOgogICAgIyBPdXRzaWRlIHRoZSBndWFyZCDigJQgZXh0cmFjdCB0aGUgZnVsbCBmdW5jdGlvbiBib2R5IGFuZCByZS1pbnNlcnQgaW5zaWRlCiAgICAjIE1hdGNoIGZyb20gdGhlIGZ1bmN0aW9uIHNpZ25hdHVyZSB0byB0aGUgY2xvc2luZyBicmFjZSBvbiBpdHMgb3duIGxpbmUKICAgIHBhdHRlcm4gPSByJ1xudm9pZCBzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzXCguKj9cblx9XG4nCiAgICBtID0gcmUuc2VhcmNoKHBhdHRlcm4sIGNvbnRlbnQsIHJlLkRPVEFMTCkKICAgIGlmIG06CiAgICAgICAgb2xkX2ZuID0gbS5ncm91cCgwKQogICAgICAgIGNvbnRlbnQgPSBjb250ZW50LnJlcGxhY2Uob2xkX2ZuLCAiXG4iLCAxKSAgICMgcmVtb3ZlIG9sZCBjb3B5CiAgICAgICAgIyBSZWNhbGN1bGF0ZSBhZnRlciByZW1vdmFsCiAgICAgICAgbW91bnRfaWZkZWZfcG9zID0gY29udGVudC5maW5kKCIjaWZkZWYgQ09ORklHX0tTVV9TVVNGU19TVVNfTU9VTlQiLCBjb250ZW50LmZpbmQoIi8qIHN1c19tb3VudCAqLyIpKQogICAgICAgIG1vdW50X2VuZGlmX3BvcyA9IGNvbnRlbnQuZmluZChpZm5kZWYsIG1vdW50X2lmZGVmX3BvcykKICAgICAgICBjb250ZW50ID0gY29udGVudFs6bW91bnRfZW5kaWZfcG9zXSArIG5ld19pbXBsICsgY29udGVudFttb3VudF9lbmRpZl9wb3M6XQogICAgICAgIHdpdGggb3BlbihwYXRoLCAndycpIGFzIGY6CiAgICAgICAgICAgIGYud3JpdGUoY29udGVudCkKICAgICAgICBwcmludChmIiAg4pyFIHN1c2ZzLmM6IGltcGxlbWVudGF0aW9uIG1vdmVkIGluc2lkZSAjaWZkZWYgZ3VhcmQiKQogICAgZWxzZToKICAgICAgICBwcmludChmIiAg4p2MIHN1c2ZzLmM6IGNvdWxkIG5vdCBleHRyYWN0IG1pc3BsYWNlZCBmdW5jdGlvbiDigJQgcGF0Y2ggbWFudWFsbHkiKQogICAgICAgIHN5cy5leGl0KDEpCg==' | base64 -d | python3 - "$SUSFS_C"
+
+echo ""
+
+# Clean up any remaining .rej files (after manual fixes above)
+REJECT_FILES=$(find . -name "*.rej" 2>/dev/null | grep -v ".git" | sort || true)
+if [ -n "$REJECT_FILES" ]; then
+    echo "── Remaining rejected hunks ──────────────────────────────────────────────"
+    echo ""
+    while IFS= read -r rej; do
+        echo "  ❌ ${rej%.rej}"
+        head -20 "$rej" | sed 's/^/      /'
+        echo ""
+    done <<< "$REJECT_FILES"
+fi
+
+# =============================================================================
+# STEP 5 — Verification
+# =============================================================================
+
+echo "── Step 5: Verification ────────────────────────────────────────────────────"
+echo ""
+
+ALL_OK=true
+
+check() {
+    local label="$1" file="$2" pattern="$3"
+    if grep -q "$pattern" "$file" 2>/dev/null; then
+        printf "  ✅ %-50s\n" "$label"
+    else
+        printf "  ❌ %-50s  ← MISSING in %s\n" "$label" "$file"
+        ALL_OK=false
+    fi
+}
+
+check "namei.c      SUS_PATH hooks"          "fs/namei.c"                "CONFIG_KSU_SUSFS_SUS_PATH"
+check "namespace.c  susfs_reorder_mnt_id"    "fs/namespace.c"            "susfs_reorder_mnt_id"
+check "namespace.c  sus vfsmnt allocation"   "fs/namespace.c"            "susfs_alloc_sus_vfsmnt"
+check "mount.h      susfs_mnt_id_backup"     "include/linux/mount.h"     "susfs_mnt_id_backup"
+check "readdir.c    inode sus path hook"     "fs/readdir.c"              "susfs_is_inode_sus_path"
+check "stat.c       kstat spoof hook"        "fs/stat.c"                 "susfs_sus_ino_for_generic_fillattr"
+check "statfs.c     mount hiding hook"       "fs/statfs.c"               "DEFAULT_KSU_MNT_ID"
+check "proc_namespace mount hiding"          "fs/proc_namespace.c"       "susfs_hide_sus_mnts_for_non_su"
+check "proc/fd.c    fd mnt_id hiding"        "fs/proc/fd.c"              "DEFAULT_KSU_MNT_ID"
+check "proc/cmdline cmdline spoofing"        "fs/proc/cmdline.c"         "susfs_spoof_cmdline_or_bootconfig"
+check "proc/task_mmu maps hiding"            "fs/proc/task_mmu.c"        "BIT_SUS_MAPS"
+check "proc/task_mmu pagemap_read fix"       "fs/proc/task_mmu.c"        "pm.buffer->pme = 0"
+check "sys.c        uname spoofing"          "kernel/sys.c"              "susfs_spoof_uname"
+check "kallsyms.c   symbol hiding"           "kernel/kallsyms.c"         "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS"
+check "avc.c        bool definition"         "security/selinux/avc.c"    "susfs_is_avc_log_spoofing_enabled = false"
+check "susfs_def.h  ALL_PROCS cmd define"    "include/linux/susfs_def.h" "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS"
+check "susfs.h      ALL_PROCS declaration"   "include/linux/susfs.h"     "susfs_set_hide_sus_mnts_for_all_procs"
+check "susfs.c      ALL_PROCS implementation" "fs/susfs.c"               "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS"
+
+# Confirm the implementation is inside the #ifdef guard
+echo 'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmZuX3BvcyAgICAgID0gY29udGVudC5maW5kKCJzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzIikKbW91bnRfaWZkZWYgPSBjb250ZW50LmZpbmQoIiNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTX1NVU19NT1VOVCIsIGNvbnRlbnQuZmluZCgiLyogc3VzX21vdW50ICovIikpCm1vdW50X2VuZGlmID0gY29udGVudC5maW5kKCIjZW5kaWYgLy8gI2lmZGVmIENPTkZJR19LU1VfU1VTRlNfU1VTX01PVU5UIiwgbW91bnRfaWZkZWYpCgppZiBmbl9wb3MgPT0gLTE6CiAgICBwcmludCgiICDinYwgc3VzZnMuYyBBTExfUFJPQ1MgaW1wbGVtZW50YXRpb24gbm90IGZvdW5kIikKICAgIHN5cy5leGl0KDEpCmVsaWYgbW91bnRfaWZkZWYgPCBmbl9wb3MgPCBtb3VudF9lbmRpZjoKICAgIHByaW50KCIgIOKchSBzdXNmcy5jIEFMTF9QUk9DUyBpbXBsIGlzIGluc2lkZSAjaWZkZWYgZ3VhcmQgICAgICAgICIpCmVsc2U6CiAgICBwcmludCgiICDinYwgc3VzZnMuYyBBTExfUFJPQ1MgaW1wbCBpcyBPVVRTSURFICNpZmRlZiBndWFyZCDihpAgQkFEIikKICAgIHN5cy5leGl0KDEpCg==' | base64 -d | python3 - "fs/susfs.c"
+
+echo ""
+
+if [ "$ALL_OK" = true ] && [ -z "$REJECT_FILES" ]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  ✅  All checks passed. Ready to build."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+elif [ "$ALL_OK" = true ] && [ -n "$REJECT_FILES" ]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  ⚠️   Symbols OK but some hunks still rejected (see above)."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    exit 1
+else
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  ❌  One or more checks failed — see above."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    exit 1
+fi
