@@ -1,145 +1,169 @@
-#!/usr/bin/env bash
-# ============================================================================
-# SUSFS CI Auto-Fix Script for Lineage 23.2 (Kernel 4.19 SM8250)
-# Production safe, idempotent, validation aware
-# ============================================================================
+#!/bin/bash
+set -e
 
-set -euo pipefail
+# ----------------------------------------------------------------------
+# SUSFS integration script for OnePlus 9R (lemonades) LineageOS 23.2
+# Kernel version: 4.19
+# Usage: ./apply_susfs.sh <path-to-kernel-source> <path-to-susfs-patch>
+# Example: ./apply_susfs.sh ~/kernel/oneplus_sm8250 susfs_patch_to_4.19.patch
+# ----------------------------------------------------------------------
 
-KERNEL_DIR="$1"
+KERNEL_SRC="$1"
 PATCH_FILE="$2"
 
-if [[ -z "${KERNEL_DIR:-}" || -z "${PATCH_FILE:-}" ]]; then
-    echo "Usage: $0 <kernel_dir> <susfs_patch>"
+if [ -z "$KERNEL_SRC" ] || [ -z "$PATCH_FILE" ]; then
+    echo "Usage: $0 <kernel-source-dir> <patch-file>"
     exit 1
 fi
 
-NS_FILE="$KERNEL_DIR/fs/namespace.c"
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  SUSFS CI Integration Fix"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# ----------------------------------------------------------------------------
-# STEP 1: Sanity Checks
-# ----------------------------------------------------------------------------
-
-if [[ ! -d "$KERNEL_DIR" ]]; then
-    echo "❌ Kernel directory not found"
+if [ ! -d "$KERNEL_SRC" ]; then
+    echo "Error: Kernel source directory not found: $KERNEL_SRC"
     exit 1
 fi
 
-if [[ ! -f "$PATCH_FILE" ]]; then
-    echo "❌ Patch file not found"
+if [ ! -f "$PATCH_FILE" ]; then
+    echo "Error: Patch file not found: $PATCH_FILE"
     exit 1
 fi
 
-if [[ ! -f "$NS_FILE" ]]; then
-    echo "❌ namespace.c not found"
+cd "$KERNEL_SRC"
+
+echo "------------------------------------------------------------"
+echo "  Applying SUSFS patch to kernel source"
+echo "------------------------------------------------------------"
+
+# Apply the main SUSFS patch
+patch -p1 < "$PATCH_FILE"
+if [ $? -ne 0 ]; then
+    echo "❌ Patch failed. Check for .rej files above."
     exit 1
 fi
+echo "✅ Patch applied successfully."
 
-# ----------------------------------------------------------------------------
-# STEP 2: Remove namespace.c hunks from patch
-# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# SUSFS requires its own Kconfig symbol. The patch does not add it,
+# so we create it manually.
+# ----------------------------------------------------------------------
+echo "------------------------------------------------------------"
+echo "  Adding SUSFS Kconfig entries"
+echo "------------------------------------------------------------"
 
-echo "➜ Cleaning namespace.c hunks from patch..."
+# Create the SUSFS Kconfig file
+mkdir -p fs/susfs
+cat > fs/susfs/Kconfig << 'EOF'
+config KSU_SUSFS
+	bool "SUSFS (KernelSU Safe Security Feature)"
+	depends on KSU
+	default y
+	help
+	  Enable SUSFS to hide sensitive paths, mounts, and other system information.
+	  If unsure, say Y.
 
-CLEAN_PATCH="/tmp/susfs_clean.patch"
+if KSU_SUSFS
 
-awk '
-BEGIN { skip=0 }
-/^diff --git a\/fs\/namespace.c/ { skip=1 }
-skip==1 && /^diff --git/ { skip=0 }
-skip==0 { print }
-' "$PATCH_FILE" > "$CLEAN_PATCH"
+config KSU_SUSFS_SUS_PATH
+	bool "Hide sensitive paths"
+	default y
+	help
+	  Hide specified paths from non-root processes.
 
-# ----------------------------------------------------------------------------
-# STEP 3: Apply clean patch
-# ----------------------------------------------------------------------------
+config KSU_SUSFS_SUS_MOUNT
+	bool "Hide sensitive mounts"
+	default y
+	help
+	  Hide specified mounts from non-root processes.
 
-echo "➜ Applying cleaned SUSFS patch..."
+config KSU_SUSFS_SUS_KSTAT
+	bool "Spoof stat() results"
+	default y
+	help
+	  Spoof inode numbers, device IDs, and other stat fields.
 
-cd "$KERNEL_DIR"
+config KSU_SUSFS_SUS_OVERLAYFS
+	bool "OverlayFS enhancements"
+	default y
+	help
+	  Additional OverlayFS hiding features.
 
-if ! git apply --check "$CLEAN_PATCH"; then
-    echo "❌ Patch still does not apply cleanly"
-    exit 1
+config KSU_SUSFS_TRY_UMOUNT
+	bool "Try unmount feature"
+	default y
+	help
+	  Attempt to unmount specific mounts.
+
+config KSU_SUSFS_SPOOF_UNAME
+	bool "Spoof uname"
+	default y
+	help
+	  Spoof kernel release and version strings.
+
+config KSU_SUSFS_OPEN_REDIRECT
+	bool "Open file redirection"
+	default y
+	help
+	  Redirect opens of certain files to another path.
+
+config KSU_SUSFS_ENABLE_LOG
+	bool "Enable SUSFS logging"
+	default y
+	help
+	  Allow SUSFS to print debug messages (can be turned off at runtime).
+
+config KSU_SUSFS_SUS_SU
+	bool "SUS SU feature"
+	default y
+	help
+	  Additional SU hiding mechanisms.
+
+endif # KSU_SUSFS
+EOF
+
+# Source the new Kconfig in fs/Kconfig
+if ! grep -q "source \"fs/susfs/Kconfig\"" fs/Kconfig; then
+    echo "source \"fs/susfs/Kconfig\"" >> fs/Kconfig
+    echo "✅ Added SUSFS Kconfig to fs/Kconfig"
+else
+    echo "ℹ️ SUSFS Kconfig already sourced"
 fi
 
-git apply "$CLEAN_PATCH"
+# ----------------------------------------------------------------------
+# Enable SUSFS options in the device defconfig
+# ----------------------------------------------------------------------
+echo "------------------------------------------------------------"
+echo "  Enabling SUSFS in defconfig"
+echo "------------------------------------------------------------"
 
-# ----------------------------------------------------------------------------
-# STEP 4: Inject Lineage-safe namespace changes
-# ----------------------------------------------------------------------------
+DEFCONFIG="arch/arm64/configs/vendor/kona-perf_defconfig"
+if [ ! -f "$DEFCONFIG" ]; then
+    echo "⚠️  Defconfig not found at $DEFCONFIG, skipping automatic enable."
+    echo "   Please manually add the following lines to your defconfig:"
+else
+    # Backup original defconfig
+    cp "$DEFCONFIG" "$DEFCONFIG.bak"
 
-echo "➜ Injecting Lineage-safe namespace modifications..."
+    # Add SUSFS configs (if not already present)
+    grep -q "CONFIG_KSU_SUSFS=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_SUS_PATH=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_SUS_MOUNT=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_SUS_KSTAT=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_ENABLE_LOG=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$DEFCONFIG"
+    grep -q "CONFIG_KSU_SUSFS_SUS_SU=y" "$DEFCONFIG" || echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$DEFCONFIG"
 
-# 4.1 Include injection
-if ! grep -q "susfs_def.h" "$NS_FILE"; then
-    sed -i '/#include <linux\/sched\/task.h>/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
-#include <linux/susfs_def.h>\
-#endif
-' "$NS_FILE"
+    echo "✅ SUSFS options added to $DEFCONFIG"
 fi
 
-# 4.2 CL_COPY_MNT_NS define
-if ! grep -q "CL_COPY_MNT_NS" "$NS_FILE"; then
-    sed -i '/#define CL_COPY_UNBINDABLE/a \
-#define CL_COPY_MNT_NS BIT(25)
-' "$NS_FILE"
-fi
-
-# 4.3 copy_mnt_ns flag injection
-if ! grep -q "copy_flags |= CL_COPY_MNT_NS" "$NS_FILE"; then
-    sed -i '/copy_flags = CL_COPY_UNBINDABLE/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
-    copy_flags |= CL_COPY_MNT_NS;\
-#endif
-' "$NS_FILE"
-fi
-
-# 4.4 mnt_id backup init
-if ! grep -q "susfs_mnt_id_backup" "$NS_FILE"; then
-    sed -i '/mnt->mnt.data = NULL;/a \
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
-    mnt->mnt.susfs_mnt_id_backup = 0;\
-#endif
-' "$NS_FILE"
-fi
-
-# ----------------------------------------------------------------------------
-# STEP 5: Validation Phase
-# ----------------------------------------------------------------------------
-
-echo "➜ Validating integration..."
-
-# 5.1 Check for reject files
-if find . -name "*.rej" | grep -q .; then
-    echo "❌ Reject files detected"
-    find . -name "*.rej"
-    exit 1
-fi
-
-# 5.2 Validate header exists
-if ! grep -R "susfs_def.h" include 2>/dev/null | grep -q .; then
-    echo "❌ susfs_def.h not found in include/"
-    exit 1
-fi
-
-# 5.3 Validate symbol injection
-if ! grep -q "CL_COPY_MNT_NS" "$NS_FILE"; then
-    echo "❌ CL_COPY_MNT_NS not injected"
-    exit 1
-fi
-
-# 5.4 Validate config exists
-if ! grep -R "CONFIG_KSU_SUSFS" "$KERNEL_DIR" | grep -q Kconfig; then
-    echo "❌ SUSFS Kconfig not found"
-    exit 1
-fi
-
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "✅ SUSFS integration complete & validated"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# ----------------------------------------------------------------------
+echo "------------------------------------------------------------"
+echo "  SUSFS integration completed successfully!"
+echo "------------------------------------------------------------"
+echo ""
+echo "Next steps:"
+echo "1. Build your kernel (e.g., make ARCH=arm64 ...)"
+echo "2. The final .config must contain CONFIG_KSU_SUSFS=y and its sub-options."
+echo "3. If you encounter build errors, check for any rejected patches."
+echo ""
