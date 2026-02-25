@@ -1,13 +1,12 @@
+diff --git a/include/linux/mount.h b/include/linux/mount.h
+index XXXXXXX..YYYYYYY 100644
 --- a/include/linux/mount.h
 +++ b/include/linux/mount.h
-@@ -72,7 +72,11 @@ struct vfsmount {
- 	ANDROID_KABI_RESERVE(1);
- 	ANDROID_KABI_RESERVE(2);
- 	ANDROID_KABI_RESERVE(3);
+@@ -180,4 +180,12 @@ struct vfsmount {
+ };
+
 +#ifdef CONFIG_KSU_SUSFS
-+	ANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);
-+#else
- 	ANDROID_KABI_RESERVE(4);
++bool susfs_is_current_proc_umounted(void);
 +#endif
- 	void *data;
- } __randomize_layout;
++
+ #endif /* _LINUX_MOUNT_H */
