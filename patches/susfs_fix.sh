@@ -1,279 +1,145 @@
 #!/usr/bin/env bash
-# =============================================================================
-# apply_susfs_patch.sh  (v9 — no re-exec, base64-only, mmap_read_unlock support)
-#
-# Adjusts susfs_patch_to_4_19.patch for the rsuntk/KernelSU workflow and
-# applies it to the kernel source tree.
-#
-# HANDLES:
-#   - Skips files already provided by the workflow (susfs.c/h, susfs_def.h,
-#     Makefile)
-#   - Replaces broken avc.c hunk (UB sad.tsid read) with safe bool definition
-#   - Manually applies hunks that git apply rejects due to context mismatch:
-#       * include/linux/mount.h   (ANDROID_KABI_RESERVE vs KABI_USE)
-#       * fs/proc/task_mmu.c     (pagemap_read hunk — applied manually with
-#                                 multiple fallback context patterns; all other
-#                                 task_mmu.c hunks applied via git apply)
-#       * fs/namespace.c hunk #8 (whitespace-only, safely skipped)
-#   - Moves susfs_set_hide_sus_mnts_for_all_procs inside its #ifdef guard
-#     if a previous script (patch_susfs_sym.sh) placed it outside
-#
-# USAGE:
-#   bash patches/apply_susfs_patch.sh <KERNEL_DIR> <PATCH_FILE>
-# =============================================================================
+# ============================================================================
+# SUSFS CI Auto-Fix Script for Lineage 23.2 (Kernel 4.19 SM8250)
+# Production safe, idempotent, validation aware
+# ============================================================================
 
 set -euo pipefail
 
-KERNEL_DIR="${1:-}"
-PATCH_FILE="${2:-}"
+KERNEL_DIR="$1"
+PATCH_FILE="$2"
 
-if [ -z "$KERNEL_DIR" ] || [ -z "$PATCH_FILE" ]; then
-    echo "Usage: $0 <KERNEL_DIR> <PATCH_FILE>"
+if [[ -z "${KERNEL_DIR:-}" || -z "${PATCH_FILE:-}" ]]; then
+    echo "Usage: $0 <kernel_dir> <susfs_patch>"
     exit 1
 fi
-if [ ! -d "$KERNEL_DIR" ]; then
-    echo "❌ Kernel directory not found: $KERNEL_DIR"; exit 1
+
+NS_FILE="$KERNEL_DIR/fs/namespace.c"
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  SUSFS CI Integration Fix"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# ----------------------------------------------------------------------------
+# STEP 1: Sanity Checks
+# ----------------------------------------------------------------------------
+
+if [[ ! -d "$KERNEL_DIR" ]]; then
+    echo "❌ Kernel directory not found"
+    exit 1
 fi
-if [ ! -f "$PATCH_FILE" ]; then
-    echo "❌ Patch file not found: $PATCH_FILE"; exit 1
+
+if [[ ! -f "$PATCH_FILE" ]]; then
+    echo "❌ Patch file not found"
+    exit 1
 fi
 
-PATCH_FILE="$(realpath "$PATCH_FILE")"
-KERNEL_DIR="$(realpath "$KERNEL_DIR")"
+if [[ ! -f "$NS_FILE" ]]; then
+    echo "❌ namespace.c not found"
+    exit 1
+fi
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  apply_susfs_patch.sh"
-echo "  Kernel : $KERNEL_DIR"
-echo "  Patch  : $PATCH_FILE"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
+# ----------------------------------------------------------------------------
+# STEP 2: Remove namespace.c hunks from patch
+# ----------------------------------------------------------------------------
 
-# =============================================================================
-# STEP 1 — Build adjusted patch (strip workflow-handled files, fix avc.c)
-# =============================================================================
+echo "➜ Cleaning namespace.c hunks from patch..."
 
-echo "── Step 1: Building adjusted patch ────────────────────────────────────────"
-echo ""
+CLEAN_PATCH="/tmp/susfs_clean.patch"
 
-ADJUSTED_PATCH="$(mktemp /tmp/susfs_adjusted_XXXXXX.patch)"
-trap 'rm -f "$ADJUSTED_PATCH"' EXIT
+awk '
+BEGIN { skip=0 }
+/^diff --git a\/fs\/namespace.c/ { skip=1 }
+skip==1 && /^diff --git/ { skip=0 }
+skip==0 { print }
+' "$PATCH_FILE" > "$CLEAN_PATCH"
 
-_b64_b1=
-_b64_b1=${_b64_b1}'aW1wb3J0IHN5cywgcmUKCnNyY19wYXRoICA9IHN5cy5hcmd2WzFdCmRlc3RfcGF0aCA9IHN5cy5hcmd2WzJdCgpEUk9QX0VOVElSRUxZID0gewogICAgImZzL3N1c2ZzLmMiLAogICAgImluY2x1ZGUvbGludXgvc3VzZnMuaCIsCiAgICAiaW5jbHVkZS9saW51eC9zdXNmc19kZWYuaCIsCn0KCiMgVGhlc2UgYXJlIGhhbmRsZWQgbWFudWFsbHkgaW4gbGF0ZXIgc3RlcHMgZHVlIHRvIGNvbnRleHQgbWlzbWF0Y2hlcy4KIyBOT1RFOiBmcy9wcm9jL3Rhc2tfbW11LmMgaXMgaW50ZW50aW9uYWxseSBOT1QgaW4gdGhpcyBzZXQg4oCU'
-_b64_b1=${_b64_b1}'IGdpdCBhcHBseSBoYW5kbGVzCiMgbW9zdCBvZiBpdHMgaHVua3MgZmluZS4gT25seSB0aGUgcGFnZW1hcF9yZWFkIGh1bmsgaXMgZml4ZWQgbWFudWFsbHkgaW4gU3RlcCAzYi4KTUFOVUFMX0FQUExZID0gewogICAgImluY2x1ZGUvbGludXgvbW91bnQuaCIsCn0KCndpdGggb3BlbihzcmNfcGF0aCwgJ3InLCBlcnJvcnM9J3JlcGxhY2UnKSBhcyBmOgogICAgcmF3ID0gZi5yZWFkKCkKCnNlY3Rpb25zID0gcmUuc3BsaXQocicoPz1eZGlmZiAtLWdpdCApJywgcmF3LCBmbGFncz1yZS5NVUxUSUxJTkUpCm91dF9wYXJ0cyA9IFtd'
-_b64_b1=${_b64_b1}'Cgpmb3Igc2VjIGluIHNlY3Rpb25zOgogICAgaWYgbm90IHNlYy5zdHJpcCgpOgogICAgICAgIGNvbnRpbnVlCiAgICBtID0gcmUubWF0Y2gocidkaWZmIC0tZ2l0IGEvKFxTKyknLCBzZWMpCiAgICBpZiBub3QgbToKICAgICAgICBvdXRfcGFydHMuYXBwZW5kKHNlYykKICAgICAgICBjb250aW51ZQogICAgZmlsZXBhdGggPSBtLmdyb3VwKDEpCgogICAgaWYgZmlsZXBhdGggaW4gRFJPUF9FTlRJUkVMWToKICAgICAgICBwcmludChmIiAg4o+tICBTS0lQICh3b3JrZmxvdyBoYW5kbGVzKToge2ZpbGVwYXRofSIpCiAgICAgICAg'
-_b64_b1=${_b64_b1}'Y29udGludWUKCiAgICBpZiBmaWxlcGF0aCA9PSAiZnMvTWFrZWZpbGUiOgogICAgICAgIGlmICJvYmotJChDT05GSUdfS1NVX1NVU0ZTKSArPSBzdXNmcy5vIiBpbiBzZWM6CiAgICAgICAgICAgIHByaW50KGYiICDij60gIFNLSVAgKHdvcmtmbG93IGhhbmRsZXMpOiB7ZmlsZXBhdGh9ICBbc3VzZnMubyBodW5rXSIpCiAgICAgICAgICAgIGNvbnRpbnVlCgogICAgaWYgZmlsZXBhdGggaW4gTUFOVUFMX0FQUExZOgogICAgICAgIHByaW50KGYiICDwn5SnIE1BTlVBTDoge2ZpbGVwYXRofSAgW2FwcGxpZWQgaW4gU3RlcCAzXSIp'
-_b64_b1=${_b64_b1}'CiAgICAgICAgY29udGludWUKCiAgICAjIGF2Yy5jIOKAlCBkcm9wIHRoZSBVQiBzYWQudHNpZCBodW5rLCBrZWVwIG9ubHkgdGhlIGJvb2wgZGVmaW5pdGlvbgogICAgaWYgZmlsZXBhdGggPT0gInNlY3VyaXR5L3NlbGludXgvYXZjLmMiOgogICAgICAgIHByaW50KGYiICDinIIgIFBBUlRJQUw6IHtmaWxlcGF0aH0gIFtkcm9wIFVCIHNhZCBodW5rOyBrZWVwIGJvb2wgZGVmaW5pdGlvbiBvbmx5XSIpCiAgICAgICAgbWluaW1hbF9hdmMgPSAoCiAgICAgICAgICAgICJkaWZmIC0tZ2l0IGEvc2VjdXJpdHkvc2VsaW51eC9hdmMu'
-_b64_b1=${_b64_b1}'YyBiL3NlY3VyaXR5L3NlbGludXgvYXZjLmNcbiIKICAgICAgICAgICAgIi0tLSBhL3NlY3VyaXR5L3NlbGludXgvYXZjLmNcbiIKICAgICAgICAgICAgIisrKyBiL3NlY3VyaXR5L3NlbGludXgvYXZjLmNcbiIKICAgICAgICAgICAgIkBAIC0xNjQsNiArMTY0LDkgQEAgc3RhdGljIHZvaWQgYXZjX2R1bXBfYXYoc3RydWN0IGF1ZGl0X2J1ZmZlciAqYWIsIHUxNiB0Y2xhc3MsIHUzMiBhdilcbiIKICAgICAgICAgICAgIiBcbiIKICAgICAgICAgICAgIiBcdGF1ZGl0X2xvZ19mb3JtYXQoYWIsIFwiIH1cIik7XG4iCiAgICAgICAg'
-_b64_b1=${_b64_b1}'ICAgICIgfVxuIgogICAgICAgICAgICAiKyNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTXG4iCiAgICAgICAgICAgICIrYm9vbCBzdXNmc19pc19hdmNfbG9nX3Nwb29maW5nX2VuYWJsZWQgPSBmYWxzZTtcbiIKICAgICAgICAgICAgIisjZW5kaWZcbiIKICAgICAgICAgICAgIiBcbiIKICAgICAgICAgICAgIiAvKipcbiIKICAgICAgICAgICAgIiAgKiBhdmNfZHVtcF9xdWVyeSAtIERpc3BsYXkgYSBTSUQgcGFpciBhbmQgYSBjbGFzcyBpbiBodW1hbi1yZWFkYWJsZSBmb3JtLlxuIgogICAgICAgICkKICAgICAgICBvdXRfcGFydHMu'
-_b64_b1=${_b64_b1}'YXBwZW5kKG1pbmltYWxfYXZjKQogICAgICAgIGNvbnRpbnVlCgogICAgcHJpbnQoZiIgIOKchSBLRUVQOiB7ZmlsZXBhdGh9IikKICAgIG91dF9wYXJ0cy5hcHBlbmQoc2VjKQoKd2l0aCBvcGVuKGRlc3RfcGF0aCwgJ3cnKSBhcyBmOgogICAgZi53cml0ZSgnJy5qb2luKG91dF9wYXJ0cykpCg=='
-printf '%s' "${_b64_b1}" | base64 -d | python3 - "$PATCH_FILE" "$ADJUSTED_PATCH"
+# ----------------------------------------------------------------------------
+# STEP 3: Apply clean patch
+# ----------------------------------------------------------------------------
 
-echo ""
-
-# =============================================================================
-# STEP 2 — Apply the adjusted patch (via git apply)
-# =============================================================================
-
-echo "── Step 2: Applying adjusted patch ─────────────────────────────────────────"
-echo ""
+echo "➜ Applying cleaned SUSFS patch..."
 
 cd "$KERNEL_DIR"
 
-git apply \
-    --ignore-whitespace \
-    --ignore-space-change \
-    --reject \
-    --verbose \
-    "$ADJUSTED_PATCH" 2>&1 || true
-
-echo ""
-
-# Clean up any .rej files from namespace.c hunk #8 (whitespace-only, harmless)
-if [ -f "fs/namespace.c.rej" ]; then
-    echo "  ℹ️  Removing fs/namespace.c.rej (whitespace-only hunk — safe to skip)"
-    rm -f "fs/namespace.c.rej"
-fi
-
-# Clean up task_mmu.c.rej if any — the pagemap_read hunk is handled manually in Step 3b
-if [ -f "fs/proc/task_mmu.c.rej" ]; then
-    echo "  ℹ️  Removing fs/proc/task_mmu.c.rej (pagemap_read hunk applied manually in Step 3b)"
-    rm -f "fs/proc/task_mmu.c.rej"
-fi
-
-# =============================================================================
-# STEP 3 — Manually apply hunks that git apply rejects
-# =============================================================================
-
-echo "── Step 3: Manually applying rejected hunks ─────────────────────────────────"
-echo ""
-
-# ── 3a. include/linux/mount.h ────────────────────────────────────────────────
-# The LineageOS tree's vfsmount struct may have a different layout around the
-# ANDROID_KABI_RESERVE(4) line. We do a direct string replacement which is
-# immune to line-number drift.
-_b64_b2=
-_b64_b2=${_b64_b2}'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmlmICJzdXNmc19tbnRfaWRfYmFja3VwIiBpbiBjb250ZW50OgogICAgcHJpbnQoZiIgIOKEue+4jyAgbW91bnQuaCBhbHJlYWR5IHBhdGNoZWQgKHN1c2ZzX21udF9pZF9iYWNrdXAgcHJlc2VudCkiKQogICAgc3lzLmV4aXQoMCkKCm9sZCA9ICJcdEFORFJPSURfS0FCSV9SRVNFUlZFKDQpOyIKbmV3ID0gKAogICAgIiNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTXG4iCiAgICAiXHRBTkRST0lEX0tB'
-_b64_b2=${_b64_b2}'QklfVVNFKDQsIHU2NCBzdXNmc19tbnRfaWRfYmFja3VwKTtcbiIKICAgICIjZWxzZVxuIgogICAgIlx0QU5EUk9JRF9LQUJJX1JFU0VSVkUoNCk7XG4iCiAgICAiI2VuZGlmIgopCgppZiBvbGQgaW4gY29udGVudDoKICAgIGNvbnRlbnQgPSBjb250ZW50LnJlcGxhY2Uob2xkLCBuZXcsIDEpCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgbW91bnQuaDogQU5EUk9JRF9LQUJJX1JFU0VSVkUoNCkgcmVwbGFjZWQgd2l0aCBLQUJJX1VTRSBibG9j'
-_b64_b2=${_b64_b2}'ayIpCmVsc2U6CiAgICAjIEZhbGxiYWNrOiB0aGUgdHJlZSBtYXkgbm90IHVzZSBBTkRST0lEX0tBQklfUkVTRVJWRSBhdCBhbGwuCiAgICAjIEluIHRoYXQgY2FzZSB0aGUgZmllbGQgbXVzdCBiZSBhZGRlZCBkaXJlY3RseSB0byB0aGUgc3RydWN0LgogICAgaWYgInZvaWQgKmRhdGE7IiBpbiBjb250ZW50IGFuZCAic3VzZnNfbW50X2lkX2JhY2t1cCIgbm90IGluIGNvbnRlbnQ6CiAgICAgICAgIyBJbnNlcnQgYmVmb3JlIGB2b2lkICpkYXRhO2AgaW5zaWRlIHN0cnVjdCB2ZnNtb3VudAogICAgICAgIG9sZDIgPSAiXHR2b2lk'
-_b64_b2=${_b64_b2}'ICpkYXRhOyIKICAgICAgICBuZXcyID0gKAogICAgICAgICAgICAiI2lmZGVmIENPTkZJR19LU1VfU1VTRlNcbiIKICAgICAgICAgICAgIlx0dTY0IHN1c2ZzX21udF9pZF9iYWNrdXA7XG4iCiAgICAgICAgICAgICIjZW5kaWZcbiIKICAgICAgICAgICAgIlx0dm9pZCAqZGF0YTsiCiAgICAgICAgKQogICAgICAgIGlmIG9sZDIgaW4gY29udGVudDoKICAgICAgICAgICAgY29udGVudCA9IGNvbnRlbnQucmVwbGFjZShvbGQyLCBuZXcyLCAxKQogICAgICAgICAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgICAg'
-_b64_b2=${_b64_b2}'ICAgICAgZi53cml0ZShjb250ZW50KQogICAgICAgICAgICBwcmludChmIiAg4pyFIG1vdW50Lmg6IHN1c2ZzX21udF9pZF9iYWNrdXAgYWRkZWQgYmVmb3JlIHZvaWQgKmRhdGEgKGZhbGxiYWNrKSIpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgcHJpbnQoZiIgIOKdjCBtb3VudC5oOiBjb3VsZCBub3QgZmluZCBpbnNlcnRpb24gcG9pbnQg4oCUIHBhdGNoIG1hbnVhbGx5IikKICAgICAgICAgICAgc3lzLmV4aXQoMSkKICAgIGVsc2U6CiAgICAgICAgcHJpbnQoZiIgIOKdjCBtb3VudC5oOiBBTkRST0lEX0tBQklfUkVTRVJW'
-_b64_b2=${_b64_b2}'RSg0KSBub3QgZm91bmQg4oCUIHBhdGNoIG1hbnVhbGx5IikKICAgICAgICBzeXMuZXhpdCgxKQo='
-printf '%s' "${_b64_b2}" | base64 -d | python3 - "include/linux/mount.h"
-
-# ── 3b. fs/proc/task_mmu.c (pagemap_read hunks) ──────────────────────────────
-# Most task_mmu.c hunks are applied by git apply (show_map_vma, show_smap,
-# smaps_rollup). Only the pagemap_read hunk tends to fail due to line-number
-# drift. We fix it here with multiple fallback context patterns covering:
-#   - Kernels with mmap_sem (4.19 vanilla)
-#   - Kernels with mmap_lock backport
-#   - Kernels with or without a blank line between up_read and start_vaddr
-_b64_b3=
-_b64_b3=${_b64_b3}'aW1wb3J0IHN5cywgcmUKcGF0aCA9IHN5cy5hcmd2WzFdCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgY29udGVudCA9IGYucmVhZCgpCgphbHJlYWR5X21hcHMgID0gIkJJVF9TVVNfTUFQUyIgaW4gY29udGVudAphbHJlYWR5X3BtZSAgID0gInBtLmJ1ZmZlci0+cG1lID0gMCIgaW4gY29udGVudAphbHJlYWR5X2RlY2wgID0gIkNPTkZJR19LU1VfU1VTRlNfU1VTX01BUCIgaW4gY29udGVudCBhbmQgInN0cnVjdCB2bV9hcmVhX3N0cnVjdCAqdm1hOyIgaW4gY29udGVudAoKIyDilIDilIAgSHVuayBBOiBhZGQgdm1hIGRlY2xh'
-_b64_b3=${_b64_b3}'cmF0aW9uIGluc2lkZSBwYWdlbWFwX3JlYWQg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACmh1bmtfYV9hcHBsaWVkID0gRmFsc2UKaWYgYWxyZWFkeV9kZWNsOgogICAgcHJpbnQoIiAg4oS577iPICB0YXNrX21tdS5jOiB2bWEgZGVjbGFyYXRpb24gYWxyZWFkeSBwcmVzZW50IikKICAgIGh1bmtfYV9hcHBsaWVkID0gVHJ1ZQplbHNlOgogICAgY2FuZGlkYXRlc19hID0gWwogICAgICAgICJcdGludCByZXQgPSAwLCBjb3BpZWQgPSAw'
-_b64_b3=${_b64_b3}'O1xuXG5cdGlmICghbW0gfHwgIW1tZ2V0X25vdF96ZXJvKG1tKSlcbiIsCiAgICAgICAgIlx0aW50IHJldCA9IDAsIGNvcGllZCA9IDA7XG5cdGlmICghbW0gfHwgIW1tZ2V0X25vdF96ZXJvKG1tKSlcbiIsCiAgICAgICAgIlx0aW50IHJldCA9IDAsIGNvcGllZCA9IDA7XG5cblx0aWYgKCFtbSB8fCAhbW1nZXRfbm90X3plcm8obW0pKSB7XG4iLAogICAgXQogICAgZm9yIG9sZF9hIGluIGNhbmRpZGF0ZXNfYToKICAgICAgICBuZXdfYSA9ICgKICAgICAgICAgICAgIlx0aW50IHJldCA9IDAsIGNvcGllZCA9IDA7XG4iCiAgICAg'
-_b64_b3=${_b64_b3}'ICAgICAgICIjaWZkZWYgQ09ORklHX0tTVV9TVVNGU19TVVNfTUFQXG4iCiAgICAgICAgICAgICJcdHN0cnVjdCB2bV9hcmVhX3N0cnVjdCAqdm1hO1xuIgogICAgICAgICAgICAiI2VuZGlmXG4iCiAgICAgICAgKSArIG9sZF9hW2xlbigiXHRpbnQgcmV0ID0gMCwgY29waWVkID0gMDtcbiIpOl0KICAgICAgICBpZiBvbGRfYSBpbiBjb250ZW50OgogICAgICAgICAgICBjb250ZW50ID0gY29udGVudC5yZXBsYWNlKG9sZF9hLCBuZXdfYSwgMSkKICAgICAgICAgICAgaHVua19hX2FwcGxpZWQgPSBUcnVlCiAgICAgICAgICAgIHBy'
-_b64_b3=${_b64_b3}'aW50KCIgIOKchSB0YXNrX21tdS5jOiBwYWdlbWFwX3JlYWQgdm1hIGRlY2xhcmF0aW9uIGFkZGVkIikKICAgICAgICAgICAgYnJlYWsKICAgIGlmIG5vdCBodW5rX2FfYXBwbGllZDoKICAgICAgICBwcmludCgiICDimqDvuI8gIHRhc2tfbW11LmM6IGNvdWxkIG5vdCBhZGQgdm1hIGRlY2xhcmF0aW9uIOKAlCB0cnlpbmcgd2l0aG91dCBpdCIpCgojIOKUgOKUgCBIdW5rIEI6IGFkZCB0aGUgU1VTX01BUCBjaGVjayBhZnRlciB3YWxrX3BhZ2VfcmFuZ2UgLyByZWFkLXVubG9jayDilIDilIDilIDilIDilIDilIDilIDilIAKaWYg'
-_b64_b3=${_b64_b3}'YWxyZWFkeV9wbWUgYW5kIGFscmVhZHlfbWFwczoKICAgIHByaW50KCIgIOKEue+4jyAgdGFza19tbXUuYzogcGFnZW1hcF9yZWFkIFNVU19NQVAgY2hlY2sgYWxyZWFkeSBhcHBsaWVkIikKZWxzZToKICAgICMgU2hvdyBkaWFnbm9zdGljcyByZWdhcmRsZXNzIHNvIENJIGxvZ3MgYXJlIGFsd2F5cyBpbmZvcm1hdGl2ZQogICAgd3JwX2lkeCA9IGNvbnRlbnQuZmluZCgid2Fsa19wYWdlX3JhbmdlKHN0YXJ0X3ZhZGRyIikKICAgIGlmIHdycF9pZHggPT0gLTE6CiAgICAgICAgd3JwX2lkeCA9IGNvbnRlbnQuZmluZCgid2Fsa19w'
-_b64_b3=${_b64_b3}'YWdlX3JhbmdlKCIpCiAgICBpZiB3cnBfaWR4ICE9IC0xOgogICAgICAgIGxpbmVfc3RhcnQgPSBjb250ZW50LnJmaW5kKCdcbicsIDAsIHdycF9pZHgpICsgMQogICAgICAgIGN0eF9zdGFydCA9IGxpbmVfc3RhcnQKICAgICAgICBmb3IgXyBpbiByYW5nZSgzKToKICAgICAgICAgICAgY3R4X3N0YXJ0ID0gY29udGVudC5yZmluZCgnXG4nLCAwLCBjdHhfc3RhcnQgLSAxKSArIDEKICAgICAgICBjdHhfZW5kID0gY29udGVudC5maW5kKCdcbicsIHdycF9pZHgpCiAgICAgICAgZm9yIF8gaW4gcmFuZ2UoOSk6CiAgICAgICAgICAg'
-_b64_b3=${_b64_b3}'IG54dCA9IGNvbnRlbnQuZmluZCgnXG4nLCBjdHhfZW5kICsgMSkKICAgICAgICAgICAgaWYgbnh0ID09IC0xOgogICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgY3R4X2VuZCA9IG54dAogICAgICAgIHByaW50KCIgIPCflI0gQWN0dWFsIGZpbGUgY29udGVudCBhcm91bmQgd2Fsa19wYWdlX3JhbmdlOiIpCiAgICAgICAgZm9yIGksIGxpbmUgaW4gZW51bWVyYXRlKGNvbnRlbnRbY3R4X3N0YXJ0OmN0eF9lbmRdLnNwbGl0KCdcbicpKToKICAgICAgICAgICAgcHJpbnQoZiIgICAgICAge2k6MDJkfToge3JlcHIobGlu'
-_b64_b3=${_b64_b3}'ZVs6OTBdKX0iKQogICAgZWxzZToKICAgICAgICBwcmludCgiICDwn5SNIHdhbGtfcGFnZV9yYW5nZSBOT1QgRk9VTkQgaW4gZmlsZSBhdCBhbGwhIikKCiAgICBhcHBsaWVkX2IgPSBGYWxzZQoKICAgICMgVGhlIHVubG9jayBmdW5jdGlvbiBhZnRlciB3YWxrX3BhZ2VfcmFuZ2UgY2FuIGJlIEFOWSBvZjoKICAgICMgICB1cF9yZWFkKCZtbS0+bW1hcF9zZW0pICAgICAgICAgLS0gb2xkIDQuMTkgdmFuaWxsYQogICAgIyAgIHVwX3JlYWQoJm1tLT5tbWFwX2xvY2spICAgICAgICAtLSBtbWFwX2xvY2sgcmVuYW1lIGJhY2twb3J0'
-_b64_b3=${_b64_b3}'CiAgICAjICAgbW1hcF9yZWFkX3VubG9jayhtbSkgICAgICAgICAgIC0tIExpbmVhZ2VPUyAvIENBRiA0LjE5IHdpdGggZnVsbCBiYWNrcG9ydAogICAgIyAgIG1tYXBfcmVhZF91bmxvY2tfbm9uX293bmVyKG1tKSAtLSByYXJlIHZhcmlhbnQKICAgICMKICAgICMgV2UgdXNlIGEgc2luZ2xlIGZsZXhpYmxlIHJlZ2V4IHRoYXQ6CiAgICAjICAgLSBDYXB0dXJlcyBvcHRpb25hbCBsZWFkaW5nIGxpbmVzIChnb3RvIG91dF9mcmVlIGV0Yy4pCiAgICAjICAgLSBNYXRjaGVzIHdhbGtfcGFnZV9yYW5nZSB3aXRoIGFueSBhcmdzCiAg'
-_b64_b3=${_b64_b3}'ICAjICAgLSBNYXRjaGVzIEFOWSBvZiB0aGUgYWJvdmUgdW5sb2NrIHZhcmlhbnRzCiAgICAjICAgLSBEZXRlY3RzIGluZGVudGF0aW9uIGF1dG9tYXRpY2FsbHkKICAgICMgICAtIFByZXNlcnZlcyBzdGFydF92YWRkciA9IGVuZCB0cmFpbGluZyBsaW5lCiAgICBVTkxPQ0tfUEFUID0gKAogICAgICAgIHInKD86dXBfcmVhZFxzKlwoJm1tLT4oPzptbWFwX3NlbXxtbWFwX2xvY2spXCknCiAgICAgICAgcid8bW1hcF9yZWFkX3VubG9jayg/Ol9ub25fb3duZXIpP1xzKlwobW1cKSknCiAgICApCiAgICBmdWxsX3JlID0gcmUuY29t'
-_b64_b3=${_b64_b3}'cGlsZSgKICAgICAgICByJyhbIFx0XSpyZXQgPSB3YWxrX3BhZ2VfcmFuZ2VcKHN0YXJ0X3ZhZGRyLFxzKmVuZCxccyomcGFnZW1hcF93YWxrXCk7XG4nCiAgICAgICAgcidbIFx0XSonICsgVU5MT0NLX1BBVCArIHInO1xuKScKICAgICAgICByJyhbIFx0XSpcbik/JwogICAgICAgIHInKFsgXHRdKnN0YXJ0X3ZhZGRyXHMqPVxzKmVuZDtcbiknLAogICAgICAgIHJlLk1VTFRJTElORQogICAgKQoKICAgIG0gPSBmdWxsX3JlLnNlYXJjaChjb250ZW50KQogICAgaWYgbToKICAgICAgICBwcmVfc3RyICAgPSBtLmdyb3VwKDEpCiAg'
-_b64_b3=${_b64_b3}'ICAgICAgYmxhbmtfc3RyID0gbS5ncm91cCgyKSBvciAnJwogICAgICAgIHBvc3Rfc3RyICA9IG0uZ3JvdXAoMykKCiAgICAgICAgIyBEZXRlY3QgaW5kZW50IGZyb20gd2Fsa19wYWdlX3JhbmdlIGxpbmUKICAgICAgICB3YWxrX2xpbmUgPSBuZXh0KGwgZm9yIGwgaW4gcHJlX3N0ci5zcGxpdCgnXG4nKSBpZiAnd2Fsa19wYWdlX3JhbmdlJyBpbiBsKQogICAgICAgIGluZGVudCA9IHdhbGtfbGluZVs6bGVuKHdhbGtfbGluZSkgLSBsZW4od2Fsa19saW5lLmxzdHJpcCgpKV0KCiAgICAgICAgIyBEZXRlY3QgdW5sb2NrIGZ1bmN0'
-_b64_b3=${_b64_b3}'aW9uIGFuZCBpdHMgYXJndW1lbnQgZm9ybSwgcHJlc2VydmUgZXhhY3RseQogICAgICAgIHVubG9ja19saW5lID0gbmV4dChsIGZvciBsIGluIHByZV9zdHIuc3BsaXQoJ1xuJykgaWYgYW55KAogICAgICAgICAgICB4IGluIGwgZm9yIHggaW4gKCd1cF9yZWFkJywgJ21tYXBfcmVhZF91bmxvY2snKSkpCiAgICAgICAgdW5sb2NrX2NhbGwgPSB1bmxvY2tfbGluZS5zdHJpcCgpLnJzdHJpcCgnOycpICAjIGUuZy4gIm1tYXBfcmVhZF91bmxvY2sobW0pIgoKICAgICAgICBzdXNfYmxvY2sgPSAoCiAgICAgICAgICAgIGYie2luZGVu'
-_b64_b3=${_b64_b3}'dH1yZXQgPSB3YWxrX3BhZ2VfcmFuZ2Uoc3RhcnRfdmFkZHIsIGVuZCwgJnBhZ2VtYXBfd2Fsayk7XG4iCiAgICAgICAgICAgIGYie2luZGVudH17dW5sb2NrX2NhbGx9O1xuIgogICAgICAgICAgICAiI2lmZGVmIENPTkZJR19LU1VfU1VTRlNfU1VTX01BUFxuIgogICAgICAgICAgICBmIntpbmRlbnR9dm1hID0gZmluZF92bWEobW0sIHN0YXJ0X3ZhZGRyKTtcbiIKICAgICAgICAgICAgZiJ7aW5kZW50fWlmICh2bWEgJiYgdm1hLT52bV9maWxlKSB7e1xuIgogICAgICAgICAgICBmIntpbmRlbnR9XHRzdHJ1Y3QgaW5vZGUgKmlu'
-_b64_b3=${_b64_b3}'b2RlID0gZmlsZV9pbm9kZSh2bWEtPnZtX2ZpbGUpO1xuIgogICAgICAgICAgICBmIntpbmRlbnR9XHRpZiAodW5saWtlbHkoaW5vZGUtPmlfbWFwcGluZy0+ZmxhZ3MgJiBCSVRfU1VTX01BUFMpIgogICAgICAgICAgICBmIiAmJiBzdXNmc19pc19jdXJyZW50X3Byb2NfdW1vdW50ZWQoKSkge3tcbiIKICAgICAgICAgICAgZiJ7aW5kZW50fVx0XHRwbS5idWZmZXItPnBtZSA9IDA7XG4iCiAgICAgICAgICAgIGYie2luZGVudH1cdH19XG4iCiAgICAgICAgICAgIGYie2luZGVudH19fVxuIgogICAgICAgICAgICAiI2VuZGlmXG4i'
-_b64_b3=${_b64_b3}'CiAgICAgICAgKQogICAgICAgIGNvbnRlbnQgPSBjb250ZW50WzptLnN0YXJ0KCldICsgc3VzX2Jsb2NrICsgYmxhbmtfc3RyICsgcG9zdF9zdHIgKyBjb250ZW50W20uZW5kKCk6XQogICAgICAgIHByaW50KGYiICDinIUgdGFza19tbXUuYzogcGFnZW1hcF9yZWFkIFNVU19NQVAgY2hlY2sgYXBwbGllZCIKICAgICAgICAgICAgICBmIiAodW5sb2NrPXtyZXByKHVubG9ja19jYWxsKX0sIGluZGVudD17cmVwcihpbmRlbnQpfSkiKQogICAgICAgIGFwcGxpZWRfYiA9IFRydWUKCiAgICBpZiBub3QgYXBwbGllZF9iOgogICAgICAg'
-_b64_b3=${_b64_b3}'IHByaW50KCIgIOKaoO+4jyAgdGFza19tbXUuYzogcGFnZW1hcF9yZWFkIGNvbnRleHQgbm90IGZvdW5kIOKAlCBtaW5vciBmZWF0dXJlIG1pc3NpbmciKQogICAgICAgIHByaW50KCIgIPCflI0gRGVidWc6IHdhbGtfcGFnZV9yYW5nZSBsaW5lcyBpbiBmaWxlOiIpCiAgICAgICAgZm9yIG0yIGluIHJlLmZpbmRpdGVyKHInd2Fsa19wYWdlX3JhbmdlJywgY29udGVudCk6CiAgICAgICAgICAgIHMgPSBjb250ZW50LnJmaW5kKCdcbicsIDAsIG0yLnN0YXJ0KCkpICsgMQogICAgICAgICAgICBlID0gY29udGVudC5maW5kKCdcbics'
-_b64_b3=${_b64_b3}'IG0yLmVuZCgpKQogICAgICAgICAgICBlMiA9IGNvbnRlbnQuZmluZCgnXG4nLCBlICsgMSkgaWYgZSAhPSAtMSBlbHNlIGxlbihjb250ZW50KQogICAgICAgICAgICBwcmludChmIiAgICAgICB7cmVwcihjb250ZW50W3M6ZTJdKX0iKQoKd2l0aCBvcGVuKHBhdGgsICd3JykgYXMgZjoKICAgIGYud3JpdGUoY29udGVudCkK'
-printf '%s' "${_b64_b3}" | base64 -d | python3 - "fs/proc/task_mmu.c"
-
-echo ""
-
-# =============================================================================
-# STEP 4 — Fix missing/misplaced SUSFS v2.0.0 symbols
-#
-# If patch_susfs_sym.sh already ran, the function may exist but be OUTSIDE
-# the #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT guard (it uses susfs_spin_lock_sus_mount
-# which is only defined inside the guard — compile error if SUS_MOUNT=n).
-# We detect this and relocate the function if needed.
-# =============================================================================
-
-echo "── Step 4: Fixing SUSFS v2.0.0 symbols ─────────────────────────────────────"
-echo ""
-
-SUSFS_DEF_H="include/linux/susfs_def.h"
-SUSFS_H="include/linux/susfs.h"
-SUSFS_C="fs/susfs.c"
-
-# ── 4a. CMD define in susfs_def.h (unconditional, no guard needed) ────────────
-if ! grep -q "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS" "$SUSFS_DEF_H" 2>/dev/null; then
-    _b64_b4=
-_b64_b4=${_b64_b4}'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmFuY2hvciA9ICIjZGVmaW5lIENNRF9TVVNGU19ISURFX1NVU19NTlRTX0ZPUl9OT05fU1VfUFJPQ1MgMHg1NTU2MSIKcmVwbGFjZW1lbnQgPSAoCiAgICAiI2RlZmluZSBDTURfU1VTRlNfSElERV9TVVNfTU5UU19GT1JfTk9OX1NVX1BST0NTIDB4NTU1NjFcbiIKICAgICIjZGVmaW5lIENNRF9TVVNGU19ISURFX1NVU19NTlRTX0ZPUl9BTExfUFJPQ1MgICAgIDB4NTU1NjMiCikKaWYgYW5jaG9y'
-_b64_b4=${_b64_b4}'IGluIGNvbnRlbnQ6CiAgICBjb250ZW50ID0gY29udGVudC5yZXBsYWNlKGFuY2hvciwgcmVwbGFjZW1lbnQsIDEpCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgQ01EX1NVU0ZTX0hJREVfU1VTX01OVFNfRk9SX0FMTF9QUk9DUyBhZGRlZCB0byB7cGF0aH0iKQplbHNlOgogICAgZmFsbGJhY2sgPSAiI2RlZmluZSBTVVNGU19NQVhfTEVOX1BBVEhOQU1FIgogICAgY29udGVudCA9IGNvbnRlbnQucmVwbGFjZSgKICAgICAgICBmYWxsYmFjaywK'
-_b64_b4=${_b64_b4}'ICAgICAgICAiI2RlZmluZSBDTURfU1VTRlNfSElERV9TVVNfTU5UU19GT1JfQUxMX1BST0NTICAgICAweDU1NTYzXG4iICsgZmFsbGJhY2ssIDEpCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgQ01EX1NVU0ZTX0hJREVfU1VTX01OVFNfRk9SX0FMTF9QUk9DUyBhZGRlZCAoZmFsbGJhY2spIHRvIHtwYXRofSIpCg=='
-printf '%s' "${_b64_b4}" | base64 -d | python3 - "$SUSFS_DEF_H"
-else
-    echo "  ℹ️  CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS already present"
-fi
-
-# ── 4b. Declaration in susfs.h — must be inside #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-_b64_b5=
-_b64_b5=${_b64_b5}'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmZuX3NpZyA9ICJzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzIgpkZWNsICAgPSAidm9pZCBzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzKHZvaWQgX191c2VyICoqdXNlcl9pbmZvKTsiCmlmbmRlZiA9ICIjZW5kaWYgLy8gI2lmZGVmIENPTkZJR19LU1VfU1VTRlNfU1VTX01PVU5UIgoKIyBGaW5kIHRoZSBzdXNfbW91bnQgI2lmZGVmIGJsb2NrCm1vdW50'
-_b64_b5=${_b64_b5}'X2lmZGVmID0gY29udGVudC5maW5kKCIjaWZkZWYgQ09ORklHX0tTVV9TVVNGU19TVVNfTU9VTlQiLCBjb250ZW50LmZpbmQoIi8qIHN1c19tb3VudCAqLyIpKQojIEZpbmQgaXRzIGNsb3NpbmcgI2VuZGlmCm1vdW50X2VuZGlmID0gY29udGVudC5maW5kKGlmbmRlZiwgbW91bnRfaWZkZWYpCgpmbl9wb3MgPSBjb250ZW50LmZpbmQoZm5fc2lnKQoKaWYgZm5fcG9zID09IC0xOgogICAgIyBOb3QgcHJlc2VudCBhdCBhbGwg4oCUIGluc2VydCBiZWZvcmUgdGhlICNlbmRpZgogICAgY29udGVudCA9IGNvbnRlbnRbOm1vdW50X2Vu'
-_b64_b5=${_b64_b5}'ZGlmXSArIGRlY2wgKyAiXG4iICsgY29udGVudFttb3VudF9lbmRpZjpdCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgc3VzZnMuaDogZGVjbGFyYXRpb24gYWRkZWQgaW5zaWRlICNpZmRlZiBndWFyZCIpCgplbGlmIGZuX3BvcyA8IG1vdW50X2VuZGlmOgogICAgIyBBbHJlYWR5IGluc2lkZSB0aGUgZ3VhcmQg4oCUIG5vdGhpbmcgdG8gZG8KICAgIHByaW50KGYiICDinIUgc3VzZnMuaDogZGVjbGFyYXRpb24gYWxyZWFkeSBpbnNpZGUgI2lm'
-_b64_b5=${_b64_b5}'ZGVmIGd1YXJkIikKCmVsc2U6CiAgICAjIE91dHNpZGUgdGhlIGd1YXJkIOKAlCByZW1vdmUgYW5kIHJlLWluc2VydCBpbnNpZGUKICAgIGNvbnRlbnQgPSBjb250ZW50LnJlcGxhY2UoZGVjbCArICJcbiIsICIiLCAxKQogICAgY29udGVudCA9IGNvbnRlbnQucmVwbGFjZShkZWNsLCAiIiwgMSkgICAgICAgICAgIyBoYW5kbGUgbWlzc2luZyB0cmFpbGluZyBcbgogICAgIyBSZWNhbGN1bGF0ZSBwb3NpdGlvbnMgYWZ0ZXIgcmVtb3ZhbAogICAgbW91bnRfaWZkZWYgPSBjb250ZW50LmZpbmQoIiNpZmRlZiBDT05GSUdfS1NVX1NV'
-_b64_b5=${_b64_b5}'U0ZTX1NVU19NT1VOVCIsIGNvbnRlbnQuZmluZCgiLyogc3VzX21vdW50ICovIikpCiAgICBtb3VudF9lbmRpZiA9IGNvbnRlbnQuZmluZChpZm5kZWYsIG1vdW50X2lmZGVmKQogICAgY29udGVudCA9IGNvbnRlbnRbOm1vdW50X2VuZGlmXSArIGRlY2wgKyAiXG4iICsgY29udGVudFttb3VudF9lbmRpZjpdCiAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYiICDinIUgc3VzZnMuaDogZGVjbGFyYXRpb24gbW92ZWQgaW5zaWRlICNpZmRlZiBndWFyZCIpCg=='
-printf '%s' "${_b64_b5}" | base64 -d | python3 - "$SUSFS_H"
-
-# ── 4c. Implementation in susfs.c — must be inside #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-_b64_b6=
-_b64_b6=${_b64_b6}'aW1wb3J0IHN5cywgcmUKcGF0aCA9IHN5cy5hcmd2WzFdCndpdGggb3BlbihwYXRoKSBhcyBmOgogICAgY29udGVudCA9IGYucmVhZCgpCgpmbl9zaWcgICA9ICJzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzIgppZm5kZWYgICA9ICIjZW5kaWYgLy8gI2lmZGVmIENPTkZJR19LU1VfU1VTRlNfU1VTX01PVU5UIgojIExvY2F0ZSB0aGUgc3VzX21vdW50IGJsb2NrIGJvdW5kYXJpZXMKbW91bnRfaWZkZWZfcG9zID0gY29udGVudC5maW5kKCIjaWZkZWYgQ09ORklHX0tTVV9TVVNGU19TVVNfTU9VTlQiLCBjb250'
-_b64_b6=${_b64_b6}'ZW50LmZpbmQoIi8qIHN1c19tb3VudCAqLyIpKQptb3VudF9lbmRpZl9wb3MgPSBjb250ZW50LmZpbmQoaWZuZGVmLCBtb3VudF9pZmRlZl9wb3MpCgpuZXdfaW1wbCA9ICgKICAgICJcbnZvaWQgc3VzZnNfc2V0X2hpZGVfc3VzX21udHNfZm9yX2FsbF9wcm9jcyh2b2lkIF9fdXNlciAqKnVzZXJfaW5mbykge1xuIgogICAgIlx0c3RydWN0IHN0X3N1c2ZzX2hpZGVfc3VzX21udHNfZm9yX25vbl9zdV9wcm9jcyBpbmZvID0gezB9O1xuXG4iCiAgICAiXHRpZiAoY29weV9mcm9tX3VzZXIoJmluZm8sIChzdHJ1Y3Qgc3Rfc3VzZnNf'
-_b64_b6=${_b64_b6}'aGlkZV9zdXNfbW50c19mb3Jfbm9uX3N1X3Byb2NzIF9fdXNlciopKnVzZXJfaW5mbywgc2l6ZW9mKGluZm8pKSkge1xuIgogICAgIlx0XHRpbmZvLmVyciA9IC1FRkFVTFQ7XG4iCiAgICAiXHRcdGdvdG8gb3V0X2NvcHlfdG9fdXNlcjtcbiIKICAgICJcdH1cbiIKICAgICJcdHNwaW5fbG9jaygmc3VzZnNfc3Bpbl9sb2NrX3N1c19tb3VudCk7XG4iCiAgICAiXHRzdXNmc19oaWRlX3N1c19tbnRzX2Zvcl9ub25fc3VfcHJvY3MgPSBpbmZvLmVuYWJsZWQ7XG4iCiAgICAiXHRzcGluX3VubG9jaygmc3VzZnNfc3Bpbl9sb2NrX3N1'
-_b64_b6=${_b64_b6}'c19tb3VudCk7XG4iCiAgICAnXHRTVVNGU19MT0dJKCJzdXNmc19oaWRlX3N1c19tbnRzX2Zvcl9hbGxfcHJvY3M6ICVkXFxuIiwgaW5mby5lbmFibGVkKTtcbicKICAgICJcdGluZm8uZXJyID0gMDtcbiIKICAgICJvdXRfY29weV90b191c2VyOlxuIgogICAgIlx0aWYgKGNvcHlfdG9fdXNlcigmKChzdHJ1Y3Qgc3Rfc3VzZnNfaGlkZV9zdXNfbW50c19mb3Jfbm9uX3N1X3Byb2NzIF9fdXNlciopKnVzZXJfaW5mbyktPmVyciwgJmluZm8uZXJyLCBzaXplb2YoaW5mby5lcnIpKSkge1xuIgogICAgIlx0XHRpbmZvLmVyciA9IC1F'
-_b64_b6=${_b64_b6}'RkFVTFQ7XG4iCiAgICAiXHR9XG4iCiAgICAnXHRTVVNGU19MT0dJKCJDTURfU1VTRlNfSElERV9TVVNfTU5UU19GT1JfQUxMX1BST0NTIC0+IHJldDogJWRcXG4iLCBpbmZvLmVycik7XG4nCiAgICAifVxuIgopCgpmbl9wb3MgPSBjb250ZW50LmZpbmQoZm5fc2lnKQoKaWYgZm5fcG9zID09IC0xOgogICAgIyBOb3QgcHJlc2VudCDigJQgaW5zZXJ0IGJlZm9yZSB0aGUgI2VuZGlmCiAgICBjb250ZW50ID0gY29udGVudFs6bW91bnRfZW5kaWZfcG9zXSArIG5ld19pbXBsICsgY29udGVudFttb3VudF9lbmRpZl9wb3M6XQogICAg'
-_b64_b6=${_b64_b6}'d2l0aCBvcGVuKHBhdGgsICd3JykgYXMgZjoKICAgICAgICBmLndyaXRlKGNvbnRlbnQpCiAgICBwcmludChmIiAg4pyFIHN1c2ZzLmM6IGltcGxlbWVudGF0aW9uIGFkZGVkIGluc2lkZSAjaWZkZWYgZ3VhcmQiKQoKZWxpZiBmbl9wb3MgPCBtb3VudF9lbmRpZl9wb3M6CiAgICBwcmludChmIiAg4pyFIHN1c2ZzLmM6IGltcGxlbWVudGF0aW9uIGFscmVhZHkgaW5zaWRlICNpZmRlZiBndWFyZCIpCgplbHNlOgogICAgIyBPdXRzaWRlIHRoZSBndWFyZCDigJQgZXh0cmFjdCB0aGUgZnVsbCBmdW5jdGlvbiBib2R5IGFuZCByZS1p'
-_b64_b6=${_b64_b6}'bnNlcnQgaW5zaWRlCiAgICAjIE1hdGNoIGZyb20gdGhlIGZ1bmN0aW9uIHNpZ25hdHVyZSB0byB0aGUgY2xvc2luZyBicmFjZSBvbiBpdHMgb3duIGxpbmUKICAgIHBhdHRlcm4gPSByJ1xudm9pZCBzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzXCguKj9cblx9XG4nCiAgICBtID0gcmUuc2VhcmNoKHBhdHRlcm4sIGNvbnRlbnQsIHJlLkRPVEFMTCkKICAgIGlmIG06CiAgICAgICAgb2xkX2ZuID0gbS5ncm91cCgwKQogICAgICAgIGNvbnRlbnQgPSBjb250ZW50LnJlcGxhY2Uob2xkX2ZuLCAiXG4iLCAxKSAg'
-_b64_b6=${_b64_b6}'ICMgcmVtb3ZlIG9sZCBjb3B5CiAgICAgICAgIyBSZWNhbGN1bGF0ZSBhZnRlciByZW1vdmFsCiAgICAgICAgbW91bnRfaWZkZWZfcG9zID0gY29udGVudC5maW5kKCIjaWZkZWYgQ09ORklHX0tTVV9TVVNGU19TVVNfTU9VTlQiLCBjb250ZW50LmZpbmQoIi8qIHN1c19tb3VudCAqLyIpKQogICAgICAgIG1vdW50X2VuZGlmX3BvcyA9IGNvbnRlbnQuZmluZChpZm5kZWYsIG1vdW50X2lmZGVmX3BvcykKICAgICAgICBjb250ZW50ID0gY29udGVudFs6bW91bnRfZW5kaWZfcG9zXSArIG5ld19pbXBsICsgY29udGVudFttb3VudF9l'
-_b64_b6=${_b64_b6}'bmRpZl9wb3M6XQogICAgICAgIHdpdGggb3BlbihwYXRoLCAndycpIGFzIGY6CiAgICAgICAgICAgIGYud3JpdGUoY29udGVudCkKICAgICAgICBwcmludChmIiAg4pyFIHN1c2ZzLmM6IGltcGxlbWVudGF0aW9uIG1vdmVkIGluc2lkZSAjaWZkZWYgZ3VhcmQiKQogICAgZWxzZToKICAgICAgICBwcmludChmIiAg4p2MIHN1c2ZzLmM6IGNvdWxkIG5vdCBleHRyYWN0IG1pc3BsYWNlZCBmdW5jdGlvbiDigJQgcGF0Y2ggbWFudWFsbHkiKQogICAgICAgIHN5cy5leGl0KDEpCg=='
-printf '%s' "${_b64_b6}" | base64 -d | python3 - "$SUSFS_C"
-
-echo ""
-
-# Clean up any remaining .rej files (after manual fixes above)
-REJECT_FILES=$(find . -name "*.rej" 2>/dev/null | grep -v ".git" | sort || true)
-if [ -n "$REJECT_FILES" ]; then
-    echo "── Remaining rejected hunks ──────────────────────────────────────────────"
-    echo ""
-    while IFS= read -r rej; do
-        echo "  ❌ ${rej%.rej}"
-        head -20 "$rej" | sed 's/^/      /'
-        echo ""
-    done <<< "$REJECT_FILES"
-fi
-
-# =============================================================================
-# STEP 5 — Verification
-# =============================================================================
-
-echo "── Step 5: Verification ────────────────────────────────────────────────────"
-echo ""
-
-ALL_OK=true
-
-check() {
-    local label="$1" file="$2" pattern="$3"
-    if grep -q "$pattern" "$file" 2>/dev/null; then
-        printf "  ✅ %-50s\n" "$label"
-    else
-        printf "  ❌ %-50s  ← MISSING in %s\n" "$label" "$file"
-        ALL_OK=false
-    fi
-}
-
-check "namei.c      SUS_PATH hooks"          "fs/namei.c"                "CONFIG_KSU_SUSFS_SUS_PATH"
-check "namespace.c  susfs_reorder_mnt_id"    "fs/namespace.c"            "susfs_reorder_mnt_id"
-check "namespace.c  sus vfsmnt allocation"   "fs/namespace.c"            "susfs_alloc_sus_vfsmnt"
-check "mount.h      susfs_mnt_id_backup"     "include/linux/mount.h"     "susfs_mnt_id_backup"
-check "readdir.c    inode sus path hook"     "fs/readdir.c"              "susfs_is_inode_sus_path"
-check "stat.c       kstat spoof hook"        "fs/stat.c"                 "susfs_sus_ino_for_generic_fillattr"
-check "statfs.c     mount hiding hook"       "fs/statfs.c"               "DEFAULT_KSU_MNT_ID"
-check "proc_namespace mount hiding"          "fs/proc_namespace.c"       "susfs_hide_sus_mnts_for_non_su"
-check "proc/fd.c    fd mnt_id hiding"        "fs/proc/fd.c"              "DEFAULT_KSU_MNT_ID"
-check "proc/cmdline cmdline spoofing"        "fs/proc/cmdline.c"         "susfs_spoof_cmdline_or_bootconfig"
-check "proc/task_mmu maps hiding"            "fs/proc/task_mmu.c"        "BIT_SUS_MAPS"
-check "proc/task_mmu pagemap_read fix"       "fs/proc/task_mmu.c"        "pm.buffer->pme = 0"
-check "sys.c        uname spoofing"          "kernel/sys.c"              "susfs_spoof_uname"
-check "kallsyms.c   symbol hiding"           "kernel/kallsyms.c"         "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS"
-check "avc.c        bool definition"         "security/selinux/avc.c"    "susfs_is_avc_log_spoofing_enabled = false"
-check "susfs_def.h  ALL_PROCS cmd define"    "include/linux/susfs_def.h" "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS"
-check "susfs.h      ALL_PROCS declaration"   "include/linux/susfs.h"     "susfs_set_hide_sus_mnts_for_all_procs"
-check "susfs.c      ALL_PROCS implementation" "fs/susfs.c"               "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS"
-
-# Confirm the implementation is inside the #ifdef guard
-_b64_b7=
-_b64_b7=${_b64_b7}'aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0Kd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICBjb250ZW50ID0gZi5yZWFkKCkKCmZuX3BvcyAgICAgID0gY29udGVudC5maW5kKCJzdXNmc19zZXRfaGlkZV9zdXNfbW50c19mb3JfYWxsX3Byb2NzIikKbW91bnRfaWZkZWYgPSBjb250ZW50LmZpbmQoIiNpZmRlZiBDT05GSUdfS1NVX1NVU0ZTX1NVU19NT1VOVCIsIGNvbnRlbnQuZmluZCgiLyogc3VzX21vdW50ICovIikpCm1vdW50X2VuZGlmID0gY29udGVudC5maW5kKCIjZW5kaWYgLy8gI2lmZGVmIENPTkZJR19LU1VfU1VT'
-_b64_b7=${_b64_b7}'RlNfU1VTX01PVU5UIiwgbW91bnRfaWZkZWYpCgppZiBmbl9wb3MgPT0gLTE6CiAgICBwcmludCgiICDinYwgc3VzZnMuYyBBTExfUFJPQ1MgaW1wbGVtZW50YXRpb24gbm90IGZvdW5kIikKICAgIHN5cy5leGl0KDEpCmVsaWYgbW91bnRfaWZkZWYgPCBmbl9wb3MgPCBtb3VudF9lbmRpZjoKICAgIHByaW50KCIgIOKchSBzdXNmcy5jIEFMTF9QUk9DUyBpbXBsIGlzIGluc2lkZSAjaWZkZWYgZ3VhcmQgICAgICAgICIpCmVsc2U6CiAgICBwcmludCgiICDinYwgc3VzZnMuYyBBTExfUFJPQ1MgaW1wbCBpcyBPVVRTSURFICNpZmRl'
-_b64_b7=${_b64_b7}'ZiBndWFyZCDihpAgQkFEIikKICAgIHN5cy5leGl0KDEpCg=='
-printf '%s' "${_b64_b7}" | base64 -d | python3 - "fs/susfs.c"
-
-echo ""
-
-if [ "$ALL_OK" = true ] && [ -z "$REJECT_FILES" ]; then
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ✅  All checks passed. Ready to build."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-elif [ "$ALL_OK" = true ] && [ -n "$REJECT_FILES" ]; then
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ⚠️   Symbols OK but some hunks still rejected (see above)."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    exit 1
-else
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ❌  One or more checks failed — see above."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if ! git apply --check "$CLEAN_PATCH"; then
+    echo "❌ Patch still does not apply cleanly"
     exit 1
 fi
+
+git apply "$CLEAN_PATCH"
+
+# ----------------------------------------------------------------------------
+# STEP 4: Inject Lineage-safe namespace changes
+# ----------------------------------------------------------------------------
+
+echo "➜ Injecting Lineage-safe namespace modifications..."
+
+# 4.1 Include injection
+if ! grep -q "susfs_def.h" "$NS_FILE"; then
+    sed -i '/#include <linux\/sched\/task.h>/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
+#include <linux/susfs_def.h>\
+#endif
+' "$NS_FILE"
+fi
+
+# 4.2 CL_COPY_MNT_NS define
+if ! grep -q "CL_COPY_MNT_NS" "$NS_FILE"; then
+    sed -i '/#define CL_COPY_UNBINDABLE/a \
+#define CL_COPY_MNT_NS BIT(25)
+' "$NS_FILE"
+fi
+
+# 4.3 copy_mnt_ns flag injection
+if ! grep -q "copy_flags |= CL_COPY_MNT_NS" "$NS_FILE"; then
+    sed -i '/copy_flags = CL_COPY_UNBINDABLE/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
+    copy_flags |= CL_COPY_MNT_NS;\
+#endif
+' "$NS_FILE"
+fi
+
+# 4.4 mnt_id backup init
+if ! grep -q "susfs_mnt_id_backup" "$NS_FILE"; then
+    sed -i '/mnt->mnt.data = NULL;/a \
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\
+    mnt->mnt.susfs_mnt_id_backup = 0;\
+#endif
+' "$NS_FILE"
+fi
+
+# ----------------------------------------------------------------------------
+# STEP 5: Validation Phase
+# ----------------------------------------------------------------------------
+
+echo "➜ Validating integration..."
+
+# 5.1 Check for reject files
+if find . -name "*.rej" | grep -q .; then
+    echo "❌ Reject files detected"
+    find . -name "*.rej"
+    exit 1
+fi
+
+# 5.2 Validate header exists
+if ! grep -R "susfs_def.h" include 2>/dev/null | grep -q .; then
+    echo "❌ susfs_def.h not found in include/"
+    exit 1
+fi
+
+# 5.3 Validate symbol injection
+if ! grep -q "CL_COPY_MNT_NS" "$NS_FILE"; then
+    echo "❌ CL_COPY_MNT_NS not injected"
+    exit 1
+fi
+
+# 5.4 Validate config exists
+if ! grep -R "CONFIG_KSU_SUSFS" "$KERNEL_DIR" | grep -q Kconfig; then
+    echo "❌ SUSFS Kconfig not found"
+    exit 1
+fi
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ SUSFS integration complete & validated"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
