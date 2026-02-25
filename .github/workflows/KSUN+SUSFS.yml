@@ -98,7 +98,8 @@ jobs:
          # Apply patch (allow failure so we can collect rejects)
          ls -la $GITHUB_WORKSPACE/patches
          patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
-         patch -p1 < $GITHUB_WORKSPACE/patches/fix_susfs.patch || true
+         #patch -p1 < $GITHUB_WORKSPACE/patches/fix_susfs.patch || true
+         bash $GITHUB_WORKSPACE/patches/fic.sh
 
          # Collect reject files and their originals
          mkdir -p "$GITHUB_WORKSPACE/susfs_debug"
