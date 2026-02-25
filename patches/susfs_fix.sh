@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# apply_susfs_patch.sh  (v4 — handles all known rejection cases)
+# apply_susfs_patch.sh  (v5 — CRLF-safe, goto out_free context patterns)
 #
 # Adjusts susfs_patch_to_4_19.patch for the rsuntk/KernelSU workflow and
 # applies it to the kernel source tree.
@@ -23,6 +23,17 @@
 # =============================================================================
 
 set -euo pipefail
+
+# Strip Windows CRLF line-endings that GitHub Actions may inject when
+# git.autocrlf=true -- a bare "PYEOF\r" will NOT match the "PYEOF" heredoc
+# terminator, causing bash to feed a truncated heredoc to Python.
+# We re-exec through sed only once (SUSFS_CRLF_FIXED prevents recursion).
+if [ -z "${SUSFS_CRLF_FIXED:-}" ]; then
+    CLEANED="$(mktemp /tmp/susfs_fix_XXXXXX.sh)"
+    sed 's/\r//' "$0" > "$CLEANED"
+    chmod +x "$CLEANED"
+    SUSFS_CRLF_FIXED=1 exec bash "$CLEANED" "$@"
+fi
 
 KERNEL_DIR="${1:-}"
 PATCH_FILE="${2:-}"
@@ -293,21 +304,46 @@ if already_pme and already_maps:
 else:
     # Multiple candidate patterns — some kernels have a blank line between
     # up_read and start_vaddr = end; some don't.
+    # The rejected hunk context from the CI log shows "goto out_free;" appears
+    # as the line BEFORE walk_page_range in the actual kernel source.
+    # We must include it in some patterns; other patterns start from walk_page_range.
     candidates_b = [
-        # With no blank line (most common 4.19 layout)
+        # With goto out_free; + no blank line (matches CI log exactly)
+        (
+            "\t\t\tgoto out_free;\n"
+            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
+            "\t\tup_read(&mm->mmap_sem);\n"
+            "\t\tstart_vaddr = end;\n"
+        ),
+        # With goto out_free; + blank line between up_read and start_vaddr
+        (
+            "\t\t\tgoto out_free;\n"
+            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
+            "\t\tup_read(&mm->mmap_sem);\n"
+            "\n"
+            "\t\tstart_vaddr = end;\n"
+        ),
+        # With goto out_free; + mmap_lock backport
+        (
+            "\t\t\tgoto out_free;\n"
+            "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
+            "\t\tup_read(&mm->mmap_lock);\n"
+            "\t\tstart_vaddr = end;\n"
+        ),
+        # Without goto out_free; + no blank line (most common 4.19 layout)
         (
             "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
             "\t\tup_read(&mm->mmap_sem);\n"
             "\t\tstart_vaddr = end;\n"
         ),
-        # With blank line
+        # Without goto out_free; + blank line
         (
             "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
             "\t\tup_read(&mm->mmap_sem);\n"
             "\n"
             "\t\tstart_vaddr = end;\n"
         ),
-        # With mmap_lock (newer 4.19 trees backport mmap_lock naming)
+        # Without goto out_free; + mmap_lock backport
         (
             "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
             "\t\tup_read(&mm->mmap_lock);\n"
@@ -323,10 +359,16 @@ else:
 
     # The replacement inserts the SUS_MAP block between up_read and start_vaddr
     def make_replacement_b(old_b, lock_name):
-        """Build new content preserving the trailing start_vaddr line."""
+        """Build new content preserving the trailing start_vaddr line,
+        and the leading goto out_free; line if it was part of the context."""
+        # Preserve leading "goto out_free;" if present in the matched context
+        leading = ""
+        if old_b.startswith("\t\t\tgoto out_free;\n"):
+            leading = "\t\t\tgoto out_free;\n"
         # Determine where 'start_vaddr = end' begins within old_b
         trailing = old_b[old_b.rfind("\t\tstart_vaddr"):]
         return (
+            leading +
             "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
             f"\t\tup_read(&mm->{lock_name});\n"
             "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
@@ -351,9 +393,11 @@ else:
             break
 
     if not applied_b:
-        # Last-resort: use regex to find walk_page_range in pagemap_read context
+        # Last-resort: use regex to find walk_page_range in pagemap_read context.
+        # Also captures an optional leading "goto out_free;" line.
         m = re.search(
-            r'(\t\tret = walk_page_range\(start_vaddr, end, &pagemap_walk\);\n'
+            r'((?:\t{3}goto out_free;\n)?'
+            r'\t\tret = walk_page_range\(start_vaddr, end, &pagemap_walk\);\n'
             r'\t\tup_read\(&mm->mmap_(?:sem|lock)\);\n)'
             r'(\n?)'
             r'(\t\tstart_vaddr = end;\n)',
@@ -361,7 +405,9 @@ else:
         )
         if m:
             lock = "mmap_lock" if "mmap_lock" in m.group(1) else "mmap_sem"
+            leading = "\t\t\tgoto out_free;\n" if "goto out_free;" in m.group(1) else ""
             new_b = (
+                leading +
                 f"\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
                 f"\t\tup_read(&mm->{lock});\n"
                 "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
@@ -482,53 +528,4 @@ python3 - "$SUSFS_C" << 'PYEOF'
 import sys, re
 path = sys.argv[1]
 with open(path) as f:
-    content = f.read()
-
-fn_sig   = "susfs_set_hide_sus_mnts_for_all_procs"
-ifndef   = "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
-# Locate the sus_mount block boundaries
-mount_ifdef_pos = content.find("#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT", content.find("/* sus_mount */"))
-mount_endif_pos = content.find(ifndef, mount_ifdef_pos)
-
-new_impl = (
-    "\nvoid susfs_set_hide_sus_mnts_for_all_procs(void __user **user_info) {\n"
-    "\tstruct st_susfs_hide_sus_mnts_for_non_su_procs info = {0};\n\n"
-    "\tif (copy_from_user(&info, (struct st_susfs_hide_sus_mnts_for_non_su_procs __user*)*user_info, sizeof(info))) {\n"
-    "\t\tinfo.err = -EFAULT;\n"
-    "\t\tgoto out_copy_to_user;\n"
-    "\t}\n"
-    "\tspin_lock(&susfs_spin_lock_sus_mount);\n"
-    "\tsusfs_hide_sus_mnts_for_non_su_procs = info.enabled;\n"
-    "\tspin_unlock(&susfs_spin_lock_sus_mount);\n"
-    '\tSUSFS_LOGI("susfs_hide_sus_mnts_for_all_procs: %d\\n", info.enabled);\n'
-    "\tinfo.err = 0;\n"
-    "out_copy_to_user:\n"
-    "\tif (copy_to_user(&((struct st_susfs_hide_sus_mnts_for_non_su_procs __user*)*user_info)->err, &info.err, sizeof(info.err))) {\n"
-    "\t\tinfo.err = -EFAULT;\n"
-    "\t}\n"
-    '\tSUSFS_LOGI("CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS -> ret: %d\\n", info.err);\n'
-    "}\n"
-)
-
-fn_pos = content.find(fn_sig)
-
-if fn_pos == -1:
-    # Not present — insert before the #endif
-    content = content[:mount_endif_pos] + new_impl + content[mount_endif_pos:]
-    with open(path, 'w') as f:
-        f.write(content)
-    print(f"  ✅ susfs.c: implementation added inside #ifdef guard")
-
-elif fn_pos < mount_endif_pos:
-    print(f"  ✅ susfs.c: implementation already inside #ifdef guard")
-
-else:
-    # Outside the guard — extract the full function body and re-insert inside
-    # Match from the function signature to the closing brace on its own line
-    pattern = r'\nvoid susfs_set_hide_sus_mnts_for_all_procs\(.*?\n\}\n'
-    m = re.search(pattern, content, re.DOTALL)
-    if m:
-        old_fn = m.group(0)
-        content = content.replace(old_fn, "\n", 1)   # remove old copy
-        # Recalculate after removal
-        mount_ifdef_pos = content.find("#ifdef CONFIG_K
+    
