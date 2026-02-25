@@ -97,10 +97,13 @@ jobs:
 
       - name: Apply SUSFS integration (CI safe)
         run: |
-         chmod +x patches/susfs_fix.sh
-         bash patches/susfs_fix.sh \
-         kernel_workspace/android-kernel \
-         $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
+         cd kernel_workspace/android-kernel
+         #chmod +x patches/susfs_fix.sh
+         #bash patches/susfs_fix.sh \
+         #kernel_workspace/android-kernel \
+         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
+         bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
+         
 
       - name: Fail if reject files exist
         run: |
