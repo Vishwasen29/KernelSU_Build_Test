@@ -12,7 +12,7 @@ FIX_PATCH="$PATCHES_DIR/fix_susfs_generated.patch"
 echo "=== Applying original SUSFS patch ==="
 patch -Np1 < "$ORIG_PATCH" 2>&1 | tee patch_orig.log || true
 
-echo "=== Generating fix patch ==="
+echo "=== Generating fix patch (no leading spaces) ==="
 cat > "$FIX_PATCH" << 'EOF'
 --- a/include/linux/mount.h
 +++ b/include/linux/mount.h
@@ -100,6 +100,15 @@ cat > "$FIX_PATCH" << 'EOF'
  
  		len = min(count, PM_ENTRY_BYTES * pm.pos);
 EOF
+
+# Verify the patch file has no leading spaces on +/- lines
+echo "=== Verifying fix patch format ==="
+if grep -E '^[[:space:]]+[+-]' "$FIX_PATCH"; then
+    echo "❌ Patch contains leading spaces before +/-. Please check heredoc indentation."
+    exit 1
+else
+    echo "✅ Patch format looks good."
+fi
 
 echo "=== Applying fix patch ==="
 patch -Np1 < "$FIX_PATCH" 2>&1 | tee patch_fix.log || true
