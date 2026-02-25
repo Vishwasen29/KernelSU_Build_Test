@@ -78,13 +78,13 @@ jobs:
         run: |
           cd kernel_workspace/android-kernel
 
-          if [ -d "$GITHUB_WORKSPACE/SUSFS" ]; then
-            cp -rp $GITHUB_WORKSPACE/SUSFS/*.c fs/
-            cp -rp $GITHUB_WORKSPACE/SUSFS/*.h include/linux/
-          else
-            echo "SUSFS folder not found!"
-            exit 1
-          fi
+          #if [ -d "$GITHUB_WORKSPACE/SUSFS" ]; then
+            #cp -rp $GITHUB_WORKSPACE/SUSFS/*.c fs/
+            #cp -rp $GITHUB_WORKSPACE/SUSFS/*.h include/linux/
+          #else
+            #echo "SUSFS folder not found!"
+            #exit 1
+          #fi
 
           if ! grep -q "susfs.o" fs/Makefile; then
             echo "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" >> fs/Makefile
