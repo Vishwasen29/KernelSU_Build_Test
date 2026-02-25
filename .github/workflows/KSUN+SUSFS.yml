@@ -120,8 +120,8 @@ jobs:
          patch -p1 < $GITHUB_WORKSPACE/patches/task_mmu.c.patch
          patch -p1 < $GITHUB_WORKSPACE/patches/namespace.c.patch
 
-    # Clean up any remaining reject files (should be none if patches applied)
-    find . -name "*.rej" -delete
+         # Clean up any remaining reject files (should be none if patches applied)
+         find . -name "*.rej" -delete
       - name: Fail if reject files exist
         run: |
          cd kernel_workspace/android-kernel
