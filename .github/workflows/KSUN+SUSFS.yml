@@ -74,21 +74,25 @@ jobs:
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
 
-      - name: Copy SUSFS files
+      - name: Apply SUSFS integration (CI safe)
         run: |
-          cd kernel_workspace/android-kernel
+         cd kernel_workspace/android-kernel
 
-          #if [ -d "$GITHUB_WORKSPACE/SUSFS" ]; then
-            #cp -rp $GITHUB_WORKSPACE/SUSFS/*.c fs/
-            #cp -rp $GITHUB_WORKSPACE/SUSFS/*.h include/linux/
-          #else
-            #echo "SUSFS folder not found!"
-            #exit 1
-          #fi
+         # Clear any old reject files
+         find . -name "*.rej" -delete
 
-          if ! grep -q "susfs.o" fs/Makefile; then
-            echo "obj-\$(CONFIG_KSU_SUSFS) += susfs.o" >> fs/Makefile
-          fi
+         # Apply the main patch (failures ignored)
+         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
+
+         # Use sed to fix include/linux/mount.h
+         sed -i '/ANDROID_KABI_RESERVE(4)/c#ifdef CONFIG_KSU_SUSFS\n\tANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n#else\n\tANDROID_KABI_RESERVE(4);\n#endif' include/linux/mount.h
+
+         # Run a script to fix fs/proc/task_mmu.c and fs/namespace.c
+         # This script contains the necessary sed commands
+         bash $GITHUB_WORKSPACE/patches/fix_susfs2.sh
+
+         # Clean up any remaining reject files (should be none if fixes succeeded)
+         find . -name "*.rej" -delete
 
       - name: Patch SUSFS symbols
         run: |
