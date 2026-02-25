@@ -101,7 +101,7 @@ jobs:
           ls $GITHUB_WORKSPACE/patches/
           bash $GITHUB_WORKSPACE/patches/susfs_fix.sh \
             kernel_workspace/android-kernel \
-            $GITHUB_WORKSPACE/patches/susfs_patch_to_4_19.patch
+            $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
             
       - name: Inject SUSFS Kconfig symbols
         run: |
