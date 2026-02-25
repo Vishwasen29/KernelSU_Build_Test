@@ -95,15 +95,26 @@ jobs:
           #chmod +x $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh
           #$GITHUB_WORKSPACE/patches/patch_susfs_sym.sh kernel_workspace/android-kernel
 
-      - name: Apply SUSFS integration (CI safe)
-        run: |
-         cd kernel_workspace/android-kernel
+      #- name: Apply SUSFS integration (CI safe)
+        #run: |
+         #cd kernel_workspace/android-kernel
          #chmod +x patches/susfs_fix.sh
          #bash patches/susfs_fix.sh \
          #kernel_workspace/android-kernel \
+         #patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
+         #bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
+
+      - name: Apply SUSFS integration (CI safe)
+        run: |
+         cd kernel_workspace/android-kernel
+         # Apply the main patch (it will fail, but we ignore the error)
          patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
-         bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
-         
+         # Apply the three specific fix patches
+         patch -p1 < $GITHUB_WORKSPACE/patches/mount.h.patch
+         patch -p1 < $GITHUB_WORKSPACE/patches/task_mmu.c.patch
+         patch -p1 < $GITHUB_WORKSPACE/patches/namespace.c.patch
+         # Clean up any leftover reject files
+         find . -name "*.rej" -delete
 
       - name: Fail if reject files exist
         run: |
