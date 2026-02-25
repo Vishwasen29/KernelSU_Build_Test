@@ -57,6 +57,7 @@ jobs:
       - name: Clone Kernel Source
         run: |
           cd $GITHUB_WORKSPACE/kernel_workspace
+          git rev-parse HEAD
           git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
             -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
 
