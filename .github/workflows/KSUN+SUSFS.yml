@@ -76,29 +76,34 @@ jobs:
       
 
 
-      #- name: Apply SUSFS integration (CI safe)
       - name: Apply SUSFS integration (CI safe)
         run: |
-          cd kernel_workspace/android-kernel
+         cd kernel_workspace/android-kernel
 
-          # Clear any old reject files
-          find . -name "*.rej" -delete
+         # Clear any old reject files
+         find . -name "*.rej" -delete
 
-          # Apply patch (allow failure so we can collect rejects)
-          patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch 
+         # Apply patch (allow failure so we can collect rejects)
+         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
 
-          # Collect reject files and their originals
-          mkdir -p $GITHUB_WORKSPACE/susfs_debug
+         # Collect reject files and their originals
+         mkdir -p $GITHUB_WORKSPACE/susfs_debug
 
-          for rej in $(find . -name "*.rej"); do
-            cp "$rej" $GITHUB_WORKSPACE/susfs_debug/
+         for rej in $(find . -name "*.rej"); do
+          cp "$rej" $GITHUB_WORKSPACE/susfs_debug/"
 
-            # Copy original file (remove .rej suffix)
-            orig="${rej%.rej}"
-            if [ -f "$orig" ]; then
-              cp "$orig" $GITHUB_WORKSPACE/susfs_debug/
-            fi
-          done
+         orig="${rej%.rej}"
+          if [ -f "$orig" ]; then
+           cp "$orig" $GITHUB_WORKSPACE/susfs_debug/"
+          fi
+         done
+
+      - name: Upload SUSFS debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+         name: susfs-reject-files
+         path: susfs_debug/
 
 
 
