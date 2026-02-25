@@ -73,50 +73,34 @@ jobs:
           RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
           sed -i 's/ -dirty//g' scripts/setlocalversion
-      - name: Upload KernelSU Modified Files
+      
+
+
+      #- name: Apply SUSFS integration (CI safe)
+      - name: Apply SUSFS integration (CI safe)
         run: |
           cd kernel_workspace/android-kernel
 
-          mkdir -p $GITHUB_WORKSPACE/ksu_artifacts
+          # Clear any old reject files
+          find . -name "*.rej" -delete
 
-          cp fs/namei.c $GITHUB_WORKSPACE/ksu_artifacts/ || true
-          cp fs/proc/base.c $GITHUB_WORKSPACE/ksu_artifacts/ || true
-          cp fs/proc/task_mmu.c $GITHUB_WORKSPACE/ksu_artifacts/ || true
-          cp fs/proc_namespace.c $GITHUB_WORKSPACE/ksu_artifacts/ 2>/dev/null || true
-          cp include/linux/mount.h $GITHUB_WORKSPACE/ksu_artifacts/ || true
-          cp include/linux/fs.h $GITHUB_WORKSPACE/ksu_artifacts/ || true
+          # Apply patch (allow failure so we can collect rejects)
+          patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
 
-      - name: Upload KernelSU Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: KernelSU-Modified-Files
-          path: ksu_artifacts
+          # Collect reject files and their originals
+          mkdir -p $GITHUB_WORKSPACE/susfs_debug
+
+          for rej in $(find . -name "*.rej"); do
+            cp "$rej" $GITHUB_WORKSPACE/susfs_debug/
+
+            # Copy original file (remove .rej suffix)
+            orig="${rej%.rej}"
+            if [ -f "$orig" ]; then
+              cp "$orig" $GITHUB_WORKSPACE/susfs_debug/
+            fi
+          done
 
 
-      - name: Apply SUSFS integration (CI safe)
-        run: |
-         cd kernel_workspace/android-kernel
-
-         # Clear any old reject files
-         find . -name "*.rej" -delete
-
-         # Apply the main patch (failures ignored)
-         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
-
-         # Use sed to fix include/linux/mount.h
-         sed -i '/ANDROID_KABI_RESERVE(4)/c#ifdef CONFIG_KSU_SUSFS\n\tANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n#else\n\tANDROID_KABI_RESERVE(4);\n#endif' include/linux/mount.h
-
-         # Run a script to fix fs/proc/task_mmu.c and fs/namespace.c
-         # This script contains the necessary sed commands
-         bash $GITHUB_WORKSPACE/patches/fix_susfs2.sh
-
-         # Clean up any remaining reject files (should be none if fixes succeeded)
-         find . -name "*.rej" -delete
-
-      - name: Patch SUSFS symbols
-        run: |
-          #chmod +x $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh
-          #$GITHUB_WORKSPACE/patches/patch_susfs_sym.sh kernel_workspace/android-kernel
 
       #- name: Apply SUSFS integration (CI safe)
         #run: |
@@ -127,38 +111,7 @@ jobs:
          #patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
          #bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
 
-      - name: Apply SUSFS integration (CI safe)
-        run: |
-         cd kernel_workspace/android-kernel
-         # Clear any old reject files
-         find . -name "*.rej" -delete
-
-         # Apply the main patch (failures ignored)
-         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
-
-         # Fix include/linux/mount.h with a single-line sed command
-         sed -i '/ANDROID_KABI_RESERVE(4)/c#ifdef CONFIG_KSU_SUSFS\n\tANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n#else\n\tANDROID_KABI_RESERVE(4);\n#endif' include/linux/mount.h
-
-         # Apply the specific fix patches (they must apply cleanly)
-         patch -p1 < $GITHUB_WORKSPACE/patches/task_mmu.c.patch
-         patch -p1 < $GITHUB_WORKSPACE/patches/namespace.c.patch
-
-         # Clean up any remaining reject files (should be none if patches applied)
-         find . -name "*.rej" -delete
-      - name: Fail if reject files exist
-        run: |
-         cd kernel_workspace/android-kernel
-         if find . -name "*.rej" | grep -q .; then
-          echo "Reject files detected"
-          find . -name "*.rej"
-          exit 1
-         fi
-            
-      - name: Inject SUSFS Kconfig symbols
-        run: |
-          chmod +x $GITHUB_WORKSPACE/patches/kconfig.sh
-          $GITHUB_WORKSPACE/patches/kconfig.sh kernel_workspace/android-kernel
-
+      
       
       - name: Add KernelSU & SUSFS configs
         run: |
