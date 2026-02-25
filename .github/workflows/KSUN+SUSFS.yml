@@ -73,7 +73,18 @@ jobs:
           RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
           sed -i 's/ -dirty//g' scripts/setlocalversion
-      
+
+
+      - name: Apply patches with logging
+        run: |
+         cd kernel_workspace/android-kernel
+         set -x
+         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch 2>&1 | tee patch1.log || true
+         patch -p1 < $GITHUB_WORKSPACE/patches/fix_susfs.patch 2>&1 | tee patch2.log || true
+         cat patch1.log patch2.log
+         # Also show any new reject files
+         find . -name "*.rej" -ls
+
 
 
       - name: Apply SUSFS integration (CI safe)
@@ -82,6 +93,7 @@ jobs:
 
          # Clear any old reject files
          find . -name "*.rej" -delete
+
 
          # Apply patch (allow failure so we can collect rejects)
          ls -la $GITHUB_WORKSPACE/patches
