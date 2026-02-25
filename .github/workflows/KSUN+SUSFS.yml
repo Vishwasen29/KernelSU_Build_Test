@@ -106,17 +106,22 @@ jobs:
 
       - name: Apply SUSFS integration (CI safe)
         run: |
-          cd kernel_workspace/android-kernel
-          # Apply the main patch (failures ignored)
-          patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
+         cd kernel_workspace/android-kernel
+         # Clear any old reject files
+         find . -name "*.rej" -delete
 
-          # Fix include/linux/mount.h with a single-line sed command
-          sed -i '/ANDROID_KABI_RESERVE(4)/c#ifdef CONFIG_KSU_SUSFS\n\tANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n#else\n\tANDROID_KABI_RESERVE(4);\n#endif' include/linux/mount.h
+         # Apply the main patch (failures ignored)
+         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
 
-          # Apply the remaining fix patches (failures ignored)
-          patch -p1 < $GITHUB_WORKSPACE/patches/task_mmu.c.patch || true
-          patch -p1 < $GITHUB_WORKSPACE/patches/namespace.c.patch || true
+         # Fix include/linux/mount.h with a single-line sed command
+         sed -i '/ANDROID_KABI_RESERVE(4)/c#ifdef CONFIG_KSU_SUSFS\n\tANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n#else\n\tANDROID_KABI_RESERVE(4);\n#endif' include/linux/mount.h
 
+         # Apply the specific fix patches (they must apply cleanly)
+         patch -p1 < $GITHUB_WORKSPACE/patches/task_mmu.c.patch
+         patch -p1 < $GITHUB_WORKSPACE/patches/namespace.c.patch
+
+    # Clean up any remaining reject files (should be none if patches applied)
+    find . -name "*.rej" -delete
       - name: Fail if reject files exist
         run: |
          cd kernel_workspace/android-kernel
