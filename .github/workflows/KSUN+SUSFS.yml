@@ -90,12 +90,12 @@ jobs:
          mkdir -p $GITHUB_WORKSPACE/susfs_debug
 
          for rej in $(find . -name "*.rej"); do
-          cp "$rej" $GITHUB_WORKSPACE/susfs_debug/"
+           cp "$rej" $GITHUB_WORKSPACE/susfs_debug/"
 
-         orig="${rej%.rej}"
-          if [ -f "$orig" ]; then
-           cp "$orig" $GITHUB_WORKSPACE/susfs_debug/"
-          fi
+           orig="${rej%.rej}"
+           if [ -f "$orig" ]; then
+             cp "$orig" $GITHUB_WORKSPACE/susfs_debug/"
+           fi
          done
 
       - name: Upload SUSFS debug artifacts
