@@ -1,19 +1,22 @@
 #!/bin/bash
-# apply_susfs_fix.sh – Apply SUSFS patch and fix rejects
+# apply_susfs.sh – Apply SUSFS patch and fix rejects (non‑interactive)
 
-set -e  # exit on error, but we use || true for patch steps
+set -e  # stop on error (but we use || true for patch steps)
 
-KERNEL_DIR="kernel_workspace/android-kernel"
-ORIG_PATCH="susfs_patch_to_4.19.patch"
-FIX_PATCH="fix_susfs_generated.patch"   # will be created temporarily
+# Default paths (adjust if needed)
+KERNEL_DIR="${1:-kernel_workspace/android-kernel}"
+PATCHES_DIR="${2:-$GITHUB_WORKSPACE/patches}"
 
-cd "$KERNEL_DIR" || { echo "❌ Cannot enter kernel directory"; exit 1; }
+cd "$KERNEL_DIR" || { echo "❌ Cannot enter kernel directory: $KERNEL_DIR"; exit 1; }
 
-echo "=== Applying original SUSFS patch ==="
-patch -p1 < "../$ORIG_PATCH" 2>&1 | tee patch_orig.log || true
+ORIG_PATCH="$PATCHES_DIR/susfs_patch_to_4.19.patch"
+FIX_PATCH="$PATCHES_DIR/fix_susfs_generated.patch"   # will be created temporarily
+
+echo "=== Applying original SUSFS patch (skip already applied) ==="
+patch -Np1 < "$ORIG_PATCH" 2>&1 | tee patch_orig.log || true
 
 echo "=== Generating fix patch ==="
-cat > "../$FIX_PATCH" << 'EOF'
+cat > "$FIX_PATCH" << 'EOF'
 --- a/include/linux/mount.h
 +++ b/include/linux/mount.h
 @@ -72,7 +72,11 @@ struct vfsmount {
@@ -102,7 +105,7 @@ cat > "../$FIX_PATCH" << 'EOF'
 EOF
 
 echo "=== Applying fix patch ==="
-patch -p1 < "../$FIX_PATCH" 2>&1 | tee patch_fix.log || true
+patch -Np1 < "$FIX_PATCH" 2>&1 | tee patch_fix.log || true
 
 echo "=== Checking for remaining rejects ==="
 REJECTS=$(find . -name "*.rej" -type f)
