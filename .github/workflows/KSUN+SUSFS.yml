@@ -75,15 +75,13 @@ jobs:
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
 
-      - name: Apply patches with logging
+      - name: Apply SUSFS patches
         run: |
-         cd kernel_workspace/android-kernel
-         set -x
-         patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch 2>&1 | tee patch1.log || true
-         bash $GITHUB_WORKSPACE/patches/fic.sh "$PWD" "$GITHUB_WORKSPACE/patches"
-         cat patch1.log patch2.log
-         # Also show any new reject files
-         find . -name "*.rej" -ls
+          cd kernel_workspace/android-kernel
+          set -x
+          bash $GITHUB_WORKSPACE/patches/fic.sh "$PWD" "$GITHUB_WORKSPACE/patches"
+          # Show any reject files (optional)
+          find . -name "*.rej" -ls
 
 
 
