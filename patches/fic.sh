@@ -1,18 +1,17 @@
 #!/bin/bash
 # apply_susfs.sh – Apply SUSFS patch and fix rejects (non‑interactive)
 
-set -e  # stop on error (but we use || true for patch steps)
+set -e
 
-# Default paths (adjust if needed)
-KERNEL_DIR="${1:-kernel_workspace/android-kernel}"
+KERNEL_DIR="${1:-.}"
 PATCHES_DIR="${2:-$GITHUB_WORKSPACE/patches}"
 
 cd "$KERNEL_DIR" || { echo "❌ Cannot enter kernel directory: $KERNEL_DIR"; exit 1; }
 
 ORIG_PATCH="$PATCHES_DIR/susfs_patch_to_4.19.patch"
-FIX_PATCH="$PATCHES_DIR/fix_susfs_generated.patch"   # will be created temporarily
+FIX_PATCH="$PATCHES_DIR/fix_susfs_generated.patch"
 
-echo "=== Applying original SUSFS patch (skip already applied) ==="
+echo "=== Applying original SUSFS patch ==="
 patch -Np1 < "$ORIG_PATCH" 2>&1 | tee patch_orig.log || true
 
 echo "=== Generating fix patch ==="
@@ -30,7 +29,7 @@ cat > "$FIX_PATCH" << 'EOF'
 +#endif
  	void *data;
  } __randomize_layout;
- 
+
 --- a/fs/namespace.c
 +++ b/fs/namespace.c
 @@ -29,6 +29,16 @@
