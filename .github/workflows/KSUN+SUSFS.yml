@@ -95,13 +95,21 @@ jobs:
           chmod +x $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh
           $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh kernel_workspace/android-kernel
 
-      - name: Apply SUSFS kernel integration patch
+      - name: Apply SUSFS integration (CI safe)
         run: |
-          echo "Files in patches/:"
-          ls $GITHUB_WORKSPACE/patches/
-          bash $GITHUB_WORKSPACE/patches/susfs_fix.sh \
-            kernel_workspace/android-kernel \
-            $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
+         chmod +x patches/susfs_ci_fix.sh
+         bash patches/susfs_fix.sh \
+         kernel_workspace/android-kernel \
+         patches/susfs_patch_to_4.19.patch
+
+      - name: Fail if reject files exist
+        run: |
+         cd kernel_workspace/android-kernel
+         if find . -name "*.rej" | grep -q .; then
+          echo "Reject files detected"
+          find . -name "*.rej"
+          exit 1
+         fi
             
       - name: Inject SUSFS Kconfig symbols
         run: |
@@ -158,6 +166,16 @@ jobs:
           fi
 
           echo "✅ Pre-build verification passed"
+
+      - name: Validate SUSFS config
+        run: |
+         cd kernel_workspace/android-kernel
+         grep CONFIG_KSU_SUSFS .config || exit 1
+
+      - name: Print namespace diff
+        run: |
+         cd kernel_workspace/android-kernel
+         git diff fs/namespace.c
 
       - name: Build Kernel
         run: |
