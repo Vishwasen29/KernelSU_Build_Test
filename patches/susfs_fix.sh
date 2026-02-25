@@ -1,45 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
-# apply_susfs_patch.sh
+# apply_susfs_patch.sh  (v3 — handles all known rejection cases)
 #
 # Adjusts susfs_patch_to_4_19.patch for the rsuntk/KernelSU workflow and
 # applies it to the kernel source tree.
 #
-# WORKFLOW CONTEXT (what is already done before this script runs):
-#   - KernelSU fork : rsuntk/KernelSU  branch: susfs-rksu-master
-#   - KernelSU hooks: kernel-4.19_5.4-patch.sh  (exec/open/stat/reboot/input)
-#   - SUSFS files   : copied from SUSFS/ folder (susfs.c, susfs.h, susfs_def.h)
-#   - fs/Makefile   : susfs.o entry already added
-#
-# WHAT THIS SCRIPT DOES:
-#   1. Strips sections already handled by the workflow:
-#        fs/susfs.c, include/linux/susfs.h, include/linux/susfs_def.h
-#        fs/Makefile (susfs.o hunk)
-#
-#   2. Fixes the broken security/selinux/avc.c hunk:
-#        The original patch reads sad.tsid from an uninitialised local struct —
-#        undefined behaviour on 4.19. We keep ONLY the bool definition that
-#        fixes the linker error: bool susfs_is_avc_log_spoofing_enabled = false;
-#
-#   3. Applies all remaining kernel-integration hunks:
-#        fs/namei.c         fs/namespace.c     fs/notify/fdinfo.c
-#        fs/overlayfs/      fs/proc/           fs/proc_namespace.c
-#        fs/readdir.c       fs/stat.c          fs/statfs.c
-#        include/linux/mount.h  kernel/kallsyms.c  kernel/sys.c
-#
-#   4. Adds two symbols missing from SUSFS v2.0.0 that rsuntk/KernelSU needs,
-#      correctly placed INSIDE their #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT guards:
-#        - CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS  (susfs_def.h)
-#        - susfs_set_hide_sus_mnts_for_all_procs   (susfs.h + susfs.c)
+# HANDLES:
+#   - Skips files already provided by the workflow (susfs.c/h, susfs_def.h,
+#     Makefile)
+#   - Replaces broken avc.c hunk (UB sad.tsid read) with safe bool definition
+#   - Manually applies 3 hunks that git apply rejects due to context mismatch:
+#       * include/linux/mount.h   (ANDROID_KABI_RESERVE vs KABI_USE)
+#       * fs/proc/task_mmu.c     (pagemap_read line-number offset)
+#       * fs/namespace.c hunk #8 (whitespace-only, safely skipped)
+#   - Moves susfs_set_hide_sus_mnts_for_all_procs inside its #ifdef guard
+#     if a previous script (patch_susfs_sym.sh) placed it outside
 #
 # USAGE:
-#   ./apply_susfs_patch.sh <KERNEL_DIR> <PATCH_FILE>
-#
-# EXAMPLE (GitHub Actions):
-#   chmod +x patches/apply_susfs_patch.sh
-#   patches/apply_susfs_patch.sh \
-#       kernel_workspace/android-kernel \
-#       patches/susfs_patch_to_4_19.patch
+#   bash patches/apply_susfs_patch.sh <KERNEL_DIR> <PATCH_FILE>
 # =============================================================================
 
 set -euo pipefail
@@ -52,12 +30,10 @@ if [ -z "$KERNEL_DIR" ] || [ -z "$PATCH_FILE" ]; then
     exit 1
 fi
 if [ ! -d "$KERNEL_DIR" ]; then
-    echo "❌ Kernel directory not found: $KERNEL_DIR"
-    exit 1
+    echo "❌ Kernel directory not found: $KERNEL_DIR"; exit 1
 fi
 if [ ! -f "$PATCH_FILE" ]; then
-    echo "❌ Patch file not found: $PATCH_FILE"
-    exit 1
+    echo "❌ Patch file not found: $PATCH_FILE"; exit 1
 fi
 
 PATCH_FILE="$(realpath "$PATCH_FILE")"
@@ -71,7 +47,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # =============================================================================
-# STEP 1 — Build adjusted patch
+# STEP 1 — Build adjusted patch (strip workflow-handled files, fix avc.c)
 # =============================================================================
 
 echo "── Step 1: Building adjusted patch ────────────────────────────────────────"
@@ -86,50 +62,47 @@ import sys, re
 src_path  = sys.argv[1]
 dest_path = sys.argv[2]
 
-# Files to drop entirely — the workflow already copies these from SUSFS/
 DROP_ENTIRELY = {
     "fs/susfs.c",
     "include/linux/susfs.h",
     "include/linux/susfs_def.h",
 }
 
+# These are handled manually in later steps due to context mismatches
+MANUAL_APPLY = {
+    "include/linux/mount.h",
+    "fs/proc/task_mmu.c",
+}
+
 with open(src_path, 'r', errors='replace') as f:
     raw = f.read()
 
-# Split on diff headers, keeping the header in each chunk
 sections = re.split(r'(?=^diff --git )', raw, flags=re.MULTILINE)
-
 out_parts = []
 
 for sec in sections:
     if not sec.strip():
         continue
-
     m = re.match(r'diff --git a/(\S+)', sec)
     if not m:
         out_parts.append(sec)
         continue
-
     filepath = m.group(1)
 
-    # ── Drop sections already handled by the workflow ────────────────────────
     if filepath in DROP_ENTIRELY:
         print(f"  ⏭  SKIP (workflow handles): {filepath}")
         continue
 
-    # ── fs/Makefile — susfs.o is already added by the workflow ───────────────
     if filepath == "fs/Makefile":
         if "obj-$(CONFIG_KSU_SUSFS) += susfs.o" in sec:
             print(f"  ⏭  SKIP (workflow handles): {filepath}  [susfs.o hunk]")
             continue
 
-    # ── security/selinux/avc.c — safe minimal replacement ───────────────────
-    # The original patch's avc_dump_query hunk reads `sad.tsid` from a local
-    # `struct selinux_audit_data sad` that is declared but never initialised —
-    # undefined behaviour on 4.19 that will produce garbage or an oops.
-    # We emit only the one line we actually need: the bool definition.
-    # The two susfs_ksu_sid / susfs_priv_app_sid externs are intentionally
-    # removed here because nothing in avc.c uses them anymore.
+    if filepath in MANUAL_APPLY:
+        print(f"  🔧 MANUAL: {filepath}  [applied in Step 3]")
+        continue
+
+    # avc.c — drop the UB sad.tsid hunk, keep only the bool definition
     if filepath == "security/selinux/avc.c":
         print(f"  ✂  PARTIAL: {filepath}  [drop UB sad hunk; keep bool definition only]")
         minimal_avc = (
@@ -150,7 +123,6 @@ for sec in sections:
         out_parts.append(minimal_avc)
         continue
 
-    # ── All other files — apply as-is ────────────────────────────────────────
     print(f"  ✅ KEEP: {filepath}")
     out_parts.append(sec)
 
@@ -161,7 +133,7 @@ PYEOF
 echo ""
 
 # =============================================================================
-# STEP 2 — Apply the adjusted patch
+# STEP 2 — Apply the adjusted patch (via git apply)
 # =============================================================================
 
 echo "── Step 2: Applying adjusted patch ─────────────────────────────────────────"
@@ -169,8 +141,6 @@ echo ""
 
 cd "$KERNEL_DIR"
 
-# --reject writes failed hunks to .rej files instead of aborting entirely.
-# The || true prevents pipefail from killing the script on partial failures.
 git apply \
     --ignore-whitespace \
     --ignore-space-change \
@@ -180,50 +150,135 @@ git apply \
 
 echo ""
 
-# =============================================================================
-# STEP 3 — Report any rejected hunks
-# =============================================================================
-
-# BUG FIX: with set -o pipefail, `grep -v` on empty input returns exit 1,
-# which would kill the script on every SUCCESSFUL run (no .rej files).
-# Use || true to safely produce an empty string when nothing matches.
-REJECT_FILES=$(find . -name "*.rej" 2>/dev/null | grep -v ".git" | sort || true)
-
-if [ -n "$REJECT_FILES" ]; then
-    echo "── Rejected hunks (context mismatch with this kernel tree) ─────────────────"
-    echo ""
-    while IFS= read -r rej; do
-        target="${rej%.rej}"
-        echo "  ❌ $target"
-        head -30 "$rej" | sed 's/^/      /'
-        echo ""
-    done <<< "$REJECT_FILES"
-    echo "  These need manual review — the LineageOS tree likely has slightly"
-    echo "  different context lines around the insertion points."
-    echo ""
+# Clean up any .rej files from namespace.c hunk #8 (whitespace-only, harmless)
+if [ -f "fs/namespace.c.rej" ]; then
+    echo "  ℹ️  Removing fs/namespace.c.rej (whitespace-only hunk — safe to skip)"
+    rm -f "fs/namespace.c.rej"
 fi
 
 # =============================================================================
-# STEP 4 — Fix missing SUSFS v2.0.0 symbols required by rsuntk/KernelSU
-#
-# rsuntk's setuid_hook.c calls susfs_set_hide_sus_mnts_for_all_procs() and
-# supercalls.c references CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS.
-# Neither symbol exists in upstream v2.0.0 SUSFS files.
-#
-# IMPORTANT: all insertions must land INSIDE the existing
-# #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT ... #endif guards, not after them.
+# STEP 3 — Manually apply hunks that git apply rejects
 # =============================================================================
 
-echo "── Step 4: Adding missing SUSFS v2.0.0 symbols ─────────────────────────────"
+echo "── Step 3: Manually applying rejected hunks ─────────────────────────────────"
+echo ""
+
+# ── 3a. include/linux/mount.h ────────────────────────────────────────────────
+# The LineageOS tree's vfsmount struct may have a different layout around the
+# ANDROID_KABI_RESERVE(4) line. We do a direct string replacement which is
+# immune to line-number drift.
+python3 - "include/linux/mount.h" << 'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+
+if "susfs_mnt_id_backup" in content:
+    print(f"  ℹ️  mount.h already patched (susfs_mnt_id_backup present)")
+    sys.exit(0)
+
+old = "\tANDROID_KABI_RESERVE(4);"
+new = (
+    "#ifdef CONFIG_KSU_SUSFS\n"
+    "\tANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n"
+    "#else\n"
+    "\tANDROID_KABI_RESERVE(4);\n"
+    "#endif"
+)
+
+if old in content:
+    content = content.replace(old, new, 1)
+    with open(path, 'w') as f:
+        f.write(content)
+    print(f"  ✅ mount.h: ANDROID_KABI_RESERVE(4) replaced with KABI_USE block")
+else:
+    # Fallback: the tree may not use ANDROID_KABI_RESERVE at all.
+    # In that case the field must be added directly to the struct.
+    if "void *data;" in content and "susfs_mnt_id_backup" not in content:
+        # Insert before `void *data;` inside struct vfsmount
+        old2 = "\tvoid *data;"
+        new2 = (
+            "#ifdef CONFIG_KSU_SUSFS\n"
+            "\tu64 susfs_mnt_id_backup;\n"
+            "#endif\n"
+            "\tvoid *data;"
+        )
+        if old2 in content:
+            content = content.replace(old2, new2, 1)
+            with open(path, 'w') as f:
+                f.write(content)
+            print(f"  ✅ mount.h: susfs_mnt_id_backup added before void *data (fallback)")
+        else:
+            print(f"  ❌ mount.h: could not find insertion point — patch manually")
+            sys.exit(1)
+    else:
+        print(f"  ❌ mount.h: ANDROID_KABI_RESERVE(4) not found — patch manually")
+        sys.exit(1)
+PYEOF
+
+# ── 3b. fs/proc/task_mmu.c (pagemap_read hunk) ───────────────────────────────
+# The line-number offset caused git apply to reject this hunk.
+# Use context-string matching instead.
+python3 - "fs/proc/task_mmu.c" << 'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+
+if "BIT_SUS_MAPS" in content and "pm.buffer->pme = 0" in content:
+    print(f"  ℹ️  task_mmu.c pagemap_read hunk already applied")
+    sys.exit(0)
+
+# The unique context: after up_read(&mm->mmap_sem) and before start_vaddr = end
+# in the pagemap_read loop
+old = (
+    "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
+    "\t\tup_read(&mm->mmap_sem);\n"
+    "\t\tstart_vaddr = end;\n"
+)
+new = (
+    "\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n"
+    "\t\tup_read(&mm->mmap_sem);\n"
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
+    "\t\tvma = find_vma(mm, start_vaddr);\n"
+    "\t\tif (vma && vma->vm_file) {\n"
+    "\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n"
+    "\t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\n"
+    "\t\t\t\tpm.buffer->pme = 0;\n"
+    "\t\t\t}\n"
+    "\t\t}\n"
+    "#endif\n"
+    "\t\tstart_vaddr = end;\n"
+)
+
+if old in content:
+    content = content.replace(old, new, 1)
+    with open(path, 'w') as f:
+        f.write(content)
+    print(f"  ✅ task_mmu.c: pagemap_read SUS_MAP hunk applied")
+else:
+    print(f"  ⚠️  task_mmu.c: pagemap_read context not found — minor feature missing")
+PYEOF
+
+echo ""
+
+# =============================================================================
+# STEP 4 — Fix missing/misplaced SUSFS v2.0.0 symbols
+#
+# If patch_susfs_sym.sh already ran, the function may exist but be OUTSIDE
+# the #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT guard (it uses susfs_spin_lock_sus_mount
+# which is only defined inside the guard — compile error if SUS_MOUNT=n).
+# We detect this and relocate the function if needed.
+# =============================================================================
+
+echo "── Step 4: Fixing SUSFS v2.0.0 symbols ─────────────────────────────────────"
 echo ""
 
 SUSFS_DEF_H="include/linux/susfs_def.h"
 SUSFS_H="include/linux/susfs.h"
 SUSFS_C="fs/susfs.c"
 
-# ── 4a. CMD define in susfs_def.h ────────────────────────────────────────────
-# Inserting a new #define next to existing ones; no ifdef guard needed here,
-# susfs_def.h defines are unconditional.
+# ── 4a. CMD define in susfs_def.h (unconditional, no guard needed) ────────────
 if ! grep -q "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS" "$SUSFS_DEF_H" 2>/dev/null; then
     python3 - "$SUSFS_DEF_H" << 'PYEOF'
 import sys
@@ -236,93 +291,82 @@ replacement = (
     "#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS 0x55561\n"
     "#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS     0x55563"
 )
-
 if anchor in content:
     content = content.replace(anchor, replacement, 1)
     with open(path, 'w') as f:
         f.write(content)
     print(f"  ✅ CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS added to {path}")
 else:
-    # Fallback: insert before the SUSFS_MAX_LEN_PATHNAME block
     fallback = "#define SUSFS_MAX_LEN_PATHNAME"
-    if fallback in content:
-        content = content.replace(
-            fallback,
-            "#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS     0x55563\n" + fallback,
-            1,
-        )
-        with open(path, 'w') as f:
-            f.write(content)
-        print(f"  ✅ CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS added (fallback) to {path}")
-    else:
-        print(f"  ❌ Could not find anchor in {path}")
-        sys.exit(1)
+    content = content.replace(
+        fallback,
+        "#define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS     0x55563\n" + fallback, 1)
+    with open(path, 'w') as f:
+        f.write(content)
+    print(f"  ✅ CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS added (fallback) to {path}")
 PYEOF
 else
     echo "  ℹ️  CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS already present"
 fi
 
-# ── 4b. Function declaration in susfs.h ──────────────────────────────────────
-# BUG FIX (previous version): the declaration must land BEFORE the
-# "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT" that closes the sus_mount
-# block, not after it. We locate the #endif that immediately follows the
-# existing declaration and insert there.
-if ! grep -q "susfs_set_hide_sus_mnts_for_all_procs" "$SUSFS_H" 2>/dev/null; then
-    python3 - "$SUSFS_H" << 'PYEOF'
+# ── 4b. Declaration in susfs.h — must be inside #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+python3 - "$SUSFS_H" << 'PYEOF'
 import sys
 path = sys.argv[1]
 with open(path) as f:
     content = f.read()
 
-decl_anchor  = "void susfs_set_hide_sus_mnts_for_non_su_procs(void __user **user_info);"
-endif_marker = "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
-new_decl     = "void susfs_set_hide_sus_mnts_for_all_procs(void __user **user_info);\n"
+fn_sig = "susfs_set_hide_sus_mnts_for_all_procs"
+decl   = "void susfs_set_hide_sus_mnts_for_all_procs(void __user **user_info);"
+ifndef = "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
 
-pos = content.find(decl_anchor)
-if pos == -1:
-    print(f"  ❌ Could not find declaration anchor in {path}")
-    sys.exit(1)
+# Find the sus_mount #ifdef block
+mount_ifdef = content.find("#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT", content.find("/* sus_mount */"))
+# Find its closing #endif
+mount_endif = content.find(ifndef, mount_ifdef)
 
-# Find the #endif that closes this sus_mount block (first one after the decl)
-after_decl = pos + len(decl_anchor)
-endif_pos = content.find(endif_marker, after_decl)
-if endif_pos == -1:
-    print(f"  ❌ Could not find #endif marker after declaration in {path}")
-    sys.exit(1)
+fn_pos = content.find(fn_sig)
 
-# Insert the new declaration just before the #endif (inside the guard)
-content = content[:endif_pos] + new_decl + content[endif_pos:]
-with open(path, 'w') as f:
-    f.write(content)
-print(f"  ✅ susfs_set_hide_sus_mnts_for_all_procs declared inside #ifdef in {path}")
+if fn_pos == -1:
+    # Not present at all — insert before the #endif
+    content = content[:mount_endif] + decl + "\n" + content[mount_endif:]
+    with open(path, 'w') as f:
+        f.write(content)
+    print(f"  ✅ susfs.h: declaration added inside #ifdef guard")
+
+elif fn_pos < mount_endif:
+    # Already inside the guard — nothing to do
+    print(f"  ✅ susfs.h: declaration already inside #ifdef guard")
+
+else:
+    # Outside the guard — remove and re-insert inside
+    content = content.replace(decl + "\n", "", 1)
+    content = content.replace(decl, "", 1)          # handle missing trailing \n
+    # Recalculate positions after removal
+    mount_ifdef = content.find("#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT", content.find("/* sus_mount */"))
+    mount_endif = content.find(ifndef, mount_ifdef)
+    content = content[:mount_endif] + decl + "\n" + content[mount_endif:]
+    with open(path, 'w') as f:
+        f.write(content)
+    print(f"  ✅ susfs.h: declaration moved inside #ifdef guard")
 PYEOF
-else
-    echo "  ℹ️  susfs_set_hide_sus_mnts_for_all_procs already declared"
-fi
 
-# ── 4c. Function implementation in susfs.c ───────────────────────────────────
-# BUG FIX (previous version): the implementation must land BEFORE the
-# "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT" that closes the sus_mount
-# block, not after it (where it would be outside the guard and try to
-# reference susfs_spin_lock_sus_mount which is only defined inside the block).
-if ! grep -q "susfs_set_hide_sus_mnts_for_all_procs" "$SUSFS_C" 2>/dev/null; then
-    python3 - "$SUSFS_C" << 'PYEOF'
-import sys
+# ── 4c. Implementation in susfs.c — must be inside #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+python3 - "$SUSFS_C" << 'PYEOF'
+import sys, re
 path = sys.argv[1]
 with open(path) as f:
     content = f.read()
 
-# Anchor: the unique closing log line + closing brace of
-# susfs_set_hide_sus_mnts_for_non_su_procs
-close_anchor = ('SUSFS_LOGI("CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS -> ret: %d\\n", info.err);\n'
-                '}\n')
-endif_marker = '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT'
+fn_sig   = "susfs_set_hide_sus_mnts_for_all_procs"
+ifndef   = "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
+# Locate the sus_mount block boundaries
+mount_ifdef_pos = content.find("#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT", content.find("/* sus_mount */"))
+mount_endif_pos = content.find(ifndef, mount_ifdef_pos)
 
-# New function must be inside the same #ifdef guard, so insert BEFORE #endif
 new_impl = (
     "\nvoid susfs_set_hide_sus_mnts_for_all_procs(void __user **user_info) {\n"
-    "\tstruct st_susfs_hide_sus_mnts_for_non_su_procs info = {0};\n"
-    "\n"
+    "\tstruct st_susfs_hide_sus_mnts_for_non_su_procs info = {0};\n\n"
     "\tif (copy_from_user(&info, (struct st_susfs_hide_sus_mnts_for_non_su_procs __user*)*user_info, sizeof(info))) {\n"
     "\t\tinfo.err = -EFAULT;\n"
     "\t\tgoto out_copy_to_user;\n"
@@ -340,28 +384,51 @@ new_impl = (
     "}\n"
 )
 
-close_pos = content.find(close_anchor)
-if close_pos == -1:
-    print(f"  ❌ Could not find function close anchor in {path}")
-    sys.exit(1)
+fn_pos = content.find(fn_sig)
 
-after_close = close_pos + len(close_anchor)
-endif_pos = content.find(endif_marker, after_close)
-if endif_pos == -1:
-    print(f"  ❌ Could not find #endif marker after function in {path}")
-    sys.exit(1)
+if fn_pos == -1:
+    # Not present — insert before the #endif
+    content = content[:mount_endif_pos] + new_impl + content[mount_endif_pos:]
+    with open(path, 'w') as f:
+        f.write(content)
+    print(f"  ✅ susfs.c: implementation added inside #ifdef guard")
 
-# Insert new function just before the #endif (inside the guard)
-content = content[:endif_pos] + new_impl + content[endif_pos:]
-with open(path, 'w') as f:
-    f.write(content)
-print(f"  ✅ susfs_set_hide_sus_mnts_for_all_procs implemented inside #ifdef in {path}")
+elif fn_pos < mount_endif_pos:
+    print(f"  ✅ susfs.c: implementation already inside #ifdef guard")
+
+else:
+    # Outside the guard — extract the full function body and re-insert inside
+    # Match from the function signature to the closing brace on its own line
+    pattern = r'\nvoid susfs_set_hide_sus_mnts_for_all_procs\(.*?\n\}\n'
+    m = re.search(pattern, content, re.DOTALL)
+    if m:
+        old_fn = m.group(0)
+        content = content.replace(old_fn, "\n", 1)   # remove old copy
+        # Recalculate after removal
+        mount_ifdef_pos = content.find("#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT", content.find("/* sus_mount */"))
+        mount_endif_pos = content.find(ifndef, mount_ifdef_pos)
+        content = content[:mount_endif_pos] + new_impl + content[mount_endif_pos:]
+        with open(path, 'w') as f:
+            f.write(content)
+        print(f"  ✅ susfs.c: implementation moved inside #ifdef guard")
+    else:
+        print(f"  ❌ susfs.c: could not extract misplaced function — patch manually")
+        sys.exit(1)
 PYEOF
-else
-    echo "  ℹ️  susfs_set_hide_sus_mnts_for_all_procs already implemented"
-fi
 
 echo ""
+
+# Clean up any remaining .rej files (after manual fixes above)
+REJECT_FILES=$(find . -name "*.rej" 2>/dev/null | grep -v ".git" | sort || true)
+if [ -n "$REJECT_FILES" ]; then
+    echo "── Remaining rejected hunks ──────────────────────────────────────────────"
+    echo ""
+    while IFS= read -r rej; do
+        echo "  ❌ ${rej%.rej}"
+        head -20 "$rej" | sed 's/^/      /'
+        echo ""
+    done <<< "$REJECT_FILES"
+fi
 
 # =============================================================================
 # STEP 5 — Verification
@@ -382,7 +449,6 @@ check() {
     fi
 }
 
-# Kernel integration hooks (applied by the adjusted patch)
 check "namei.c      SUS_PATH hooks"          "fs/namei.c"                "CONFIG_KSU_SUSFS_SUS_PATH"
 check "namespace.c  susfs_reorder_mnt_id"    "fs/namespace.c"            "susfs_reorder_mnt_id"
 check "namespace.c  sus vfsmnt allocation"   "fs/namespace.c"            "susfs_alloc_sus_vfsmnt"
@@ -394,33 +460,31 @@ check "proc_namespace mount hiding"          "fs/proc_namespace.c"       "susfs_
 check "proc/fd.c    fd mnt_id hiding"        "fs/proc/fd.c"              "DEFAULT_KSU_MNT_ID"
 check "proc/cmdline cmdline spoofing"        "fs/proc/cmdline.c"         "susfs_spoof_cmdline_or_bootconfig"
 check "proc/task_mmu maps hiding"            "fs/proc/task_mmu.c"        "BIT_SUS_MAPS"
+check "proc/task_mmu pagemap_read fix"       "fs/proc/task_mmu.c"        "pm.buffer->pme = 0"
 check "sys.c        uname spoofing"          "kernel/sys.c"              "susfs_spoof_uname"
 check "kallsyms.c   symbol hiding"           "kernel/kallsyms.c"         "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS"
-
-# Linker error fix
 check "avc.c        bool definition"         "security/selinux/avc.c"    "susfs_is_avc_log_spoofing_enabled = false"
-
-# Missing v2.0.0 symbols (step 4) — verify they are inside the ifdef guard
 check "susfs_def.h  ALL_PROCS cmd define"    "include/linux/susfs_def.h" "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS"
 check "susfs.h      ALL_PROCS declaration"   "include/linux/susfs.h"     "susfs_set_hide_sus_mnts_for_all_procs"
 check "susfs.c      ALL_PROCS implementation" "fs/susfs.c"               "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS"
 
-# Extra: confirm the new function is inside the #ifdef guard in susfs.c
-# by checking that it appears before the #endif line
+# Confirm the implementation is inside the #ifdef guard
 python3 - "fs/susfs.c" << 'PYEOF'
 import sys
 path = sys.argv[1]
 with open(path) as f:
     content = f.read()
 
-fn_pos     = content.find("susfs_set_hide_sus_mnts_for_all_procs")
-endif_pos  = content.find(
-    '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT',
-    content.find("susfs_set_hide_sus_mnts_for_non_su_procs")
-)
-if fn_pos != -1 and endif_pos != -1 and fn_pos < endif_pos:
+fn_pos      = content.find("susfs_set_hide_sus_mnts_for_all_procs")
+mount_ifdef = content.find("#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT", content.find("/* sus_mount */"))
+mount_endif = content.find("#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT", mount_ifdef)
+
+if fn_pos == -1:
+    print("  ❌ susfs.c ALL_PROCS implementation not found")
+    sys.exit(1)
+elif mount_ifdef < fn_pos < mount_endif:
     print("  ✅ susfs.c ALL_PROCS impl is inside #ifdef guard        ")
-elif fn_pos != -1 and endif_pos != -1 and fn_pos > endif_pos:
+else:
     print("  ❌ susfs.c ALL_PROCS impl is OUTSIDE #ifdef guard ← BAD")
     sys.exit(1)
 PYEOF
@@ -429,13 +493,11 @@ echo ""
 
 if [ "$ALL_OK" = true ] && [ -z "$REJECT_FILES" ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ✅  All SUSFS kernel hooks applied and all symbols verified."
-    echo "      Ready to build."
+    echo "  ✅  All checks passed. Ready to build."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 elif [ "$ALL_OK" = true ] && [ -n "$REJECT_FILES" ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ⚠️   Symbols OK but some hunks were rejected (see .rej files above)."
-    echo "      The kernel may still compile; rejected features will be inactive."
+    echo "  ⚠️   Symbols OK but some hunks still rejected (see above)."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     exit 1
 else
