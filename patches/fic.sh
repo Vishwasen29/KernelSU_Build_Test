@@ -1,6 +1,4 @@
 #!/bin/bash
-# apply_susfs.sh – Apply SUSFS patch and fix rejects (non‑interactive)
-
 set -e
 
 KERNEL_DIR="${1:-.}"
@@ -14,7 +12,7 @@ FIX_PATCH="$PATCHES_DIR/fix_susfs_generated.patch"
 echo "=== Applying original SUSFS patch ==="
 patch -Np1 < "$ORIG_PATCH" 2>&1 | tee patch_orig.log || true
 
-echo "=== Generating fix patch (no leading spaces) ==="
+echo "=== Generating fix patch ==="
 cat > "$FIX_PATCH" << 'EOF'
 --- a/include/linux/mount.h
 +++ b/include/linux/mount.h
