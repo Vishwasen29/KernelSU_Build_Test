@@ -92,8 +92,8 @@ jobs:
 
       - name: Patch SUSFS symbols
         run: |
-          chmod +x $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh
-          $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh kernel_workspace/android-kernel
+          #chmod +x $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh
+          #$GITHUB_WORKSPACE/patches/patch_susfs_sym.sh kernel_workspace/android-kernel
 
       - name: Apply SUSFS integration (CI safe)
         run: |
