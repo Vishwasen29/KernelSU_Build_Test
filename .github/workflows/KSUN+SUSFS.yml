@@ -100,7 +100,7 @@ jobs:
          chmod +x patches/susfs_fix.sh
          bash patches/susfs_fix.sh \
          kernel_workspace/android-kernel \
-         patches/susfs_patch_to_4.19.patch
+         $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
 
       - name: Fail if reject files exist
         run: |
