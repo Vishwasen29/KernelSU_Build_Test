@@ -94,9 +94,15 @@ jobs:
         run: |
           chmod +x $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh
           $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh kernel_workspace/android-kernel
-          bash $GITHUB_WORKSPACE/patches/susfs_fix.sh kernel_workspace/android-kernel \
-            $GITHUB_WORKSPACE/patches/susfs_patch_to_4_19.patch
 
+      - name: Apply SUSFS kernel integration patch
+        run: |
+          echo "Files in patches/:"
+          ls $GITHUB_WORKSPACE/patches/
+          bash $GITHUB_WORKSPACE/patches/susfs_fix.sh \
+            kernel_workspace/android-kernel \
+            $GITHUB_WORKSPACE/patches/susfs_patch_to_4_19.patch
+            
       - name: Inject SUSFS Kconfig symbols
         run: |
           chmod +x $GITHUB_WORKSPACE/patches/kconfig.sh
