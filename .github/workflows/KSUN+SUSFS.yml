@@ -94,6 +94,7 @@ jobs:
         run: |
           chmod +x $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh
           $GITHUB_WORKSPACE/patches/patch_susfs_sym.sh kernel_workspace/android-kernel
+          bash $GITHUB_WORKSPACE/patches/susfs_fix.sh
 
       - name: Inject SUSFS Kconfig symbols
         run: |
