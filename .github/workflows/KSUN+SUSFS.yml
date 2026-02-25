@@ -97,7 +97,7 @@ jobs:
 
       - name: Apply SUSFS integration (CI safe)
         run: |
-         chmod +x patches/susfs_ci_fix.sh
+         chmod +x patches/susfs_fix.sh
          bash patches/susfs_fix.sh \
          kernel_workspace/android-kernel \
          patches/susfs_patch_to_4.19.patch
