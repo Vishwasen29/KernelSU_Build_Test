@@ -1,4 +1,4 @@
-name: 🤣 LineageOS OPlus SM8250 Kernel
+name: LineageOS OPlus SM8250 Kernel
 
 on:
   push:
@@ -94,7 +94,7 @@ jobs:
 
            orig="${rej%.rej}"
            if [ -f "$orig" ]; then
-             cp "$orig" $GITHUB_WORKSPACE/susfs_debug/"
+             cp "$orig" "$GITHUB_WORKSPACE/susfs_debug/"
            fi
          done
 
