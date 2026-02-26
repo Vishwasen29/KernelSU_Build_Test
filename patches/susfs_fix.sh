@@ -26,51 +26,61 @@ require_file() {
     fi
 }
 
+# Helper: run Python and propagate its exit code into bash (set -e compatible)
+run_python() {
+    python3 "$@"
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        echo "ERROR: Python step failed (exit $rc)"
+        exit $rc
+    fi
+}
+
 require_file fs/namespace.c
 require_file fs/proc/task_mmu.c
 require_file include/linux/mount.h
 
 # ─────────────────────────────────────────────────────────────────────────────
 # fs/namespace.c  – Hunk #1
-# Add susfs_def.h include + extern declarations after kernel includes.
+# Add susfs_def.h include + extern declarations.
 #
-# The main patch failed because the kernel already has:
-#   #include <linux/fs_context.h>
-# which wasn't in the patch's context (it was added upstream after the patch
-# was written).  We insert around it correctly here.
+# IMPORTANT: Do NOT guard this block with grep for CONFIG_KSU_SUSFS_SUS_MOUNT.
+# The main patch already writes that string in other (successful) hunks, so
+# that check gives a false positive and silently skips this step.
+# Guard ONLY on "susfs_def.h" which is unique to this hunk.
 # ─────────────────────────────────────────────────────────────────────────────
-echo "[1/5] fs/namespace.c – adding susfs_def.h include block..."
+echo "[1/5] fs/namespace.c – adding susfs_def.h include + extern block..."
 
-if grep -q "CONFIG_KSU_SUSFS_SUS_MOUNT" fs/namespace.c; then
+if grep -q 'susfs_def\.h' fs/namespace.c; then
     echo "      Already patched – skipping."
 else
-    python3 - << 'PYEOF'
-import sys
+    python3 << 'PYEOF'
+import sys, re
 
 with open('fs/namespace.c', 'r') as f:
     content = f.read()
 
-# ── Insert #include <linux/susfs_def.h> BEFORE #include <linux/fs_context.h>
-ANCHOR = '#include <linux/sched/task.h>\n'
-INSERT_INCLUDES = (
-    '#include <linux/sched/task.h>\n'
+# ── Step A: insert susfs_def.h guard after sched/task.h ──
+# Use regex so any text following on the next line doesn't matter
+# (KernelSU-Next setup may insert its own includes between sched/task.h
+#  and fs_context.h, changing the plain-string context).
+INCLUDE_ANCHOR_RE = r'(#include <linux/sched/task\.h>\n)'
+INCLUDE_INSERT = (
+    r'\1'
     '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
     '#include <linux/susfs_def.h>\n'
     '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
 )
 
-if ANCHOR not in content:
-    print('ERROR: anchor "#include <linux/sched/task.h>" not found in fs/namespace.c')
+if not re.search(INCLUDE_ANCHOR_RE, content):
+    print('ERROR: #include <linux/sched/task.h> not found in fs/namespace.c')
     sys.exit(1)
 
-content = content.replace(ANCHOR, INSERT_INCLUDES, 1)
+content = re.sub(INCLUDE_ANCHOR_RE, INCLUDE_INSERT, content, count=1)
 
-# ── Insert extern declarations + #define after "internal.h" include block
-# The line we want to insert after looks like:
-#   #include "internal.h"
-# followed by a blank line and then the comment about maximum mounts.
-ANCHOR2 = '#include "internal.h"\n'
-INSERT_EXTERNS = (
+# ── Step B: insert extern declarations after #include "internal.h" ──
+INTERNAL_ANCHOR = '#include "internal.h"\n'
+INTERNAL_INSERT = (
     '#include "internal.h"\n'
     '\n'
     '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
@@ -83,58 +93,52 @@ INSERT_EXTERNS = (
     '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
 )
 
-if ANCHOR2 not in content:
-    print('ERROR: anchor #include "internal.h" not found in fs/namespace.c')
+if INTERNAL_ANCHOR not in content:
+    print('ERROR: #include "internal.h" not found in fs/namespace.c')
     sys.exit(1)
 
-content = content.replace(ANCHOR2, INSERT_EXTERNS, 1)
+content = content.replace(INTERNAL_ANCHOR, INTERNAL_INSERT, 1)
 
 with open('fs/namespace.c', 'w') as f:
     f.write(content)
 
 print('      Done.')
+sys.exit(0)
 PYEOF
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Python failed for namespace.c hunk #1"
+        exit 1
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # fs/namespace.c  – Hunk #7
-# The main patch tried to add whitespace tweaks inside vfs_kern_mount(), but
-# this kernel version has a completely different vfs_kern_mount() implementation
-# (using fs_context).  The change is cosmetic whitespace only and has NO
-# functional impact – safely skipped.
+# Cosmetic whitespace inside vfs_kern_mount() – N/A for this kernel which uses
+# the fs_context-based implementation. Safely skipped.
 # ─────────────────────────────────────────────────────────────────────────────
-echo "[2/5] fs/namespace.c – hunk #7 (vfs_kern_mount whitespace) – SKIPPING (cosmetic, inapplicable to this kernel version)."
+echo "[2/5] fs/namespace.c – hunk #7 (vfs_kern_mount whitespace) – SKIPPING (cosmetic, N/A)."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # fs/namespace.c  – Hunks #9 and #10
-# Add the SUS_MOUNT guard block inside clone_mnt() before alloc_vfsmnt().
-# Also add blank line before lock_mount_hash().
+# SUS_MOUNT guard block inside clone_mnt() + blank line before lock_mount_hash.
 # ─────────────────────────────────────────────────────────────────────────────
 echo "[3/5] fs/namespace.c – clone_mnt() SUS_MOUNT guard (hunks #9 and #10)..."
 
-if grep -q "susfs_alloc_sus_vfsmnt\|bypass_orig_flow" fs/namespace.c; then
+if grep -q 'susfs_alloc_sus_vfsmnt\|bypass_orig_flow' fs/namespace.c; then
     echo "      Already patched – skipping."
 else
-    python3 - << 'PYEOF'
+    python3 << 'PYEOF'
 import sys
 
 with open('fs/namespace.c', 'r') as f:
     content = f.read()
 
-# ── Hunk #9: replace the plain alloc_vfsmnt inside clone_mnt with the full
-#    SUSFS guard block.  We match the exact lines present in the orig file.
+# alloc_vfsmnt(old->mnt_devname) is unique to clone_mnt (fc_mount uses fc->source)
 OLD_ALLOC = (
     '\tmnt = alloc_vfsmnt(old->mnt_devname);\n'
     '\tif (!mnt)\n'
     '\t\treturn ERR_PTR(-ENOMEM);\n'
 )
-
-# clone_mnt starts with "struct super_block *sb = old->mnt.mnt_sb;" – make
-# sure we only replace the first occurrence (inside clone_mnt, not fc_mount).
-# fc_mount uses alloc_vfsmnt(fc->source) so the text is different enough.
-if OLD_ALLOC not in content:
-    print('ERROR: expected alloc_vfsmnt block not found in clone_mnt context')
-    sys.exit(1)
 
 NEW_ALLOC = (
     '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
@@ -168,17 +172,18 @@ NEW_ALLOC = (
     '\t\treturn ERR_PTR(-ENOMEM);\n'
 )
 
+if OLD_ALLOC not in content:
+    print('ERROR: alloc_vfsmnt(old->mnt_devname) block not found in fs/namespace.c')
+    sys.exit(1)
+
 content = content.replace(OLD_ALLOC, NEW_ALLOC, 1)
 
-# ── Hunk #10: add blank line between mnt_parent = mnt and lock_mount_hash()
-#    inside clone_mnt.  We need to be specific – this pattern occurs only once
-#    in clone_mnt (line ~1092 in orig).
+# Hunk #10: blank line before lock_mount_hash() inside clone_mnt
 OLD_LOCK = (
     '\tmnt->mnt_parent = mnt;\n'
     '\tlock_mount_hash();\n'
     '\tlist_add_tail(&mnt->mnt_instance, &sb->s_mounts);\n'
 )
-
 NEW_LOCK = (
     '\tmnt->mnt_parent = mnt;\n'
     '\n'
@@ -186,11 +191,8 @@ NEW_LOCK = (
     '\tlist_add_tail(&mnt->mnt_instance, &sb->s_mounts);\n'
 )
 
-# There may be multiple occurrences; we only want the one inside clone_mnt.
-# clone_mnt's version is the first occurrence.
-count = content.count(OLD_LOCK)
-if count == 0:
-    print('WARNING: lock_mount_hash context not found – skipping hunk #10 (cosmetic).')
+if content.count(OLD_LOCK) == 0:
+    print('WARNING: lock_mount_hash context not found – hunk #10 skipped (cosmetic).')
 else:
     content = content.replace(OLD_LOCK, NEW_LOCK, 1)
 
@@ -198,95 +200,92 @@ with open('fs/namespace.c', 'w') as f:
     f.write(content)
 
 print('      Done.')
+sys.exit(0)
 PYEOF
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Python failed for namespace.c hunks #9/#10"
+        exit 1
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # fs/proc/task_mmu.c  – Hunk #8
-# The main patch failed because the kernel uses the newer mmap_read_unlock(mm)
-# API instead of up_read(&mm->mmap_sem).  We match the correct API here.
+# Patch expected up_read(&mm->mmap_sem) but kernel uses mmap_read_unlock(mm).
 # ─────────────────────────────────────────────────────────────────────────────
-echo "[4/5] fs/proc/task_mmu.c – pagemap_read SUS_MAP guard (hunk #8)..."
+echo "[4/5] fs/proc/task_mmu.c – pagemap_read() SUS_MAP guard (hunk #8)..."
 
-if grep -q "BIT_SUS_MAPS\|CONFIG_KSU_SUSFS_SUS_MAP" fs/proc/task_mmu.c; then
+if grep -q 'BIT_SUS_MAPS\|CONFIG_KSU_SUSFS_SUS_MAP' fs/proc/task_mmu.c; then
     echo "      Already patched – skipping."
 else
-    python3 - << 'PYEOF'
+    python3 << 'PYEOF'
 import sys
 
 with open('fs/proc/task_mmu.c', 'r') as f:
     content = f.read()
 
-# Try modern API first (mmap_read_unlock), then legacy (up_read mmap_sem)
-PATTERNS = [
-    (
-        '\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n'
-        '\t\tmmap_read_unlock(mm);\n'
-        '\t\tstart_vaddr = end;\n',
-        '\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n'
-        '\t\tmmap_read_unlock(mm);\n'
-        '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-        '\t\tvma = find_vma(mm, start_vaddr);\n'
-        '\t\tif (vma && vma->vm_file) {\n'
-        '\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n'
-        '\t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\n'
-        '\t\t\t\tpm.buffer->pme = 0;\n'
-        '\t\t\t}\n'
-        '\t\t}\n'
-        '#endif\n'
-        '\t\tstart_vaddr = end;\n'
-    ),
-    (
-        '\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n'
-        '\t\tup_read(&mm->mmap_sem);\n'
-        '\t\tstart_vaddr = end;\n',
-        '\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n'
-        '\t\tup_read(&mm->mmap_sem);\n'
-        '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-        '\t\tvma = find_vma(mm, start_vaddr);\n'
-        '\t\tif (vma && vma->vm_file) {\n'
-        '\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n'
-        '\t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\n'
-        '\t\t\t\tpm.buffer->pme = 0;\n'
-        '\t\t\t}\n'
-        '\t\t}\n'
-        '#endif\n'
-        '\t\tstart_vaddr = end;\n'
-    ),
+SUS_MAP_BLOCK = (
+    '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
+    '\t\tvma = find_vma(mm, start_vaddr);\n'
+    '\t\tif (vma && vma->vm_file) {\n'
+    '\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n'
+    '\t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\n'
+    '\t\t\t\tpm.buffer->pme = 0;\n'
+    '\t\t\t}\n'
+    '\t\t}\n'
+    '#endif\n'
+)
+
+UNLOCK_VARIANTS = [
+    '\t\tmmap_read_unlock(mm);\n',       # modern kernel API
+    '\t\tup_read(&mm->mmap_sem);\n',     # legacy kernel API
 ]
 
 patched = False
-for old, new in PATTERNS:
+for unlock_line in UNLOCK_VARIANTS:
+    old = (
+        '\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n'
+        + unlock_line
+        + '\t\tstart_vaddr = end;\n'
+    )
+    new = (
+        '\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n'
+        + unlock_line
+        + SUS_MAP_BLOCK
+        + '\t\tstart_vaddr = end;\n'
+    )
     if old in content:
         content = content.replace(old, new, 1)
         patched = True
+        print(f'      Matched: {unlock_line.strip()}')
         break
 
 if not patched:
-    print('ERROR: walk_page_range/mmap_read_unlock context not found in task_mmu.c')
+    print('ERROR: walk_page_range/unlock context not found in fs/proc/task_mmu.c')
     sys.exit(1)
 
 with open('fs/proc/task_mmu.c', 'w') as f:
     f.write(content)
 
 print('      Done.')
+sys.exit(0)
 PYEOF
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Python failed for task_mmu.c hunk #8"
+        exit 1
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # include/linux/mount.h  – Hunk #1
-# Replace ANDROID_KABI_RESERVE(4) with a CONFIG-guarded ANDROID_KABI_USE
-# that stores the susfs backup mount ID.
-# The patch failed due to line-number mismatch (struct vfsmount is at a
-# different offset in this tree).  We search for the pattern directly.
+# Replace ANDROID_KABI_RESERVE(4) with CONFIG-guarded ANDROID_KABI_USE.
 # ─────────────────────────────────────────────────────────────────────────────
-echo "[5/5] include/linux/mount.h – vfsmount ANDROID_KABI_RESERVE(4) → KABI_USE..."
+echo "[5/5] include/linux/mount.h – ANDROID_KABI_RESERVE(4) → KABI_USE..."
 
-if grep -q "susfs_mnt_id_backup\|KABI_USE.*4.*susfs" include/linux/mount.h; then
+if grep -q 'susfs_mnt_id_backup' include/linux/mount.h; then
     echo "      Already patched – skipping."
 else
-    python3 - << 'PYEOF'
-import sys, re
+    python3 << 'PYEOF'
+import sys
 
 with open('include/linux/mount.h', 'r') as f:
     content = f.read()
@@ -302,7 +301,6 @@ NEW = (
 
 if OLD not in content:
     print('ERROR: ANDROID_KABI_RESERVE(4) not found in include/linux/mount.h')
-    print('       You may need to add susfs_mnt_id_backup manually.')
     sys.exit(1)
 
 content = content.replace(OLD, NEW, 1)
@@ -311,18 +309,23 @@ with open('include/linux/mount.h', 'w') as f:
     f.write(content)
 
 print('      Done.')
+sys.exit(0)
 PYEOF
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Python failed for mount.h hunk #1"
+        exit 1
+    fi
 fi
 
 echo ""
 echo "=== All supplementary fixes applied successfully! ==="
 echo ""
 echo "Summary of changes:"
-echo "  fs/namespace.c         – susfs_def.h include, extern declarations,"
-echo "                           clone_mnt() SUS_MOUNT guard block"
+echo "  fs/namespace.c         – susfs_def.h include (regex anchor),"
+echo "                           extern declarations, clone_mnt() SUS_MOUNT guard"
 echo "  fs/proc/task_mmu.c     – pagemap_read() SUS_MAP guard"
 echo "  include/linux/mount.h  – ANDROID_KABI_USE(4, susfs_mnt_id_backup)"
 echo ""
-echo "NOTE: hunk #7 (vfs_kern_mount whitespace) was intentionally skipped –"
-echo "      this kernel uses a different vfs_kern_mount implementation and the"
-echo "      change was cosmetic whitespace only."
+echo "NOTE: hunk #7 (vfs_kern_mount whitespace) intentionally skipped –"
+echo "      this kernel uses the fs_context-based vfs_kern_mount implementation"
+echo "      and the change was purely cosmetic whitespace."
