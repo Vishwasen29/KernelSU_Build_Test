@@ -1,4 +1,4 @@
-name: Test Build LineageOS OPlus SM8250 Kernel
+name: KSUN Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
