@@ -110,7 +110,7 @@ jobs:
        set -o pipefail
        patch -p1 --forward \
        < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch \
-       2>&1 | tee patch_main_log.txt
+       2>&1 | tee patch_main_log.txt || true
 
     - name: Collect patch debug files
       run: |
