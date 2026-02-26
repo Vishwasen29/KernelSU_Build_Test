@@ -85,6 +85,7 @@ jobs:
           }' security/Kconfig
         fi
 
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh  || true
         # Enable KernelSU manual hook
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
