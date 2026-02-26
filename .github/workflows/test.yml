@@ -111,7 +111,7 @@ jobs:
       # kernel-version differences (fs_context API, mmap_read_unlock, etc.)
       run: |
         cd kernel_workspace/android-kernel
-        chmod +x $GITHUB_WORKSPACE/patches/susfs_supplementary_fix.sh
+        chmod +x $GITHUB_WORKSPACE/patches/susfs_fix.sh
         bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
         echo "Supplementary fix applied"
 
