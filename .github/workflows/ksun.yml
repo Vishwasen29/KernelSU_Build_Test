@@ -131,31 +131,39 @@ jobs:
           exit 1
         fi
 
-    - name: Package with AnyKernel3
+    - name: Prepare AnyKernel3 and package
       run: |
         cd kernel_workspace
+
         git clone --depth=1 https://github.com/osm0sis/AnyKernel3
 
         sed -i 's/do.devicecheck=1/do.devicecheck=0/' AnyKernel3/anykernel.sh
         sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/' AnyKernel3/anykernel.sh
 
-        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+        cd android-kernel/out/arch/arm64/boot
 
-        cd AnyKernel3
-        ZIP_NAME=AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-KSUNext-Baseband-${{ env.BUILD_TIME }}.zip
-        zip -r $ZIP_NAME ./*
+        # Use correct kernel image for OPlus SM8250
+        if [ -f Image.gz-dtb ]; then
+          KERNEL_IMAGE=Image.gz-dtb
+        elif [ -f Image.gz ]; then
+          KERNEL_IMAGE=Image.gz
+        else
+          KERNEL_IMAGE=Image
+        fi
+
+        echo "Using kernel image: $KERNEL_IMAGE"
+
+        cp $KERNEL_IMAGE $GITHUB_WORKSPACE/kernel_workspace/AnyKernel3/
+
+        cd $GITHUB_WORKSPACE/kernel_workspace/AnyKernel3
+
+        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+          ZIP_NAME=AK3-${{ env.Lineage_VERSION }}-SM8250-rsuntk_KSU_${{ env.RSKSUVER }}.zip
+        else
+          ZIP_NAME=AK3-${{ env.Lineage_VERSION }}-SM8250-backslashxx_KSU_${{ env.XXKSUVER }}.zip
+        fi
+
+        # Important: -r9 without compression issues
+        zip -r9 $ZIP_NAME ./*
 
         echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-
-    - name: Upload Kernel Image
-      if: env.CHECK_IMAGE == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: Image
-        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
-
-    - name: Upload AnyKernel3 ZIP
-      uses: actions/upload-artifact@v4
-      with:
-        name: AK3-KernelSU-Next-Baseband
-        path: kernel_workspace/AnyKernel3/${{ env.ZIP_NAME }}
