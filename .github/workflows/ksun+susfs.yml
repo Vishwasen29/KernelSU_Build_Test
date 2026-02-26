@@ -103,33 +103,12 @@ jobs:
           cp -r kernel/fs backup_originals/fs 2>/dev/null || true
           cp -r kernel/include/linux backup_originals/include_linux 2>/dev/null || true
 
+ 
     - name: Apply susfs patch
       run: |
+       
         cd kernel_workspace/android-kernel
-        git clone --depth=1 --branch kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
-        
-        cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU-Next/
-        cp susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch .
-        cp susfs4ksu/kernel_patches/fs/* fs/
-        cp susfs4ksu/kernel_patches/include/linux/* include/linux/
-
-
-    - name: Apply KernelSU SUSFS patch
-      run: |
-       cd kernel_workspace/android-kernel/KernelSU-Next
-       patch -p1 < 10_enable_susfs_for_ksu.patch | tee patch_ksu_log.txt || true
-
-    - name: Apply main SUSFS kernel patch
-      run: |
-       cd kernel_workspace/android-kernel
-       patch -p1 < 50_add_susfs_in_kernel-4.19.patch | tee patch_main_log.txt || true
-
-    - name: Apply SUSFS reject fixes        # <-- ADD THIS STEP
-      run: |
-       cd kernel_workspace/android-kernel
-       patch -p1 --forward --reject-file=/dev/null \
-       < $GITHUB_WORKSPACE/patches/ksu_susfs.patch | tee patch_rejects_log.txt || true
-      
+        patch -p1 --forward --reject-file=- < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
 
     - name: Collect reject files
       run: |
