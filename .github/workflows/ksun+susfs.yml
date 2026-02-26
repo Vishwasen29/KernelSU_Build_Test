@@ -124,6 +124,13 @@ jobs:
        cd kernel_workspace/android-kernel
        patch -p1 < 50_add_susfs_in_kernel-4.19.patch | tee patch_main_log.txt || true
 
+    - name: Apply SUSFS reject fixes        # <-- ADD THIS STEP
+      run: |
+       cd kernel_workspace/android-kernel
+       patch -p1 --forward --reject-file=/dev/null \
+       < $GITHUB_WORKSPACE/patches/ksu_susfs.patch | tee patch_rejects_log.txt || true
+      
+
     - name: Collect reject files
       run: |
        mkdir -p patch_rejects
