@@ -136,10 +136,18 @@ jobs:
 
       - name: Apply SUSFS patches
         run: |
+          
           cd kernel_workspace/android-kernel
-          set -x
-          bash $GITHUB_WORKSPACE/patches/fic.sh "$PWD" "$GITHUB_WORKSPACE/patches"
-          find . -name "*.rej" -ls
+          set -o pipefail
+          patch -p1 --forward \
+          < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch \
+          2>&1 | tee patch_main_log.txt || true
+          echo "Main patch applied (failures expected for namespace.c, task_mmu.c, mount.h)"
+
+          chmod +x $GITHUB_WORKSPACE/patches/susfs_fix.sh
+          bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
+          echo "Supplementary fix applied"
+
 
       - name: Upload SUSFS debug artifacts
         if: always()
