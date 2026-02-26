@@ -1,0 +1,85 @@
+name: OSS OPlus SM8650 Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "AzusaHana"
+        git config --global user.email "chenyue2330@gmail.com"
+
+    - name: Clean up disk space
+      run: |
+        sudo apt-get clean
+        sudo rm -rf /usr/share/dotnet /etc/mysql /var/lib/mysql
+        sudo rm -rf /usr/local/lib/android
+        df -h
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3 git curl
+
+    - name: Install repo tool
+      run: |
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+        chmod a+x ~/repo
+        sudo mv ~/repo /usr/local/bin/repo
+
+    - name: Initialize repo and sync
+      run: |
+        mkdir kernel_workspace && cd kernel_workspace
+        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/sm8650 -m oneplus12_v.xml --depth=1
+        repo sync
+
+    - name: Setup KernelSU
+      run: |
+        cd kernel_workspace/kernel_platform
+        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+        cd ./KernelSU
+        KSU_VERSION=$(expr $(/usr/bin/git rev-list --count HEAD) "+" 10200)
+        sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+        
+    - name: Make working directory clean to avoid dirty
+      run: |
+        cd kernel_workspace/kernel_platform/common
+        rm android/abi_gki_protected_exports_* || echo "No protected exports!"
+        git add -A && git commit -a -m "Add KernelSU"
+        repo status
+
+    - name: Build kernel
+      run: |
+        cd kernel_workspace
+        ./kernel_platform/build_with_bazel.py -t pineapple gki
+
+    - name: Make AnyKernel3
+      run: |
+        git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
+        rm -rf ./AnyKernel3/.git
+        cp kernel_workspace/kernel_platform/out/msm-kernel-pineapple-gki/dist/Image ./AnyKernel3/
+
+    - name: Upload AnyKernel3
+      uses: actions/upload-artifact@v4
+      with:
+        name: AnyKernel3-OSS-oneplus12_v
+        path: ./AnyKernel3/*
+
+    - name: Upload kernel Image
+      uses: actions/upload-artifact@v4
+      with:
+        name: Image-OSS-oneplus12_v
+        path: kernel_workspace/kernel_platform/out/msm-kernel-pineapple-gki/dist/Image
+
+    - name: Upload boot.img
+      uses: actions/upload-artifact@v4
+      with:
+        name: boot-OSS-oneplus12_v.img
+        path: kernel_workspace/kernel_platform/out/msm-kernel-pineapple-gki/dist/boot.img
