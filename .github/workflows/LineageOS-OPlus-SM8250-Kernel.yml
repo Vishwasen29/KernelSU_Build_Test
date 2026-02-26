@@ -59,10 +59,16 @@ jobs:
         cd kernel_workspace/android-kernel
 
         if [ "${{ matrix.ks }}" = "rsuntk" ]; then
-          curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
+          #curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
+
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+          
           bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
+          
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
-          RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
+          RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         else
           curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh | bash -s master
