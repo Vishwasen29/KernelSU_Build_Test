@@ -1,0 +1,437 @@
+name: A test build LineageOS OPlus SM8250 Kernel
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-23.2
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set swap to 10G
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
+
+      - name: Setup build environment
+        run: |
+          echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%y%m%d")" >> $GITHUB_ENV
+          echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date "+%Y-%m-%d")" >> $GITHUB_ENV
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            git ccache automake flex lzop bison gperf build-essential zip curl \
+            zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool make \
+            squashfs-tools dpkg-dev libssl-dev python3 bc libc6-dev-i386 \
+            libncurses5-dev
+
+          mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+          key: ${{ env.CLANG_VERSION }}
+
+      - name: Download Clang (if cache miss)
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          mkdir -p clang-aosp
+          wget -O ${CLANG_VERSION}.tar.gz \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+          tar -C clang-aosp -zxvf ${CLANG_VERSION}.tar.gz
+
+      - name: Clone Kernel Source
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          git clone --recursive https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+            -b ${{ env.Lineage_VERSION }} android-kernel --depth=1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # KernelSU setup
+      # rsuntk/KernelSU branch "susfs-rksu-master" already contains the
+      # SUSFS Kconfig entries — no separate 10_enable patch needed.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Setup KernelSU (rsuntk susfs-rksu-master)
+        run: |
+          cd kernel_workspace/android-kernel
+          curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" \
+            | bash -s susfs-rksu-master
+
+          bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
+
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+
+          RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
+          echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+          sed -i 's/ -dirty//g' scripts/setlocalversion
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Verify KernelSU Kconfig has SUSFS symbols BEFORE patching.
+      # Correct location is KernelSU/kernel/Kconfig, NOT drivers/ or fs/.
+      # If this fails, the branch doesn't have SUSFS integrated.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Verify SUSFS Kconfig symbols exist in KernelSU
+        run: |
+          cd kernel_workspace/android-kernel
+
+          KCONFIG="KernelSU/kernel/Kconfig"
+
+          if [ ! -f "$KCONFIG" ]; then
+            echo "❌ $KCONFIG not found — KernelSU setup failed"
+            exit 1
+          fi
+
+          echo "=== KSU_SUSFS config entries in $KCONFIG ==="
+          grep "config KSU_SUSFS" "$KCONFIG" || echo "  (none found)"
+          echo "============================================="
+
+          REQUIRED_SYMBOLS=(
+            "config KSU_SUSFS"
+            "config KSU_SUSFS_SUS_PATH"
+            "config KSU_SUSFS_SUS_MOUNT"
+            "config KSU_SUSFS_SUS_KSTAT"
+            "config KSU_SUSFS_TRY_UMOUNT"
+            "config KSU_SUSFS_SPOOF_UNAME"
+            "config KSU_SUSFS_OPEN_REDIRECT"
+            "config KSU_SUSFS_ENABLE_LOG"
+            "config KSU_SUSFS_SUS_SU"
+          )
+
+          MISSING=0
+          for sym in "${REQUIRED_SYMBOLS[@]}"; do
+            if grep -q "$sym" "$KCONFIG"; then
+              echo "  ✅ $sym"
+            else
+              echo "  ❌ MISSING: $sym"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+
+          if [ "$MISSING" -gt 0 ]; then
+            echo ""
+            echo "❌ $MISSING Kconfig symbol(s) missing."
+            echo "   The branch 'susfs-rksu-master' may not have SUSFS Kconfig."
+            echo "   Apply 10_enable_susfs_for_ksu.patch to KernelSU/ and retry."
+            exit 1
+          fi
+
+          echo "✅ All SUSFS Kconfig symbols present"
+
+      - name: Apply SUSFS patches
+        run: |
+          cd kernel_workspace/android-kernel
+          set -x
+          bash $GITHUB_WORKSPACE/patches/fic.sh "$PWD" "$GITHUB_WORKSPACE/patches"
+          find . -name "*.rej" -ls
+
+      - name: Upload SUSFS debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs-reject-files
+          path: susfs_debug/
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Verify the kernel SOURCE FILES were patched correctly.
+      # Runs AFTER fic.sh so we see the actual post-patch state.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Verify SUSFS kernel source patches
+        run: |
+          cd kernel_workspace/android-kernel
+
+          FAIL=0
+          check_file() {
+            local file="$1" pattern="$2" label="$3"
+            if grep -q "$pattern" "$file" 2>/dev/null; then
+              echo "  ✅ $label"
+            else
+              echo "  ❌ MISSING: $label  (in $file)"
+              FAIL=$((FAIL + 1))
+            fi
+          }
+
+          echo "=== Core SUSFS files ==="
+          [ -f fs/susfs.c ]                && echo "  ✅ fs/susfs.c"                || { echo "  ❌ fs/susfs.c missing";                FAIL=$((FAIL+1)); }
+          [ -f include/linux/susfs.h ]     && echo "  ✅ include/linux/susfs.h"     || { echo "  ❌ include/linux/susfs.h missing";     FAIL=$((FAIL+1)); }
+          [ -f include/linux/susfs_def.h ] && echo "  ✅ include/linux/susfs_def.h" || { echo "  ❌ include/linux/susfs_def.h missing"; FAIL=$((FAIL+1)); }
+
+          echo ""
+          echo "=== fs/Makefile ==="
+          check_file fs/Makefile "susfs.o" "susfs.o in fs/Makefile"
+
+          echo ""
+          echo "=== fs/namespace.c ==="
+          check_file fs/namespace.c "susfs_def\.h"           "susfs_def.h include"
+          check_file fs/namespace.c "susfs_alloc_sus_vfsmnt" "susfs_alloc_sus_vfsmnt call"
+          check_file fs/namespace.c "bypass_orig_flow"       "bypass_orig_flow label"
+          check_file fs/namespace.c "CL_COPY_MNT_NS"         "CL_COPY_MNT_NS define"
+
+          echo ""
+          echo "=== include/linux/mount.h ==="
+          check_file include/linux/mount.h "susfs_mnt_id_backup" "susfs_mnt_id_backup KABI entry"
+
+          echo ""
+          echo "=== fs/proc/task_mmu.c ==="
+          check_file fs/proc/task_mmu.c "BIT_SUS_MAPS" "BIT_SUS_MAPS guard"
+
+          echo ""
+          echo "=== fs/proc/base.c ==="
+          check_file fs/proc/base.c "susfs" "susfs hooks in proc/base.c"
+
+          echo "========================================="
+          if [ "$FAIL" -gt 0 ]; then
+            echo "❌ $FAIL source check(s) failed — patches incomplete"
+            echo "   Review the susfs-reject-files artifact for .rej details"
+            exit 1
+          fi
+          echo "✅ All source patch checks passed"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Add SUSFS options to defconfig
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Add KernelSU & SUSFS configs
+        run: |
+          cd kernel_workspace/android-kernel
+          DEF=arch/arm64/configs/vendor/kona-perf_defconfig
+
+          echo "CONFIG_KSU=y"                       >> $DEF
+          echo "CONFIG_KSU_KPROBES_HOOK=y"          >> $DEF
+          echo "CONFIG_KSU_SUSFS=y"                 >> $DEF
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y"        >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"       >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"       >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y"   >> $DEF
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"      >> $DEF
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"     >> $DEF
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"   >> $DEF
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"      >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_SU=y"          >> $DEF
+
+      - name: Print namespace.c diff
+        run: |
+          cd kernel_workspace/android-kernel
+          git diff fs/namespace.c
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Build
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Build Kernel
+        run: |
+          cd kernel_workspace/android-kernel
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+          export KBUILD_BUILD_HOST=Github-Action
+          export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
+          MAKE="make O=out CC=clang CLANG_TRIPLE=aarch64-linux-gnu- LD=ld.lld LLVM=1"
+
+          # Step 1: Generate .config from defconfig + oplus fragment
+          yes "" | $MAKE vendor/kona-perf_defconfig vendor/oplus.config
+
+          # Step 2: Force-enable all SUSFS options into out/.config
+          ./scripts/config --file out/.config \
+            --enable CONFIG_KSU \
+            --enable CONFIG_KSU_SUSFS \
+            --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT \
+            --enable CONFIG_KSU_SUSFS_SUS_PATH \
+            --enable CONFIG_KSU_SUSFS_SUS_MOUNT \
+            --enable CONFIG_KSU_SUSFS_SUS_KSTAT \
+            --enable CONFIG_KSU_SUSFS_SUS_OVERLAYFS \
+            --enable CONFIG_KSU_SUSFS_TRY_UMOUNT \
+            --enable CONFIG_KSU_SUSFS_SPOOF_UNAME \
+            --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT \
+            --enable CONFIG_KSU_SUSFS_ENABLE_LOG \
+            --enable CONFIG_KSU_SUSFS_SUS_SU
+
+          # Step 3: Re-resolve dependencies
+          $MAKE olddefconfig
+
+          # ── Validate final .config BEFORE full compile ───────────────────
+          # NOTE: .config doesn't exist until after Step 1 above runs — this
+          # is the correct place for config checks, not in a separate step.
+          echo "--- All KSU_SUSFS entries in final .config ---"
+          grep "KSU_SUSFS" out/.config || true
+          echo "----------------------------------------------"
+
+          MISSING_CFG=0
+          check_config() {
+            if grep -q "^${1}=y" out/.config; then
+              echo "  ✅ ${1}=y"
+            else
+              echo "  ❌ ${1} missing or not =y in .config"
+              MISSING_CFG=$((MISSING_CFG + 1))
+            fi
+          }
+
+          check_config CONFIG_KSU
+          check_config CONFIG_KSU_SUSFS
+          check_config CONFIG_KSU_SUSFS_SUS_MOUNT
+          check_config CONFIG_KSU_SUSFS_SUS_PATH
+          check_config CONFIG_KSU_SUSFS_SUS_KSTAT
+          check_config CONFIG_KSU_SUSFS_TRY_UMOUNT
+          check_config CONFIG_KSU_SUSFS_SPOOF_UNAME
+          check_config CONFIG_KSU_SUSFS_OPEN_REDIRECT
+          check_config CONFIG_KSU_SUSFS_ENABLE_LOG
+          check_config CONFIG_KSU_SUSFS_SUS_SU
+
+          if [ "$MISSING_CFG" -gt 0 ]; then
+            echo ""
+            echo "❌ .config validation failed — $MISSING_CFG option(s) not enabled"
+            echo "   Kconfig symbols still missing. Check 'Verify SUSFS Kconfig' step."
+            exit 1
+          fi
+          echo "✅ .config validated — starting full build"
+
+          # Step 4: Full compile
+          make -j$(nproc --all) O=out CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            LD=ld.lld LLVM=1
+
+      - name: Verify Kernel Output
+        run: |
+          cd kernel_workspace/android-kernel/out
+          if [ -f arch/arm64/boot/Image ]; then
+            echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+            echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+          else
+            echo "❌ Kernel build failed — Image not found"
+            exit 1
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Post-build verification
+      # Uses System.map and autoconf.h — reliable, not strings on Image.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Post-Build SUSFS Verification
+        if: env.CHECK_IMAGE == 'true'
+        run: |
+          cd kernel_workspace/android-kernel
+          FAIL=0
+
+          echo "=== 1. susfs.o compiled? ==="
+          if find out -name "susfs.o" | grep -q .; then
+            echo "  ✅ susfs.o found:"
+            find out -name "susfs.o"
+          else
+            echo "  ❌ susfs.o NOT found — SUSFS compiled out entirely"
+            FAIL=$((FAIL + 1))
+          fi
+
+          echo ""
+          echo "=== 2. SUSFS symbols in System.map ==="
+          if [ -f out/System.map ]; then
+            SUSFS_SYMS=$(grep -ic "susfs" out/System.map)
+            if [ "$SUSFS_SYMS" -gt 0 ]; then
+              echo "  ✅ $SUSFS_SYMS SUSFS symbols linked into kernel:"
+              grep -i "susfs" out/System.map | head -20
+            else
+              echo "  ❌ No SUSFS symbols in System.map — code was compiled out"
+              FAIL=$((FAIL + 1))
+            fi
+          else
+            echo "  ⚠️  System.map not found — skipping symbol check"
+          fi
+
+          echo ""
+          echo "=== 3. Key SUSFS function symbols present? ==="
+          if [ -f out/System.map ]; then
+            check_sym() {
+              if grep -q " $1$" out/System.map; then
+                echo "  ✅ $1"
+              else
+                echo "  ❌ MISSING: $1"
+                FAIL=$((FAIL + 1))
+              fi
+            }
+            check_sym "susfs_sus_path"
+            check_sym "susfs_try_umount"
+            check_sym "susfs_spoof_uname"
+          fi
+
+          echo ""
+          echo "=== 4. CONFIG_KSU_SUSFS_* defines in autoconf.h ==="
+          # autoconf.h is what the compiler actually sees — ground truth
+          if [ -f out/include/generated/autoconf.h ]; then
+            SUSFS_DEFS=$(grep -c "define CONFIG_KSU_SUSFS" out/include/generated/autoconf.h)
+            if [ "$SUSFS_DEFS" -gt 0 ]; then
+              echo "  ✅ $SUSFS_DEFS CONFIG_KSU_SUSFS_* defines in autoconf.h:"
+              grep "define CONFIG_KSU_SUSFS" out/include/generated/autoconf.h
+            else
+              echo "  ❌ No CONFIG_KSU_SUSFS defines in autoconf.h"
+              echo "     SUSFS not compiled despite being in .config"
+              FAIL=$((FAIL + 1))
+            fi
+          else
+            echo "  ⚠️  autoconf.h not found"
+          fi
+
+          echo ""
+          echo "======================================="
+          if [ "$FAIL" -gt 0 ]; then
+            echo "❌ Post-build: $FAIL check(s) failed — SUSFS not properly integrated"
+            exit 1
+          fi
+          echo "✅ Post-build verification passed — SUSFS fully integrated"
+
+      - name: Package AnyKernel3
+        if: env.CHECK_IMAGE == 'true'
+        run: |
+          cd kernel_workspace
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+          sed -i 's!BLOCK=.*!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+          sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+          rm -rf AnyKernel3/.git* AnyKernel3/README.md
+          cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+          cd AnyKernel3
+          zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250_KSU_${{ env.RSKSUVER }}.zip ./*
+
+      - name: Upload Kernel Image
+        if: env.CHECK_IMAGE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image
+          path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+      - name: Upload AnyKernel3 ZIP
+        if: env.CHECK_IMAGE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: AK3
+          path: kernel_workspace/AnyKernel3/*.zip
+
+      - name: Save Build Info
+        run: |
+          cd kernel_workspace
+          {
+            echo "KSU_VERSION=${{ env.RSKSUVER }}"
+            echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+            echo "BUILD_TIME=${{ env.BUILD_TIME_1 }}"
+          } > build-info.txt
+
+      - name: Upload Build Info
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Info
+          path: kernel_workspace/build-info.txt
+          
