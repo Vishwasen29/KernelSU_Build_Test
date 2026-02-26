@@ -112,37 +112,37 @@ jobs:
         cp susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch .
         cp susfs4ksu/kernel_patches/fs/* fs/
         cp susfs4ksu/kernel_patches/include/linux/* include/linux/
-        
+
+
     - name: Apply KernelSU SUSFS patch
       run: |
-          cd kernel_workspace/android-kernel/KernelSU-Next
-          patch -p1 < 10_enable_susfs_for_ksu.patch || true
+       cd kernel_workspace/android-kernel/KernelSU-Next
+       patch -p1 < 10_enable_susfs_for_ksu.patch | tee patch_ksu_log.txt || true
 
     - name: Apply main SUSFS kernel patch
       run: |
-          cd kernel_workspace/android-kernel
-          patch -p1 < 50_add_susfs_in_kernel-4.19.patch || true
+       cd kernel_workspace/android-kernel
+       patch -p1 < 50_add_susfs_in_kernel-4.19.patch | tee patch_main_log.txt || true
 
     - name: Collect reject files
       run: |
-          mkdir -p patch_rejects
-          find kernel -name "*.rej" -exec cp --parents {} patch_rejects/ \; || true
-
-      # ------------------------------------------------
-      # UPLOAD ARTIFACTS
-      # ------------------------------------------------
-    - name: Upload Original Files
-      uses: actions/upload-artifact@v4
-      with:
-       name: original-files
-       path: backup_originals
+       mkdir -p patch_rejects
+       find kernel_workspace/android-kernel -name "*.rej" -exec cp --parents {} patch_rejects/ \; || true
 
     - name: Upload Patch Rejects
       uses: actions/upload-artifact@v4
       with:
         name: patch-rejects
         path: patch_rejects
-          
+
+    - name: Upload Patch Logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: patch-logs
+        path: |
+          kernel_workspace/android-kernel/patch_main_log.txt
+          kernel_workspace/android-kernel/KernelSU-Next/patch_ksu_log.txt
+ 
 
     - name: Build kernel
       run: |
