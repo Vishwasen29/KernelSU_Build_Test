@@ -112,7 +112,7 @@ jobs:
       run: |
         cd kernel_workspace/android-kernel
         chmod +x $GITHUB_WORKSPACE/patches/susfs_supplementary_fix.sh
-        bash $GITHUB_WORKSPACE/patches/susfs_supplementary_fix.sh .
+        bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
         echo "Supplementary fix applied"
 
     - name: Verify SUSFS patch coverage
