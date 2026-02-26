@@ -1,0 +1,607 @@
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -26,10 +26,37 @@
+ #include <linux/bootmem.h>
+ #include <linux/task_work.h>
+ #include <linux/sched/task.h>
++#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_TRY_UMOUNT)
++#include <linux/susfs_def.h>
++#endif
+ 
+ #include "pnode.h"
+ #include "internal.h"
+ 
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++extern bool susfs_is_current_ksu_domain(void);
++extern bool susfs_is_current_zygote_domain(void);
++
++static DEFINE_IDA(susfs_mnt_id_ida);
++static DEFINE_IDA(susfs_mnt_group_ida);
++
++#define CL_ZYGOTE_COPY_MNT_NS BIT(24) /* used by copy_mnt_ns() */
++#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */
++#endif
++
++#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
++extern void susfs_auto_add_sus_ksu_default_mount(const char __user *to_pathname);
++bool susfs_is_auto_add_sus_ksu_default_mount_enabled = true;
++#endif
++#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
++extern int susfs_auto_add_sus_bind_mount(const char *pathname, struct path *path_target);
++bool susfs_is_auto_add_sus_bind_mount_enabled = true;
++#endif
++#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
++extern void susfs_auto_add_try_umount_for_bind_mount(struct path *path);
++bool susfs_is_auto_add_try_umount_for_bind_mount_enabled = true;
++#endif
++
+ /* Maximum number of mounts in a mount namespace */
+ unsigned int sysctl_mount_max __read_mostly = 100000;
+ 
+@@ -1035,7 +1062,17 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
+ 	struct mount *mnt;
+ 	int err;
+ 
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++	bool is_current_ksu_domain = susfs_is_current_ksu_domain();
++	bool is_current_zygote_domain = susfs_is_current_zygote_domain();
++
++	/* - It is very important that we need to use CL_COPY_MNT_NS to identify whether
++	 *   the clone is a copy_tree() or single mount like called by __do_loopback()
++	 * - if caller process is KSU, consider the following situation:
++	 *     1. it is NOT doing unshare => call alloc_vfsmnt() to assign a new sus mnt_id
++	 *     2. it is doing unshare => spoof the new mnt_id with the old mnt_id
++	 * - If caller process is zygote and old mnt_id is sus => call alloc_vfsmnt() to assign a new sus mnt_id
++	 * - For the rest of caller process that doing unshare => call alloc_vfsmnt() to assign a new sus mnt_id only for old sus mount
++	 */
++	// Firstly, check if it is KSU process
++	if (unlikely(is_current_ksu_domain)) {
++		// if it is doing single clone
++		if (!(flag & CL_COPY_MNT_NS)) {
++			mnt = alloc_vfsmnt(old->mnt_devname, true, 0);
++			goto bypass_orig_flow;
++		}
++		// if it is doing unshare
++		mnt = alloc_vfsmnt(old->mnt_devname, true, old->mnt_id);
++		if (mnt) {
++			mnt->mnt.susfs_mnt_id_backup = DEFAULT_SUS_MNT_ID_FOR_KSU_PROC_UNSHARE;
++		}
++		goto bypass_orig_flow;
++	}
++	// Secondly, check if it is zygote process and no matter it is doing unshare or not
++	if (likely(is_current_zygote_domain) && (old->mnt_id >= DEFAULT_SUS_MNT_ID)) {
++		/* Important Note:
++		 *  - Here we can't determine whether the unshare is called zygisk or not,
++		 *    so we can only patch out the unshare code in zygisk source code for now
++		 *  - But at least we can deal with old sus mounts using alloc_vfsmnt()
++		 */
++		mnt = alloc_vfsmnt(old->mnt_devname, true, 0);
++		goto bypass_orig_flow;
++	}
++	// Lastly, for other process that is doing unshare operation, but only deal with old sus mount
++	if ((flag & CL_COPY_MNT_NS) && (old->mnt_id >= DEFAULT_SUS_MNT_ID)) {
++		mnt = alloc_vfsmnt(old->mnt_devname, true, 0);
++		goto bypass_orig_flow;
++	}
++	mnt = alloc_vfsmnt(old->mnt_devname, false, 0);
++bypass_orig_flow:
++#else
+ 	mnt = alloc_vfsmnt(old->mnt_devname);
++#endif
+ 	if (!mnt)
+ 		return ERR_PTR(-ENOMEM);
+ 
+@@ -1091,6 +1169,15 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
+ 	mnt->mnt.mnt_root = dget(root);
+ 	mnt->mnt_mountpoint = mnt->mnt.mnt_root;
+ 	mnt->mnt_parent = mnt;
++
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++	// If caller process is zygote and not doing unshare, so we just reorder the mnt_id
++	if (likely(is_current_zygote_domain) && !(flag & CL_ZYGOTE_COPY_MNT_NS)) {
++		mnt->mnt.susfs_mnt_id_backup = mnt->mnt_id;
++		mnt->mnt_id = current->susfs_last_fake_mnt_id++;
++	}
++#endif
++
+ 	lock_mount_hash();
+ 	list_add_tail(&mnt->mnt_instance, &sb->s_mounts);
+ 	unlock_mount_hash();
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -20,6 +20,9 @@
+ #include <linux/uaccess.h>
+ #include <linux/pkeys.h>
+ #include <linux/mm_inline.h>
++#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
++#include <linux/susfs_def.h>
++#endif
+ 
+ #include <asm/elf.h>
+ #include <asm/tlb.h>
+--- a/include/linux/mount.h
++++ b/include/linux/mount.h
+@@ -72,7 +72,14 @@ struct vfsmount {
+ 	ANDROID_KABI_RESERVE(1);
+ 	ANDROID_KABI_RESERVE(2);
+ 	ANDROID_KABI_RESERVE(3);
++#ifdef CONFIG_KSU_SUSFS
++	ANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);
++#else
+ 	ANDROID_KABI_RESERVE(4);
++#endif
++#if defined(CONFIG_KSU_SUSFS) && !defined(ANDROID_KABI_RESERVE)
++	u64 susfs_mnt_id_backup;
++#endif
+ 	void *data;
+ } __randomize_layout;
+ 
+--- a/KernelSU-Next/kernel/Makefile
++++ b/KernelSU-Next/kernel/Makefile
+@@ -29,14 +29,6 @@ $(warning "KSU_GIT_VERSION not defined! It is better to make KernelSU a git sub
+ ccflags-y += -DKSU_VERSION=16
+ endif
+ 
+-ifeq ($(shell grep -q " current_sid(void)" $(srctree)/security/selinux/include/objsec.h; echo $$?),0)
+-ccflags-y += -DKSU_COMPAT_HAS_CURRENT_SID
+-endif
+-
+-ifeq ($(shell grep -q "struct selinux_state " $(srctree)/security/selinux/include/security.h; echo $$?),0)
+-ccflags-y += -DKSU_COMPAT_HAS_SELINUX_STATE
+-endif
+-
+ ifndef KSU_EXPECTED_SIZE
+ KSU_EXPECTED_SIZE := 0x033b
+ endif
+@@ -56,14 +48,84 @@ $(info -- KernelSU Manager signature hash: $(KSU_EXPECTED_HASH))
+ ccflags-y += -DEXPECTED_SIZE=$(KSU_EXPECTED_SIZE)
+ ccflags-y += -DEXPECTED_HASH=\"$(KSU_EXPECTED_HASH)\"
+ 
+-ifeq ($(shell grep -q "int path_umount" $(srctree)/fs/namespace.c; echo $$?),0)
++ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-conversion -Wno-gcc-compat
++ccflags-y += -Wno-declaration-after-statement -Wno-unused-function
++
++## For non-gki compatiblity ##
++ifeq ($(shell grep -q " current_sid(void)" $(srctree)/security/selinux/include/objsec.h; echo $$?),0)
++ccflags-y += -DKSU_COMPAT_HAS_CURRENT_SID
++endif
++
++ifeq ($(shell grep -q "struct selinux_state " $(srctree)/security/selinux/include/security.h; echo $$?),0)
++ccflags-y += -DKSU_COMPAT_HAS_SELINUX_STATE
++endif
++
+ ccflags-y += -DKSU_UMOUNT
+-else
+-$(info -- Did you know you can backport path_umount to fs/namespace.c from 5.9?)
+-$(info -- Read: https://kernelsu.org/guide/how-to-integrate-for-non-gki.html#how-to-backport-path-umount)
++ifneq ($(shell grep -Eq "get_cred_rcu" $(srctree)/include/linux/cred.h; echo $$?),0)
++$(info -- KSU_SUSFS: adding function 'static inline const struct cred *get_cred_rcu();' to $(srctree)/include/linux/cred.h)
++GET_CRED_RCU = static inline const struct cred *get_cred_rcu(const struct cred *cred)\n\
++{\n\t\
++	struct cred *nonconst_cred = (struct cred *) cred;\n\t\
++	if (!cred)\n\t\t\
++		return NULL;\n\t\
++	if (!atomic_inc_not_zero(&nonconst_cred->usage))\n\t\t\
++		return NULL;\n\t\
++	validate_creds(cred);\n\t\
++	return cred;\n\
++}\n
++$(shell sed -i '/^static inline void put_cred/i $(GET_CRED_RCU)' $(srctree)/include/linux/cred.h;)
++endif
++
++ifneq ($(shell grep -Eq "^static int can_umount" $(srctree)/fs/namespace.c; echo $$?),0)
++$(info -- KSU_SUSFS: adding function 'static int can_umount(const struct path *path, int flags);' to $(srctree)/fs/namespace.c)
++CAN_UMOUNT = static int can_umount(const struct path *path, int flags)\n\
++{\n\t\
++        struct mount *mnt = real_mount(path->mnt);\n\t\
++        if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))\n\t\t\
++                return -EINVAL;\n\t\
++        if (!may_mount())\n\t\t\
++                return -EPERM;\n\t\
++        if (path->dentry != path->mnt->mnt_root)\n\t\t\
++                return -EINVAL;\n\t\
++        if (!check_mnt(mnt))\n\t\t\
++                return -EINVAL;\n\t\
++        if (mnt->mnt.mnt_flags & MNT_LOCKED)\n\t\t\
++                return -EINVAL;\n\t\
++        if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))\n\t\t\
++                return -EPERM;\n\t\
++        return 0;\n\
++}\n
++$(shell sed -i '/^static bool is_mnt_ns_file/i $(CAN_UMOUNT)' $(srctree)/fs/namespace.c;)
++endif
++
++ifneq ($(shell grep -Eq "^int path_umount" $(srctree)/fs/namespace.c; echo $$?),0)
++$(info -- KSU_SUSFS: adding function 'int path_umount(struct path *path, int flags);' to $(srctree)/fs/namespace.c)
++PATH_UMOUNT = int path_umount(struct path *path, int flags)\n\
++{\n\t\
++        struct mount *mnt = real_mount(path->mnt);\n\t\
++        int ret;\n\t\
++        ret = can_umount(path, flags);\n\t\
++        if (!ret)\n\t\t\
++                ret = do_umount(mnt, flags);\n\t\
++        dput(path->dentry);\n\t\
++        mntput_no_expire(mnt);\n\t\
++        return ret;\n\
++}\n
++$(shell sed -i '/^static bool is_mnt_ns_file/i $(PATH_UMOUNT)' $(srctree)/fs/namespace.c;)
++endif
++
++ifneq ($(shell grep -Eq "^int path_umount" $(srctree)/fs/internal.h; echo $$?),0)
++$(shell sed -i '/^extern void __init mnt_init/a int path_umount(struct path *path, int flags);' $(srctree)/fs/internal.h;)
++$(info -- KSU_SUSFS: adding 'int path_umount(struct path *path, int flags);' to $(srctree)/fs/internal.h)
++endif
++
++## For susfs stuff ##
++ifeq ($(shell test -e $(srctree)/fs/susfs.c; echo $$?),0)
++$(eval SUSFS_VERSION=$(shell cat $(srctree)/include/linux/susfs.h | grep -E '^#define SUSFS_VERSION' | cut -d' ' -f3 | sed 's/\"//g'))
++$(info )
++$(info -- SUSFS_VERSION: $(SUSFS_VERSION))
++else
++$(info -- You have not integrate susfs in your kernel.)
++$(info -- Read: https://gitlab.com/simonpunk/susfs4ksu)
+ endif
+-
+-ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-int-conversion -Wno-gcc-compat
+-ccflags-y += -Wno-declaration-after-statement -Wno-unused-function
+-
+-# Keep a new line here!! Because someone may append config
++# Keep a new line here!! Because someone may append config
+--- a/KernelSU-Next/kernel/allowlist.c
++++ b/KernelSU-Next/kernel/allowlist.c
+@@ -92,7 +92,7 @@ static uint8_t allow_list_bitmap[PAGE_SIZE] __read_mostly __aligned(PAGE_SIZE);
+ static struct work_struct ksu_save_work;
+ static struct work_struct ksu_load_work;
+ 
+-bool persistent_allow_list(void);
++static bool persistent_allow_list(void);
+ 
+ void ksu_show_allow_list(void)
+ {
+@@ -352,7 +352,7 @@ bool ksu_get_allow_list(int *array, int *length, bool allow)
+ 	return true;
+ }
+ 
+-void do_save_allow_list(struct work_struct *work)
++static void do_save_allow_list(struct work_struct *work)
+ {
+ 	u32 magic = FILE_MAGIC;
+ 	u32 version = FILE_FORMAT_VERSION;
+@@ -394,7 +394,7 @@ exit:
+ 	filp_close(fp, 0);
+ }
+ 
+-void do_load_allow_list(struct work_struct *work)
++static void do_load_allow_list(struct work_struct *work)
+ {
+ 	loff_t off = 0;
+ 	ssize_t ret = 0;
+@@ -484,7 +484,7 @@ void ksu_prune_allowlist(bool (*is_uid_valid)(uid_t, char *, void *), void *dat
+ }
+ 
+ // make sure allow list works cross boot
+-bool persistent_allow_list(void)
++static bool persistent_allow_list(void)
+ {
+ 	return ksu_queue_work(&ksu_save_work);
+ }
+--- a/KernelSU-Next/kernel/apk_sign.c
++++ b/KernelSU-Next/kernel/apk_sign.c
+@@ -314,7 +314,12 @@ module_param_cb(ksu_debug_manager_uid, &expected_size_ops,
+ 
+ #endif
+ 
+-bool is_manager_apk(char *path)
++bool ksu_is_manager_apk(char *path)
+ {
++#ifdef CONFIG_KSU_SUSFS
++	return (check_v2_signature(path, EXPECTED_SIZE, EXPECTED_HASH) ||
++			check_v2_signature(path, 384, "7e0c6d7278a3bb8e364e0fcba95afaf3666cf5ff3c245a3b63c8833bd0445cc4")); // 5ec1cff
++#else
+ 	return check_v2_signature(path, EXPECTED_SIZE, EXPECTED_HASH);
++#endif
+ }
+--- a/KernelSU-Next/kernel/apk_sign.h
++++ b/KernelSU-Next/kernel/apk_sign.h
+@@ -3,6 +3,6 @@
+ 
+ #include <linux/types.h>
+ 
+-bool is_manager_apk(char *path);
++bool ksu_is_manager_apk(char *path);
+ 
+ #endif
+--- a/KernelSU-Next/kernel/kernel_compat.h
++++ b/KernelSU-Next/kernel/kernel_compat.h
+@@ -29,6 +29,7 @@ extern struct key *init_session_keyring;
+ #endif
+ 
+ extern void ksu_android_ns_fs_check();
++extern int ksu_access_ok(const void *addr, unsigned long size);
+ extern struct file *ksu_filp_open_compat(const char *filename, int flags,
+ 					 umode_t mode);
+ extern ssize_t ksu_kernel_read_compat(struct file *p, void *buf, size_t count,
+--- a/KernelSU-Next/kernel/ksu.c
++++ b/KernelSU-Next/kernel/ksu.c
+@@ -11,6 +11,10 @@
+ #include "ksu.h"
+ #include "throne_tracker.h"
+ 
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs.h>
++#endif
++
+ static struct workqueue_struct *ksu_workqueue;
+ 
+ bool ksu_queue_work(struct work_struct *work)
+@@ -49,6 +53,10 @@ int __init kernelsu_init(void)
+ 	pr_alert("*************************************************************");
+ #endif
+ 
++#ifdef CONFIG_KSU_SUSFS
++	susfs_init();
++#endif
++
+ 	ksu_core_init();
+ 
+ 	ksu_workqueue = alloc_ordered_workqueue("kernelsu_work_queue", 0);
+@@ -72,7 +80,7 @@ int __init kernelsu_init(void)
+ 	return 0;
+ }
+ 
+-void kernelsu_exit(void)
++void ksu_kernelsu_exit(void)
+ {
+ 	ksu_allowlist_exit();
+ 
+--- a/KernelSU-Next/kernel/ksud.c
++++ b/KernelSU-Next/kernel/ksud.c
+@@ -66,15 +66,15 @@ bool ksu_input_hook __read_mostly = true;
+ 
+ u32 ksu_devpts_sid;
+ 
+-void on_post_fs_data(void)
++void ksu_on_post_fs_data(void)
+ {
+ 	static bool done = false;
+ 	if (done) {
+-		pr_info("on_post_fs_data already done\n");
++		pr_info("ksu_on_post_fs_data already done\n");
+ 		return;
+ 	}
+ 	done = true;
+-	pr_info("on_post_fs_data!\n");
++	pr_info("ksu_on_post_fs_data!\n");
+ 	ksu_load_allow_list();
+ 	// sanity check, this may influence the performance
+ 	stop_input_hook();
+@@ -197,7 +197,7 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
+ 				first_arg);
+ 			if (!strcmp(first_arg, "second_stage")) {
+ 				pr_info("/system/bin/init second_stage executed\n");
+-				apply_kernelsu_rules();
++				ksu_apply_kernelsu_rules();
+ 				init_second_stage_executed = true;
+ 				ksu_android_ns_fs_check();
+ 			}
+@@ -221,7 +221,7 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
+ 			pr_info("/init first arg: %s\n", first_arg);
+ 			if (!strcmp(first_arg, "--second-stage")) {
+ 				pr_info("/init second_stage executed\n");
+-				apply_kernelsu_rules();
++				ksu_apply_kernelsu_rules();
+ 				init_second_stage_executed = true;
+ 				ksu_android_ns_fs_check();
+ 			}
+@@ -258,7 +258,7 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
+ 					    (!strcmp(env_value, "1") ||
+ 					     !strcmp(env_value, "true"))) {
+ 					pr_info("/init second_stage executed\n");
+-					apply_kernelsu_rules();
++					ksu_apply_kernelsu_rules();
+ 					init_second_stage_executed =
+ 						true;
+ 					ksu_android_ns_fs_check();
+@@ -273,7 +273,7 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
+ 		first_app_process = false;
+ 		pr_info("exec app_process, /data prepared, second_stage: %d\n",
+ 			init_second_stage_executed);
+-		on_post_fs_data(); // we keep this for old ksud
++		ksu_on_post_fs_data(); // we keep this for old ksud
+ 		stop_execve_hook();
+ 	}
+ 
+--- a/KernelSU-Next/kernel/ksud.h
++++ b/KernelSU-Next/kernel/ksud.h
+@@ -5,7 +5,7 @@
+ 
+ #define KSUD_PATH "/data/adb/ksud"
+ 
+-void on_post_fs_data(void);
++void ksu_on_post_fs_data(void);
+ 
+ bool ksu_is_safe_mode(void);
+ 
+--- a/KernelSU-Next/kernel/sucompat.c
++++ b/KernelSU-Next/kernel/sucompat.c
+@@ -24,7 +24,7 @@
+ #define SU_PATH "/system/bin/su"
+ #define SH_PATH "/system/bin/sh"
+ 
+-extern void escape_to_root();
++extern void ksu_escape_to_root();
+ 
+ static void __user *userspace_stack_buffer(const void *d, size_t len)
+ {
+@@ -136,7 +136,7 @@ int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
+ 	pr_info("do_execveat_common su found\n");
+ 	memcpy((void *)filename->name, sh, sizeof(sh));
+ 
+-	escape_to_root();
++	ksu_escape_to_root();
+ 
+ 	return 0;
+ }
+@@ -163,7 +163,7 @@ int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user,
+ 	pr_info("sys_execve su found\n");
+ 	*filename_user = ksud_user_path();
+ 
+-	escape_to_root();
++	ksu_escape_to_root();
+ 
+ 	return 0;
+ }
+--- a/KernelSU-Next/kernel/throne_tracker.c
++++ b/KernelSU-Next/kernel/throne_tracker.c
+@@ -182,7 +182,7 @@ FILLDIR_RETURN_TYPE my_actor(struct dir_context *ctx, const char *name,
+ 			}
+ 		}
+ 
+-		bool is_manager = is_manager_apk(dirpath);
++		bool is_manager = ksu_is_manager_apk(dirpath);
+ 		pr_info("Found new base.apk at path: %s, is_manager: %d\n",
+ 			dirpath, is_manager);
+ 		if (is_manager) {
+@@ -278,7 +278,7 @@ static bool is_uid_exist(uid_t uid, char *package, void *data)
+ 	return exist;
+ }
+ 
+-void track_throne()
++void ksu_track_throne()
+ {
+ 	struct file *fp =
+ 		ksu_filp_open_compat(SYSTEM_PACKAGES_LIST_PATH, O_RDONLY, 0);
+--- a/KernelSU-Next/kernel/throne_tracker.h
++++ b/KernelSU-Next/kernel/throne_tracker.h
+@@ -5,6 +5,6 @@ void ksu_throne_tracker_init();
+ 
+ void ksu_throne_tracker_exit();
+ 
+-void track_throne();
++void ksu_track_throne();
+ 
+ #endif
+--- a/KernelSU-Next/kernel/selinux/rules.c
++++ b/KernelSU-Next/kernel/selinux/rules.c
+@@ -36,9 +36,9 @@ static struct policydb *get_policydb(void)
+ 	return db;
+ }
+ 
+-void apply_kernelsu_rules()
++void ksu_apply_kernelsu_rules()
+ {
+-	if (!getenforce()) {
++	if (!ksu_getenforce()) {
+ 		pr_info("SELinux permissive or disabled, apply rules!\n");
+ 	}
+ 
+@@ -134,6 +134,14 @@ void apply_kernelsu_rules()
+     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
+     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
+ 
++#ifdef CONFIG_KSU_SUSFS
++	// Allow umount in zygote process without installing zygisk
++	ksu_allow(db, "zygote", "labeledfs", "filesystem", "unmount");
++	susfs_set_init_sid();
++	susfs_set_ksu_sid();
++	susfs_set_zygote_sid();
++#endif
++
+ 	rcu_read_unlock();
+ }
+ 
+@@ -195,13 +203,13 @@ static void reset_avc_cache()
+ 	selinux_xfrm_notify_policyload();
+ }
+ 
+-int handle_sepolicy(unsigned long arg3, void __user *arg4)
++int ksu_handle_sepolicy(unsigned long arg3, void __user *arg4)
+ {
+ 	if (!arg4) {
+ 		return -1;
+ 	}
+ 
+-	if (!getenforce()) {
++	if (!ksu_getenforce()) {
+ 		pr_info("SELinux permissive or disabled when handle policy!\n");
+ 	}
+ 
+--- a/KernelSU-Next/kernel/selinux/selinux.c
++++ b/KernelSU-Next/kernel/selinux/selinux.c
+@@ -8,6 +8,14 @@
+ 
+ #define KERNEL_SU_DOMAIN "u:r:su:s0"
+ 
++#ifdef CONFIG_KSU_SUSFS
++#define KERNEL_INIT_DOMAIN "u:r:init:s0"
++#define KERNEL_ZYGOTE_DOMAIN "u:r:zygote:s0"
++u32 susfs_ksu_sid = 0;
++u32 susfs_init_sid = 0;
++u32 susfs_zygote_sid = 0;
++#endif
++
+ static int transive_to_domain(const char *domain)
+ {
+ 	struct cred *cred;
+@@ -37,7 +45,7 @@ static int transive_to_domain(const char *domain)
+ 	return error;
+ }
+ 
+-void setup_selinux(const char *domain)
++void ksu_setup_selinux(const char *domain)
+ {
+ 	if (transive_to_domain(domain)) {
+ 		pr_err("transive domain failed.\n");
+@@ -63,7 +71,7 @@ void setenforce(bool enforce)
+ #endif
+ }
+ 
+-bool getenforce()
++bool ksu_getenforce()
+ {
+ #ifdef CONFIG_SECURITY_SELINUX_DISABLE
+ #ifdef KSU_COMPAT_USE_SELINUX_STATE
+@@ -99,7 +107,7 @@ static inline u32 current_sid(void)
+ }
+ #endif
+ 
+-bool is_ksu_domain()
++bool ksu_is_ksu_domain()
+ {
+ 	char *domain;
+ 	u32 seclen;
+@@ -113,7 +121,7 @@ bool is_ksu_domain()
+ 	return result;
+ }
+ 
+-bool is_zygote(void *sec)
++bool ksu_is_zygote(void *sec)
+ {
+ 	struct task_security_struct *tsec = (struct task_security_struct *)sec;
+ 	if (!tsec) {
+@@ -131,6 +139,83 @@ bool is_zygote(void *sec)
+ 	return result;
+ }
+ 
++#ifdef CONFIG_KSU_SUSFS
++static inline void susfs_set_sid(const char *secctx_name, u32 *out_sid)
++{
++	int err;
++
++	if (!secctx_name || !out_sid) {
++		pr_err("secctx_name || out_sid is NULL\n");
++		return;
++	}
++
++	err = security_secctx_to_secid(secctx_name, strlen(secctx_name),
++				           out_sid);
++	if (err) {
++		pr_err("failed setting sid for '%s', err: %d\n", secctx_name, err);
++		return;
++	}
++	pr_info("sid '%u' is set for secctx_name '%s'\n", *out_sid, secctx_name);
++}
++
++bool susfs_is_sid_equal(void *sec, u32 sid2) {
++	struct task_security_struct *tsec = (struct task_security_struct *)sec;
++	if 
