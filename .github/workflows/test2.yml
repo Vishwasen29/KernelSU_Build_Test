@@ -82,6 +82,9 @@ jobs:
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
+      - name: Patch missing SUSFS entries into KernelSU Kconfig
+        run: bash $GITHUB_WORKSPACE/patches/patch_kconfig.sh kernel_workspace/android-kernel
+
       # ─────────────────────────────────────────────────────────────────────
       # Verify KernelSU Kconfig has SUSFS symbols BEFORE patching.
       # Correct location is KernelSU/kernel/Kconfig, NOT drivers/ or fs/.
