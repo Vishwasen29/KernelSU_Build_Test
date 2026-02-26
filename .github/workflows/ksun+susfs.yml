@@ -106,28 +106,26 @@ jobs:
  
     - name: Apply susfs patch
       run: |
-       
-        cd kernel_workspace/android-kernel
-        patch -p1 --forward --reject-file=- < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
+       cd kernel_workspace/android-kernel
+       set -o pipefail
+       patch -p1 --forward \
+       < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch \
+       2>&1 | tee patch_main_log.txt
 
-    - name: Collect reject files
+    - name: Collect patch debug files
       run: |
-       mkdir -p patch_rejects
-       find kernel_workspace/android-kernel -name "*.rej" -exec cp --parents {} patch_rejects/ \; || true
+       mkdir -p patch_artifacts
+       find kernel_workspace/android-kernel \
+       \( -name "*.rej" -o -name "*.orig" \) \
+       -exec cp --parents {} patch_artifacts/ \; || true
 
-    - name: Upload Patch Rejects
+    - name: Upload Patch Debug
       uses: actions/upload-artifact@v4
       with:
-        name: patch-rejects
-        path: patch_rejects
-
-    - name: Upload Patch Logs
-      uses: actions/upload-artifact@v4
-      with:
-        name: patch-logs
-        path: |
-          kernel_workspace/android-kernel/patch_main_log.txt
-          kernel_workspace/android-kernel/KernelSU-Next/patch_ksu_log.txt
+       name: susfs-patch-debug
+       path: |
+         patch_artifacts
+         kernel_workspace/android-kernel/patch_main_log.txt
  
     - name: Add KernelSU & SUSFS configs
       run: |
