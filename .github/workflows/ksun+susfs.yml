@@ -69,9 +69,10 @@ jobs:
         cd kernel_workspace/android-kernel
 
         # KernelSU-Next
-        curl -LSs \
-          https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-          | bash -s legacy
+        #curl -LSs \
+          #https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+         # | bash -s legacy
+         curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s
 
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
