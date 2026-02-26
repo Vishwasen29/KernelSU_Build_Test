@@ -143,7 +143,25 @@ jobs:
           kernel_workspace/android-kernel/patch_main_log.txt
           kernel_workspace/android-kernel/KernelSU-Next/patch_ksu_log.txt
  
+    - name: Add KernelSU & SUSFS configs
+      run: |
+          cd kernel_workspace/android-kernel
+          DEF=arch/arm64/configs/vendor/kona-perf_defconfig
 
+          echo "CONFIG_KSU=y" >> $DEF
+          echo "CONFIG_KSU_KPROBES_HOOK=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> $DEF
+          
     - name: Build kernel
       run: |
         cd kernel_workspace/android-kernel
