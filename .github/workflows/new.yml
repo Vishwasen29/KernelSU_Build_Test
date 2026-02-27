@@ -1,0 +1,274 @@
+name: A Test KSUN+SUSFS+fix Build LineageOS OPlus SM8250 Kernel
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-23.2
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    - name: Setup build environment
+      run: |
+        # FIX: explicitly pass TZ so date uses Asia/Shanghai, not the default UTC
+        echo "BUILD_TIME=$(TZ=Asia/Shanghai date +%y%m%d)" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date +%Y-%m-%d)" >> $GITHUB_ENV
+
+        sudo apt-get update
+        sudo apt-get install -y \
+          git ccache automake flex lzop bison gperf build-essential \
+          zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool \
+          make squashfs-tools dpkg-dev libssl-dev python3 bc \
+          libc6-dev-i386 libncurses5-dev wget
+
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+
+    - name: Cache Clang toolchain
+      id: cache-clang
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
+
+    - name: Download Clang (if cache miss)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        mkdir clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -xf ${CLANG_VERSION}.tar.gz -C clang-aosp
+
+    - name: Clone kernel source
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --depth=1 --recursive \
+          https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
+          -b ${{ env.Lineage_VERSION }} android-kernel
+
+    - name: Setup KernelSU-Next + Baseband-guard
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
+        # FIX: branch argument changed from 'legacy' (deleted) to 'next'
+        curl -LSs \
+          https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+          | bash -s next
+
+        # Baseband-guard
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+
+        # Fix LSM ordering safely
+        if grep -q "config LSM" security/Kconfig; then
+          sed -i '/^config LSM$/,/^help$/ {
+            /^[[:space:]]*default/ {
+              /baseband_guard/! s/selinux/selinux,baseband_guard/
+            }
+          }' security/Kconfig
+        fi
+
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
+
+        # FIX: only set MANUAL_HOOK here â€” KPROBES_HOOK is mutually exclusive
+        # and is removed from the "Add KernelSU & SUSFS configs" step below
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # Remove dirty tag
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
+        # Generate KernelSU version number
+        RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+
+    - name: Patch KernelSU Kconfig with SUSFS entries
+      # FIX: this step was missing entirely â€” without it olddefconfig silently
+      # drops every CONFIG_KSU_SUSFS_* because the Kconfig symbols have no type
+      run: |
+        bash $GITHUB_WORKSPACE/patches/patch_kconfig.sh \
+          $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
+    - name: Apply SUSFS patches
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        set -o pipefail
+
+        # FIX: each patch writes to its own log so none overwrites the previous
+        # FIX: sus_mounts.patch and inline.patch now have || true so a
+        #      "Reversed / already applied" result does not abort the step
+        patch -p1 --forward \
+          < $GITHUB_WORKSPACE/patches/sus_maps.patch \
+          2>&1 | tee patch_sus_maps.log || true
+        echo "sus_maps.patch applied"
+
+        patch -p1 --forward \
+          < $GITHUB_WORKSPACE/patches/sus_mounts.patch \
+          2>&1 | tee patch_sus_mounts.log || true
+        echo "sus_mounts.patch applied"
+
+        patch -p1 --forward \
+          < $GITHUB_WORKSPACE/patches/inline.patch \
+          2>&1 | tee patch_inline.log || true
+        echo "inline.patch applied"
+
+    - name: Collect patch rejects and originals
+      if: failure()
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        OUTPUT_DIR="patch_debug"
+        mkdir -p "$OUTPUT_DIR"
+
+        find . -name "*.rej" | while read rej; do
+          orig="${rej%.rej}"
+          orig="${orig#./}"
+          rej_clean="${rej#./}"
+
+          mkdir -p "$OUTPUT_DIR/$(dirname "$rej_clean")"
+
+          cp "$rej" "$OUTPUT_DIR/$rej_clean"
+
+          if [ -f "$orig" ]; then
+            cp "$orig" "$OUTPUT_DIR/${orig}.original"
+          else
+            echo "WARNING: original not found for $orig" \
+              >> "$OUTPUT_DIR/missing_originals.txt"
+          fi
+        done
+
+        echo "=== Reject summary ===" > "$OUTPUT_DIR/summary.txt"
+        find . -name "*.rej" | while read rej; do
+          echo "" >> "$OUTPUT_DIR/summary.txt"
+          echo "--- ${rej#./} ---" >> "$OUTPUT_DIR/summary.txt"
+          cat "$rej" >> "$OUTPUT_DIR/summary.txt"
+        done
+
+        echo "Files collected:"
+        find "$OUTPUT_DIR" -type f | sort
+
+    # FIX: was at 3-space indent (broken YAML); now correctly at 4-space
+    - name: Upload patch debug artifacts
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: patch-rejects-${{ github.run_number }}
+        path: ${{ github.workspace }}/kernel_workspace/android-kernel/patch_debug/
+        if-no-files-found: warn
+
+    - name: Apply SUSFS supplementary fix
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        chmod +x $GITHUB_WORKSPACE/patches/susfs_fix.sh
+        bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
+        echo "Supplementary fix applied"
+
+    - name: Verify SUSFS patch coverage
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        bash $GITHUB_WORKSPACE/patches/verify_susfs_patches.sh .
+
+    - name: Add KernelSU & SUSFS configs
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        DEF=arch/arm64/configs/vendor/kona-perf_defconfig
+
+        echo "CONFIG_KSU=y"                          >> $DEF
+        # FIX: CONFIG_KSU_KPROBES_HOOK removed â€” it conflicts with
+        #      CONFIG_KSU_MANUAL_HOOK set in the Setup step above;
+        #      having both causes undefined build behaviour
+        echo "CONFIG_KSU_SUSFS=y"                    >> $DEF
+        echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"    >> $DEF
+        echo "CONFIG_KSU_SUSFS_SUS_PATH=y"           >> $DEF
+        echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"          >> $DEF
+        echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"          >> $DEF
+        echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y"      >> $DEF
+        echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"         >> $DEF
+        echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"        >> $DEF
+        echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"      >> $DEF
+        echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"         >> $DEF
+        echo "CONFIG_KSU_SUSFS_SUS_SU=y"             >> $DEF
+
+    - name: Build kernel
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
+
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+
+    - name: Verify kernel output
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel/out
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+        else
+          echo "Kernel Image not found in out/arch/arm64/boot/"
+          exit 1
+        fi
+
+    - name: Prepare AnyKernel3 and package
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' \
+          AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+
+        cd AnyKernel3
+        zip -r \
+          AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-rsuntk_KSU_${{ env.RSKSUVER }}.zip \
+          ./*
+
+    - name: Upload Image artifact
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: Image-rsuntk
+        path: ${{ github.workspace }}/kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3 ZIP
+      uses: actions/upload-artifact@v4
+      with:
+        name: AK3-rsuntk
+        path: >-
+          ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-rsuntk_KSU_*.zip
+
+    - name: Save build info
+      run: |
+        {
+          echo "RSKSUVER=${{ env.RSKSUVER }}"
+          echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+          echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+        } > $GITHUB_WORKSPACE/kernel_workspace/build-info-rsuntk.txt
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v4
+      with:
+        name: INFO-rsuntk
+        path: ${{ github.workspace }}/kernel_workspace/build-info-rsuntk.txt
