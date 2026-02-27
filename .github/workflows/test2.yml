@@ -68,7 +68,7 @@ jobs:
       - name: Setup KernelSU (rsuntk susfs-rksu-master)
         run: |
           cd kernel_workspace/android-kernel
-          curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy
+          curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy-susfs
           
           bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
 
