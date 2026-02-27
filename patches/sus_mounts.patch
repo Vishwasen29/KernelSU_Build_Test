@@ -1,0 +1,578 @@
+From 4ba6dccf73a620e565803e5995d5748ecfbb56a2 Mon Sep 17 00:00:00 2001
+From: Matthew Wilcox <mawilcox@microsoft.com>
+Date: Thu, 7 Jun 2018 17:10:45 -0700
+Subject: [PATCH 1/5] lib/idr.c: remove simple_ida_lock
+
+Improve the scalability of the IDA by using the per-IDA xa_lock rather
+than the global simple_ida_lock.  IDAs are not typically used in
+performance-sensitive locations, but since we have this lock anyway, we
+can use it.  It is also a step towards converting the IDA from the radix
+tree to the XArray.
+
+[akpm@linux-foundation.org: idr.c needs xarray.h]
+Link: http://lkml.kernel.org/r/20180331125332.GF13332@bombadil.infradead.org
+Signed-off-by: Matthew Wilcox <mawilcox@microsoft.com>
+Reviewed-by: Andrew Morton <akpm@linux-foundation.org>
+Cc: Rasmus Villemoes <linux@rasmusvillemoes.dk>
+Cc: Daniel Vetter <daniel.vetter@ffwll.ch>
+Cc: Tejun Heo <tj@kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+ lib/idr.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/lib/idr.c b/lib/idr.c
+index ab5e917f0255..5a967d9a19c1 100644
+--- a/lib/idr.c
++++ b/lib/idr.c
+@@ -3,9 +3,9 @@
+ #include <linux/idr.h>
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
++#include <linux/xarray.h>
+ 
+ DEFINE_PER_CPU(struct ida_bitmap *, ida_bitmap);
+-static DEFINE_SPINLOCK(simple_ida_lock);
+ 
+ int idr_alloc_cmn(struct idr *idr, void *ptr, unsigned long *index,
+ 		  unsigned long start, unsigned long end, gfp_t gfp,
+@@ -465,7 +465,7 @@ int ida_simple_get(struct ida *ida, unsigned int start, unsigned int end,
+ 	if (!ida_pre_get(ida, gfp_mask))
+ 		return -ENOMEM;
+ 
+-	spin_lock_irqsave(&simple_ida_lock, flags);
++	xa_lock_irqsave(&ida->ida_rt, flags);
+ 	ret = ida_get_new_above(ida, start, &id);
+ 	if (!ret) {
+ 		if (id > max) {
+@@ -475,7 +475,7 @@ int ida_simple_get(struct ida *ida, unsigned int start, unsigned int end,
+ 			ret = id;
+ 		}
+ 	}
+-	spin_unlock_irqrestore(&simple_ida_lock, flags);
++	xa_unlock_irqrestore(&ida->ida_rt, flags);
+ 
+ 	if (unlikely(ret == -EAGAIN))
+ 		goto again;
+@@ -501,8 +501,8 @@ void ida_simple_remove(struct ida *ida, unsigned int id)
+ 	if ((int)id < 0)
+ 		return;
+ 
+-	spin_lock_irqsave(&simple_ida_lock, flags);
++	xa_lock_irqsave(&ida->ida_rt, flags);
+ 	ida_remove(ida, id);
+-	spin_unlock_irqrestore(&simple_ida_lock, flags);
++	xa_unlock_irqrestore(&ida->ida_rt, flags);
+ }
+ EXPORT_SYMBOL(ida_simple_remove);
+
+From ed8fd10d97a50ec424ae38a40351b5de060f9838 Mon Sep 17 00:00:00 2001
+From: Matthew Wilcox <willy@infradead.org>
+Date: Thu, 21 Jun 2018 15:36:45 -0400
+Subject: [PATCH 2/5] ida: Lock the IDA in ida_destroy
+
+The user has no need to handle locking between ida_simple_get() and
+ida_simple_remove().  They shouldn't be forced to think about whether
+ida_destroy() might be called at the same time as any of their other
+IDA manipulation calls.  Improve the documnetation while I'm in here.
+
+Signed-off-by: Matthew Wilcox <willy@infradead.org>
+---
+ lib/idr.c | 17 +++++++++++------
+ 1 file changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/lib/idr.c b/lib/idr.c
+index 5a967d9a19c1..60deb9811614 100644
+--- a/lib/idr.c
++++ b/lib/idr.c
+@@ -407,25 +407,30 @@ void ida_remove(struct ida *ida, int id)
+ EXPORT_SYMBOL(ida_remove);
+ 
+ /**
+- * ida_destroy - Free the contents of an ida
+- * @ida: ida handle
++ * ida_destroy() - Free all IDs.
++ * @ida: IDA handle.
++ *
++ * Calling this function frees all IDs and releases all resources used
++ * by an IDA.  When this call returns, the IDA is empty and can be reused
++ * or freed.  If the IDA is already empty, there is no need to call this
++ * function.
+  *
+- * Calling this function releases all resources associated with an IDA.  When
+- * this call returns, the IDA is empty and can be reused or freed.  The caller
+- * should not allow ida_remove() or ida_get_new_above() to be called at the
+- * same time.
++ * Context: Any context.
+  */
+ void ida_destroy(struct ida *ida)
+ {
++	unsigned long flags;
+ 	struct radix_tree_iter iter;
+ 	void __rcu **slot;
+ 
++	xa_lock_irqsave(&ida->ida_rt, flags);
+ 	radix_tree_for_each_slot(slot, &ida->ida_rt, &iter, 0) {
+ 		struct ida_bitmap *bitmap = rcu_dereference_raw(*slot);
+ 		if (!radix_tree_exception(bitmap))
+ 			kfree(bitmap);
+ 		radix_tree_iter_delete(&ida->ida_rt, &iter, slot);
+ 	}
++	xa_unlock_irqrestore(&ida->ida_rt, flags);
+ }
+ EXPORT_SYMBOL(ida_destroy);
+ 
+
+From e784224542fab4b3888d9103a1f678015221a7d1 Mon Sep 17 00:00:00 2001
+From: Matthew Wilcox <willy@infradead.org>
+Date: Tue, 20 Mar 2018 17:07:11 -0400
+Subject: [PATCH 3/5] ida: Add new API
+
+Add ida_alloc(), ida_alloc_min(), ida_alloc_max(), ida_alloc_range()
+and ida_free().  The ida_alloc_max() and ida_alloc_range() functions
+differ from ida_simple_get() in that they take an inclusive 'max'
+parameter instead of an exclusive 'end' parameter.  Callers are about
+evenly split whether they'd like inclusive or exclusive parameters and
+'max' is easier to document than 'end'.
+
+Change the IDA allocation to first attempt to allocate a bit using
+existing memory, and only allocate memory afterwards.  Also change the
+behaviour of 'min' > INT_MAX from being a BUG() to returning -ENOSPC.
+
+Leave compatibility wrappers in place for ida_simple_get() and
+ida_simple_remove() to avoid changing all callers.
+
+Signed-off-by: Matthew Wilcox <willy@infradead.org>
+---
+ include/linux/idr.h | 59 ++++++++++++++++++++++++++++++++++++--
+ lib/idr.c           | 70 ++++++++++++++++++++-------------------------
+ 2 files changed, 87 insertions(+), 42 deletions(-)
+
+diff --git a/include/linux/idr.h b/include/linux/idr.h
+index a57549b51a5c..e13e6a0b04df 100644
+--- a/include/linux/idr.h
++++ b/include/linux/idr.h
+@@ -251,15 +251,68 @@ int ida_get_new_above(struct ida *ida, int starting_id, int *p_id);
+ void ida_remove(struct ida *ida, int id);
+ void ida_destroy(struct ida *ida);
+ 
+-int ida_simple_get(struct ida *ida, unsigned int start, unsigned int end,
+-		   gfp_t gfp_mask);
+-void ida_simple_remove(struct ida *ida, unsigned int id);
++int ida_alloc_range(struct ida *, unsigned int min, unsigned int max, gfp_t);
++void ida_free(struct ida *, unsigned int id);
++
++/**
++ * ida_alloc() - Allocate an unused ID.
++ * @ida: IDA handle.
++ * @gfp: Memory allocation flags.
++ *
++ * Allocate an ID between 0 and %INT_MAX, inclusive.
++ *
++ * Context: Any context.
++ * Return: The allocated ID, or %-ENOMEM if memory could not be allocated,
++ * or %-ENOSPC if there are no free IDs.
++ */
++static inline int ida_alloc(struct ida *ida, gfp_t gfp)
++{
++	return ida_alloc_range(ida, 0, ~0, gfp);
++}
++
++/**
++ * ida_alloc_min() - Allocate an unused ID.
++ * @ida: IDA handle.
++ * @min: Lowest ID to allocate.
++ * @gfp: Memory allocation flags.
++ *
++ * Allocate an ID between @min and %INT_MAX, inclusive.
++ *
++ * Context: Any context.
++ * Return: The allocated ID, or %-ENOMEM if memory could not be allocated,
++ * or %-ENOSPC if there are no free IDs.
++ */
++static inline int ida_alloc_min(struct ida *ida, unsigned int min, gfp_t gfp)
++{
++	return ida_alloc_range(ida, min, ~0, gfp);
++}
++
++/**
++ * ida_alloc_max() - Allocate an unused ID.
++ * @ida: IDA handle.
++ * @max: Highest ID to allocate.
++ * @gfp: Memory allocation flags.
++ *
++ * Allocate an ID between 0 and @max, inclusive.
++ *
++ * Context: Any context.
++ * Return: The allocated ID, or %-ENOMEM if memory could not be allocated,
++ * or %-ENOSPC if there are no free IDs.
++ */
++static inline int ida_alloc_max(struct ida *ida, unsigned int max, gfp_t gfp)
++{
++	return ida_alloc_range(ida, 0, max, gfp);
++}
+ 
+ static inline void ida_init(struct ida *ida)
+ {
+ 	INIT_RADIX_TREE(&ida->ida_rt, IDR_RT_MARKER | GFP_NOWAIT);
+ }
+ 
++#define ida_simple_get(ida, start, end, gfp)	\
++			ida_alloc_range(ida, start, (end) - 1, gfp)
++#define ida_simple_remove(ida, id)	ida_free(ida, id)
++
+ /**
+  * ida_get_new - allocate new ID
+  * @ida:	idr handle
+diff --git a/lib/idr.c b/lib/idr.c
+index 60deb9811614..0f28e93ecd61 100644
+--- a/lib/idr.c
++++ b/lib/idr.c
+@@ -199,7 +199,8 @@ EXPORT_SYMBOL(idr_replace_ext);
+  * bit per ID, and so is more space efficient than an IDR.  To use an IDA,
+  * define it using DEFINE_IDA() (or embed a &struct ida in a data structure,
+  * then initialise it using ida_init()).  To allocate a new ID, call
+- * ida_simple_get().  To free an ID, call ida_simple_remove().
++ * ida_alloc(), ida_alloc_min(), ida_alloc_max() or ida_alloc_range().
++ * To free an ID, call ida_free().
+  *
+  * If you have more complex locking requirements, use a loop around
+  * ida_pre_get() and ida_get_new() to allocate a new ID.  Then use
+@@ -260,7 +261,7 @@ EXPORT_SYMBOL(idr_replace_ext);
+  * Allocate new ID above or equal to @start.  It should be called
+  * with any required locks to ensure that concurrent calls to
+  * ida_get_new_above() / ida_get_new() / ida_remove() are not allowed.
+- * Consider using ida_simple_get() if you do not have complex locking
++ * Consider using ida_alloc_range() if you do not have complex locking
+  * requirements.
+  *
+  * If memory is required, it will return %-EAGAIN, you should unlock
+@@ -435,43 +436,34 @@ void ida_destroy(struct ida *ida)
+ EXPORT_SYMBOL(ida_destroy);
+ 
+ /**
+- * ida_simple_get - get a new id.
+- * @ida: the (initialized) ida.
+- * @start: the minimum id (inclusive, < 0x8000000)
+- * @end: the maximum id (exclusive, < 0x8000000 or 0)
+- * @gfp_mask: memory allocation flags
+- *
+- * Allocates an id in the range start <= id < end, or returns -ENOSPC.
+- * On memory allocation failure, returns -ENOMEM.
++ * ida_alloc_range() - Allocate an unused ID.
++ * @ida: IDA handle.
++ * @min: Lowest ID to allocate.
++ * @max: Highest ID to allocate.
++ * @gfp: Memory allocation flags.
+  *
+- * Compared to ida_get_new_above() this function does its own locking, and
+- * should be used unless there are special requirements.
++ * Allocate an ID between @min and @max, inclusive.  The allocated ID will
++ * not exceed %INT_MAX, even if @max is larger.
+  *
+- * Use ida_simple_remove() to get rid of an id.
++ * Context: Any context.
++ * Return: The allocated ID, or %-ENOMEM if memory could not be allocated,
++ * or %-ENOSPC if there are no free IDs.
+  */
+-int ida_simple_get(struct ida *ida, unsigned int start, unsigned int end,
+-		   gfp_t gfp_mask)
++int ida_alloc_range(struct ida *ida, unsigned int min, unsigned int max,
++			gfp_t gfp)
+ {
+ 	int ret, id;
+-	unsigned int max;
+ 	unsigned long flags;
+ 
+-	BUG_ON((int)start < 0);
+-	BUG_ON((int)end < 0);
++	if ((int)min < 0)
++		return -ENOSPC;
+ 
+-	if (end == 0)
+-		max = 0x80000000;
+-	else {
+-		BUG_ON(end < start);
+-		max = end - 1;
+-	}
++	if ((int)max < 0)
++		max = INT_MAX;
+ 
+ again:
+-	if (!ida_pre_get(ida, gfp_mask))
+-		return -ENOMEM;
+-
+ 	xa_lock_irqsave(&ida->ida_rt, flags);
+-	ret = ida_get_new_above(ida, start, &id);
++	ret = ida_get_new_above(ida, min, &id);
+ 	if (!ret) {
+ 		if (id > max) {
+ 			ida_remove(ida, id);
+@@ -482,24 +474,24 @@ int ida_simple_get(struct ida *ida, unsigned int start, unsigned int end,
+ 	}
+ 	xa_unlock_irqrestore(&ida->ida_rt, flags);
+ 
+-	if (unlikely(ret == -EAGAIN))
++	if (unlikely(ret == -EAGAIN)) {
++		if (!ida_pre_get(ida, gfp))
++			return -ENOMEM;
+ 		goto again;
++	}
+ 
+ 	return ret;
+ }
+-EXPORT_SYMBOL(ida_simple_get);
++EXPORT_SYMBOL(ida_alloc_range);
+ 
+ /**
+- * ida_simple_remove - remove an allocated id.
+- * @ida: the (initialized) ida.
+- * @id: the id returned by ida_simple_get.
+- *
+- * Use to release an id allocated with ida_simple_get().
++ * ida_free() - Release an allocated ID.
++ * @ida: IDA handle.
++ * @id: Previously allocated ID.
+  *
+- * Compared to ida_remove() this function does its own locking, and should be
+- * used unless there are special requirements.
++ * Context: Any context.
+  */
+-void ida_simple_remove(struct ida *ida, unsigned int id)
++void ida_free(struct ida *ida, unsigned int id)
+ {
+ 	unsigned long flags;
+ 
+@@ -510,4 +502,4 @@ void ida_simple_remove(struct ida *ida, unsigned int id)
+ 	ida_remove(ida, id);
+ 	xa_unlock_irqrestore(&ida->ida_rt, flags);
+ }
+-EXPORT_SYMBOL(ida_simple_remove);
++EXPORT_SYMBOL(ida_free);
+
+From 9ba899398576d329288b023566d3a731470ad13a Mon Sep 17 00:00:00 2001
+From: Matthew Wilcox <willy@infradead.org>
+Date: Mon, 11 Jun 2018 12:03:31 -0400
+Subject: [PATCH 4/5] fs: Convert unnamed_dev_ida to new API
+
+The new API is much easier for this user.  Also add kerneldoc for
+get_anon_bdev().
+
+Signed-off-by: Matthew Wilcox <willy@infradead.org>
+---
+ fs/super.c | 67 +++++++++++++++++++-----------------------------------
+ 1 file changed, 24 insertions(+), 43 deletions(-)
+
+diff --git a/fs/super.c b/fs/super.c
+index e6019ede66e5..b1fa625c89b6 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -955,58 +955,42 @@ void emergency_remount(void)
+ 	}
+ }
+ 
+-/*
+- * Unnamed block devices are dummy devices used by virtual
+- * filesystems which don't use real block-devices.  -- jrs
+- */
+-
+ static DEFINE_IDA(unnamed_dev_ida);
+-static DEFINE_SPINLOCK(unnamed_dev_lock);/* protects the above */
+-/* Many userspace utilities consider an FSID of 0 invalid.
+- * Always return at least 1 from get_anon_bdev.
+- */
+-static int unnamed_dev_start = 1;
+ 
++/**
++ * get_anon_bdev - Allocate a block device for filesystems which don't have one.
++ * @p: Pointer to a dev_t.
++ *
++ * Filesystems which don't use real block devices can call this function
++ * to allocate a virtual block device.
++ *
++ * Context: Any context.  Frequently called while holding sb_lock.
++ * Return: 0 on success, -EMFILE if there are no anonymous bdevs left
++ * or -ENOMEM if memory allocation failed.
++ */
+ int get_anon_bdev(dev_t *p)
+ {
+ 	int dev;
+-	int error;
+ 
+- retry:
+-	if (ida_pre_get(&unnamed_dev_ida, GFP_ATOMIC) == 0)
+-		return -ENOMEM;
+-	spin_lock(&unnamed_dev_lock);
+-	error = ida_get_new_above(&unnamed_dev_ida, unnamed_dev_start, &dev);
+-	if (!error)
+-		unnamed_dev_start = dev + 1;
+-	spin_unlock(&unnamed_dev_lock);
+-	if (error == -EAGAIN)
+-		/* We raced and lost with another CPU. */
+-		goto retry;
+-	else if (error)
+-		return -EAGAIN;
+-
+-	if (dev >= (1 << MINORBITS)) {
+-		spin_lock(&unnamed_dev_lock);
+-		ida_remove(&unnamed_dev_ida, dev);
+-		if (unnamed_dev_start > dev)
+-			unnamed_dev_start = dev;
+-		spin_unlock(&unnamed_dev_lock);
+-		return -EMFILE;
+-	}
+-	*p = MKDEV(0, dev & MINORMASK);
++	/*
++	 * Many userspace utilities consider an FSID of 0 invalid.
++	 * Always return at least 1 from get_anon_bdev.
++	 */
++	dev = ida_alloc_range(&unnamed_dev_ida, 1, (1 << MINORBITS) - 1,
++			GFP_ATOMIC);
++	if (dev == -ENOSPC)
++		dev = -EMFILE;
++	if (dev < 0)
++		return dev;
++
++	*p = MKDEV(0, dev);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(get_anon_bdev);
+ 
+ void free_anon_bdev(dev_t dev)
+ {
+-	int slot = MINOR(dev);
+-	spin_lock(&unnamed_dev_lock);
+-	ida_remove(&unnamed_dev_ida, slot);
+-	if (slot < unnamed_dev_start)
+-		unnamed_dev_start = slot;
+-	spin_unlock(&unnamed_dev_lock);
++	ida_free(&unnamed_dev_ida, MINOR(dev));
+ }
+ EXPORT_SYMBOL(free_anon_bdev);
+ 
+@@ -1014,7 +998,6 @@ int set_anon_super(struct super_block *s, void *data)
+ {
+ 	return get_anon_bdev(&s->s_dev);
+ }
+-
+ EXPORT_SYMBOL(set_anon_super);
+ 
+ void kill_anon_super(struct super_block *sb)
+@@ -1023,7 +1006,6 @@ void kill_anon_super(struct super_block *sb)
+ 	generic_shutdown_super(sb);
+ 	free_anon_bdev(dev);
+ }
+-
+ EXPORT_SYMBOL(kill_anon_super);
+ 
+ void kill_litter_super(struct super_block *sb)
+@@ -1032,7 +1014,6 @@ void kill_litter_super(struct super_block *sb)
+ 		d_genocide(sb->s_root);
+ 	kill_anon_super(sb);
+ }
+-
+ EXPORT_SYMBOL(kill_litter_super);
+ 
+ static int ns_test_super(struct super_block *sb, void *data)
+
+From d406904bb175cb9791b5aed4404df3268859d91b Mon Sep 17 00:00:00 2001
+From: Matthew Wilcox <willy@infradead.org>
+Date: Mon, 11 Jun 2018 12:31:36 -0400
+Subject: [PATCH 5/5] fs: Convert namespace IDAs to new API
+
+We don't need to keep track of the starting value; the IDA is efficient.
+
+Signed-off-by: Matthew Wilcox <willy@infradead.org>
+---
+ fs/namespace.c | 50 ++++++++++++--------------------------------------
+ 1 file changed, 12 insertions(+), 38 deletions(-)
+
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 94904869123d..85087ea166cf 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -62,9 +62,6 @@ __setup("mphash_entries=", set_mphash_entries);
+ static u64 event;
+ static DEFINE_IDA(mnt_id_ida);
+ static DEFINE_IDA(mnt_group_ida);
+-static DEFINE_SPINLOCK(mnt_id_lock);
+-static int mnt_id_start = 0;
+-static int mnt_group_start = 1;
+ 
+ static struct hlist_head *mount_hashtable __read_mostly;
+ static struct hlist_head *mountpoint_hashtable __read_mostly;
+@@ -102,50 +99,30 @@ static inline struct hlist_head *mp_hash(struct dentry *dentry)
+ 
+ static int mnt_alloc_id(struct mount *mnt)
+ {
+-	int res;
++	int res = ida_alloc(&mnt_id_ida, GFP_KERNEL);
+ 
+-retry:
+-	ida_pre_get(&mnt_id_ida, GFP_KERNEL);
+-	spin_lock(&mnt_id_lock);
+-	res = ida_get_new_above(&mnt_id_ida, mnt_id_start, &mnt->mnt_id);
+-	if (!res)
+-		mnt_id_start = mnt->mnt_id + 1;
+-	spin_unlock(&mnt_id_lock);
+-	if (res == -EAGAIN)
+-		goto retry;
+-
+-	return res;
++	if (res < 0)
++		return res;
++	mnt->mnt_id = res;
++	return 0;
+ }
+ 
+ static void mnt_free_id(struct mount *mnt)
+ {
+-	int id = mnt->mnt_id;
+-	spin_lock(&mnt_id_lock);
+-	ida_remove(&mnt_id_ida, id);
+-	if (mnt_id_start > id)
+-		mnt_id_start = id;
+-	spin_unlock(&mnt_id_lock);
++	ida_free(&mnt_id_ida, mnt->mnt_id);
+ }
+ 
+ /*
+  * Allocate a new peer group ID
+- *
+- * mnt_group_ida is protected by namespace_sem
+  */
+ static int mnt_alloc_group_id(struct mount *mnt)
+ {
+-	int res;
++	int res = ida_alloc_min(&mnt_group_ida, 1, GFP_KERNEL);
+ 
+-	if (!ida_pre_get(&mnt_group_ida, GFP_KERNEL))
+-		return -ENOMEM;
+-
+-	res = ida_get_new_above(&mnt_group_ida,
+-				mnt_group_start,
+-				&mnt->mnt_group_id);
+-	if (!res)
+-		mnt_group_start = mnt->mnt_group_id + 1;
+-
+-	return res;
++	if (res < 0)
++		return res;
++	mnt->mnt_group_id = res;
++	return 0;
+ }
+ 
+ /*
+@@ -153,10 +130,7 @@ static int mnt_alloc_group_id(struct mount *mnt)
+  */
+ void mnt_release_group_id(struct mount *mnt)
+ {
+-	int id = mnt->mnt_group_id;
+-	ida_remove(&mnt_group_ida, id);
+-	if (mnt_group_start > id)
+-		mnt_group_start = id;
++	ida_free(&mnt_group_ida, mnt->mnt_group_id);
+ 	mnt->mnt_group_id = 0;
+ }
+ 
