@@ -1,19 +1,22 @@
 #!/bin/bash
 # patch_kconfig.sh
 #
-# Appends missing CONFIG_KSU_SUSFS_* entries into KernelSU/KernelSU-Next Kconfig.
-# Automatically detects whether the folder is named KernelSU or KernelSU-Next.
-# Safe to run multiple times — each entry is only added if not already present.
+# Ensures ALL required CONFIG_KSU_SUSFS_* entries exist in the KernelSU
+# (or KernelSU-Next) Kconfig. Safe to run multiple times — each entry is
+# only appended if not already present.
+#
+# Covers both forks:
+#   - rsuntk/KernelSU  (susfs-rksu-master)  — ships 7 core symbols, missing 3 newer ones
+#   - sidex15/KernelSU-Next (legacy-susfs)  — ships only KSU_SUSFS, missing all 10 others
 #
 # Usage:
 #   bash patch_kconfig.sh [path/to/android-kernel]
-#   (defaults to current directory if no argument given)
 
 set -e
 
 KERNEL_ROOT="${1:-.}"
 
-# Auto-detect KernelSU directory name (supports both forks)
+# Auto-detect KernelSU directory name
 if [ -f "${KERNEL_ROOT}/KernelSU-Next/kernel/Kconfig" ]; then
     KCONFIG="${KERNEL_ROOT}/KernelSU-Next/kernel/Kconfig"
     KSU_DIR="KernelSU-Next"
@@ -22,7 +25,7 @@ elif [ -f "${KERNEL_ROOT}/KernelSU/kernel/Kconfig" ]; then
     KSU_DIR="KernelSU"
 else
     echo "ERROR: Could not find Kconfig in KernelSU-Next/ or KernelSU/"
-    echo "       Make sure KernelSU setup has run first."
+    echo "       Make sure the KernelSU setup step has run first."
     exit 1
 fi
 
@@ -30,12 +33,15 @@ echo "=== Patching missing SUSFS entries into ${KSU_DIR} Kconfig ==="
 echo "    File: $KCONFIG"
 echo ""
 
+# Append a Kconfig entry only if not already present.
+# Uses Python to write literal tab characters — YAML strips leading whitespace
+# from heredocs, which would produce spaces and break Kconfig's tab requirement.
 add_entry() {
     local symbol="$1"
     local body="$2"
 
-    if grep -q "config ${symbol}" "$KCONFIG"; then
-        echo "  [skip]  config ${symbol}  (already present)"
+    if grep -q "^config ${symbol}$" "$KCONFIG"; then
+        echo "  [skip]  config ${symbol}"
     else
         echo "  [add]   config ${symbol}"
         python3 -c "
@@ -48,6 +54,66 @@ with open(sys.argv[2], 'a') as f:
 " "$body" "$KCONFIG"
     fi
 }
+
+# ── Core SUSFS symbols (present in rsuntk, MISSING in KernelSU-Next) ─────────
+
+add_entry "KSU_SUSFS_SUS_PATH" \
+"config KSU_SUSFS_SUS_PATH
+	bool \"Enable suspicious path hiding\"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Allow hiding suspicious paths from userspace."
+
+add_entry "KSU_SUSFS_SUS_MOUNT" \
+"config KSU_SUSFS_SUS_MOUNT
+	bool \"Enable suspicious mount hiding\"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Allow hiding suspicious mounts from userspace."
+
+add_entry "KSU_SUSFS_SUS_KSTAT" \
+"config KSU_SUSFS_SUS_KSTAT
+	bool \"Enable spoofing kstat of sus files\"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Allow spoofing kstat of suspicious files."
+
+add_entry "KSU_SUSFS_TRY_UMOUNT" \
+"config KSU_SUSFS_TRY_UMOUNT
+	bool \"Enable try umount\"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Allow umounting suspicious paths before a process becomes non-root."
+
+add_entry "KSU_SUSFS_SPOOF_UNAME" \
+"config KSU_SUSFS_SPOOF_UNAME
+	bool \"Enable spoofing uname\"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Allow spoofing the uname to hide KernelSU."
+
+add_entry "KSU_SUSFS_OPEN_REDIRECT" \
+"config KSU_SUSFS_OPEN_REDIRECT
+	bool \"Enable open redirect\"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Allow redirecting file opens for suspicious paths."
+
+add_entry "KSU_SUSFS_ENABLE_LOG" \
+"config KSU_SUSFS_ENABLE_LOG
+	bool \"Enable logging\"
+	depends on KSU_SUSFS
+	default y
+	help
+	  Enable SUSFS kernel logging for debugging."
+
+# ── Newer symbols (MISSING in both rsuntk and KernelSU-Next) ─────────────────
 
 add_entry "KSU_SUSFS_SUS_SU" \
 "config KSU_SUSFS_SUS_SU
