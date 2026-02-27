@@ -1,4 +1,4 @@
-name: A test build LineageOS OPlus SM8250 Kernel
+name: A SUSFS test build LineageOS OPlus SM8250 Kernel
 
 on:
   push:
