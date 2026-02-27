@@ -125,10 +125,25 @@ jobs:
         echo "inline.patch applied"
 
     - name: Collect patch rejects and originals
-      if: failure()
+      # FIX: was if: failure() â€” but all patch commands use || true so the
+      # patch step never exits non-zero; changed to always() so this runs
+      # after every patch attempt, success or failure
+      if: always()
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         OUTPUT_DIR="patch_debug"
+
+        # Count .rej files before doing anything else
+        REJ_COUNT=$(find . -name "*.rej" | wc -l)
+
+        if [ "$REJ_COUNT" -eq 0 ]; then
+          echo "No .rej files found â€” all patches applied cleanly."
+          echo "HAS_REJECTS=false" >> $GITHUB_ENV
+          exit 0
+        fi
+
+        echo "Found $REJ_COUNT reject file(s) â€” collecting..."
+        echo "HAS_REJECTS=true" >> $GITHUB_ENV
         mkdir -p "$OUTPUT_DIR"
 
         find . -name "*.rej" | while read rej; do
@@ -148,6 +163,11 @@ jobs:
           fi
         done
 
+        # Also collect patch logs so they're in the same artifact
+        for log in patch_sus_maps.log patch_sus_mounts.log patch_inline.log; do
+          [ -f "$log" ] && cp "$log" "$OUTPUT_DIR/$log"
+        done
+
         echo "=== Reject summary ===" > "$OUTPUT_DIR/summary.txt"
         find . -name "*.rej" | while read rej; do
           echo "" >> "$OUTPUT_DIR/summary.txt"
@@ -158,14 +178,16 @@ jobs:
         echo "Files collected:"
         find "$OUTPUT_DIR" -type f | sort
 
-    # FIX: was at 3-space indent (broken YAML); now correctly at 4-space
+    # FIX: was if: failure() â€” same reason as above; changed to always() with
+    # an extra guard on HAS_REJECTS so we don't upload an empty artifact on
+    # clean builds
     - name: Upload patch debug artifacts
-      if: failure()
+      if: always() && env.HAS_REJECTS == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: patch-rejects-${{ github.run_number }}
         path: ${{ github.workspace }}/kernel_workspace/android-kernel/patch_debug/
-        if-no-files-found: warn
+        if-no-files-found: error
 
     - name: Apply SUSFS supplementary fix
       run: |
