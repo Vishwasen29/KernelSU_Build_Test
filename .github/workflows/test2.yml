@@ -332,9 +332,9 @@ jobs:
                 FAIL=$((FAIL + 1))
               fi
             }
-            check_sym "susfs_sus_path"
-            check_sym "susfs_try_umount"
-            check_sym "susfs_spoof_uname"
+            check_sym "susfs_add_sus_path"
+            check_sym "susfs_set_uname"
+            check_sym "susfs_add_sus_kstat"
           fi
 
           echo ""
