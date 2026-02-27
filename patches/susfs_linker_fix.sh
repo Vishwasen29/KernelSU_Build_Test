@@ -1,30 +1,15 @@
 #!/bin/bash
 # susfs_linker_fix.sh
 #
-# Fixes linker errors caused by a SUSFS version mismatch:
-#
+# Fixes linker errors:
 #   ld.lld: error: undefined symbol: susfs_ksu_sid
 #   ld.lld: error: undefined symbol: susfs_priv_app_sid
 #   ld.lld: error: undefined symbol: susfs_is_current_ksu_domain
 #
-# Root cause:
-#   The SUSFS patch applied to security/selinux/avc.c and fs/proc_namespace.c
-#   references symbols from a NEWER SUSFS version than the fs/susfs.c that was
-#   installed by the patch. The call sites exist but the definitions do not.
-#
-#   - susfs_ksu_sid / susfs_priv_app_sid:
-#       u32 variables used in avc.c to suppress SELinux audit noise for KSU
-#       processes. Defined in susfs.c from SUSFS >= ~v1.5.2.
-#
-#   - susfs_is_current_ksu_domain():
-#       bool function used in proc_namespace.c to hide mounts from KSU domain.
-#       May be defined in susfs.c but missing if the installed version predates
-#       the proc_namespace.c patch.
-#
-# Fix strategy:
-#   For each missing symbol, check if it is already defined in fs/susfs.c.
-#   If not, append the definition. All definitions are safe no-ops if SUSFS
-#   is otherwise working — they just provide the missing link targets.
+# Strategy: creates fs/susfs_compat.c with the missing definitions and adds
+# it to fs/Makefile. This is unconditional — no detection logic that can
+# silently fail. If a symbol is already defined elsewhere the compiler will
+# error with "duplicate definition" rather than silently doing nothing.
 #
 # Usage:
 #   bash susfs_linker_fix.sh [path/to/android-kernel]
@@ -32,153 +17,157 @@
 set -e
 
 KERNEL_ROOT="${1:-.}"
-SUSFS_C="${KERNEL_ROOT}/fs/susfs.c"
+COMPAT_C="${KERNEL_ROOT}/fs/susfs_compat.c"
+MAKEFILE="${KERNEL_ROOT}/fs/Makefile"
 SUSFS_H="${KERNEL_ROOT}/include/linux/susfs.h"
 
 echo "=== SUSFS linker symbol fix ==="
 echo "    Kernel root: $KERNEL_ROOT"
 echo ""
 
-if [ ! -f "$SUSFS_C" ]; then
-    echo "ERROR: $SUSFS_C not found — SUSFS patch not applied yet."
+if [ ! -f "$MAKEFILE" ]; then
+    echo "ERROR: $MAKEFILE not found. Is KERNEL_ROOT correct?"
     exit 1
 fi
 
-FIXED=0
+if [ ! -f "$SUSFS_H" ]; then
+    echo "ERROR: $SUSFS_H not found — SUSFS patch not applied yet."
+    exit 1
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper: append a C definition to susfs.c if the symbol is not yet defined
+# Step 1: Create fs/susfs_compat.c
 # ─────────────────────────────────────────────────────────────────────────────
-add_definition() {
-    local symbol="$1"
-    local code="$2"
+echo "--- Creating fs/susfs_compat.c ---"
 
-    # Check both plain definition and EXPORT_SYMBOL variants
-    if grep -q "\b${symbol}\b" "$SUSFS_C" 2>/dev/null; then
-        echo "  [skip] ${symbol} — already defined in susfs.c"
-    else
-        echo "  [fix]  ${symbol} — appending definition to susfs.c"
-        printf '\n%s\n' "$code" >> "$SUSFS_C"
-        FIXED=$((FIXED + 1))
-    fi
-}
+if [ -f "$COMPAT_C" ]; then
+    echo "  [skip] susfs_compat.c already exists"
+else
+    cat > "$COMPAT_C" << 'CEOF'
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * susfs_compat.c — stub definitions for SUSFS symbols that are referenced
+ * by patched kernel files (security/selinux/avc.c, fs/proc_namespace.c)
+ * but absent from the installed fs/susfs.c due to a version mismatch.
+ *
+ * susfs_ksu_sid / susfs_priv_app_sid:
+ *   SELinux SIDs used by avc_audit_post_callback() to suppress audit noise
+ *   for KernelSU and privileged app processes. Initialised to 0 (no SID),
+ *   which makes the suppression a safe no-op until KSU sets them at runtime.
+ *
+ * susfs_is_current_ksu_domain:
+ *   Called unconditionally (no #ifdef guard) from show_vfsmnt(),
+ *   show_mountinfo() and show_vfsstat() in fs/proc_namespace.c to decide
+ *   whether to hide mount table entries from the current process.
+ *   Returns false — mount entries are visible to all processes. This is
+ *   safe: it only means the KSU domain hiding feature is inactive.
+ */
+#include <linux/types.h>
+#include <linux/export.h>
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fix 1: susfs_ksu_sid
-#
-# u32 variable holding the SELinux SID of the KernelSU process.
-# avc.c uses it to suppress audit denials for KSU.
-# Initialised to 0 (no SID) — safe default that makes the avc check a no-op
-# until KSU properly sets the SID at runtime.
-# ─────────────────────────────────────────────────────────────────────────────
-add_definition "susfs_ksu_sid" \
-"/* SUSFS: SELinux SID for KernelSU process — set at runtime by KSU */
 u32 susfs_ksu_sid = 0;
-EXPORT_SYMBOL_GPL(susfs_ksu_sid);"
+EXPORT_SYMBOL_GPL(susfs_ksu_sid);
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fix 2: susfs_priv_app_sid
-#
-# u32 variable holding the SELinux SID of privileged app processes.
-# avc.c uses it alongside susfs_ksu_sid to decide whether to suppress
-# a denial audit entry.
-# ─────────────────────────────────────────────────────────────────────────────
-add_definition "susfs_priv_app_sid" \
-"/* SUSFS: SELinux SID for privileged app processes — set at runtime by KSU */
 u32 susfs_priv_app_sid = 0;
-EXPORT_SYMBOL_GPL(susfs_priv_app_sid);"
+EXPORT_SYMBOL_GPL(susfs_priv_app_sid);
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fix 3: susfs_is_current_ksu_domain
-#
-# bool function that returns true if the current process is running in the
-# KernelSU domain. Used by proc_namespace.c to hide mounts from KSU processes.
-#
-# If already declared extern in susfs.h but not defined in susfs.c, the linker
-# fails. We define it here returning false (safe default — means no mounts are
-# hidden for KSU domain, which is harmless if this function was never intended
-# to be compiled in from this patch version).
-#
-# NOTE: namespace.c already has this call guarded by CONFIG_KSU_SUSFS_SUS_MOUNT.
-# proc_namespace.c has it unguarded in this patch version, so the linker always
-# needs the symbol resolved.
-# ─────────────────────────────────────────────────────────────────────────────
-add_definition "susfs_is_current_ksu_domain" \
-"/* SUSFS: returns true if current process is in KernelSU domain */
 bool susfs_is_current_ksu_domain(void)
 {
-#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	/* Delegate to the actual implementation if SUS_MOUNT is compiled in.
-	 * The real body lives in the SUS_MOUNT section above; if this stub is
-	 * being compiled it means the real one is absent — return false. */
-#endif
 	return false;
 }
-EXPORT_SYMBOL_GPL(susfs_is_current_ksu_domain);"
+EXPORT_SYMBOL_GPL(susfs_is_current_ksu_domain);
+CEOF
+    echo "  [ok]  fs/susfs_compat.c created"
+fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 2: Add susfs_compat.o to fs/Makefile
+# ─────────────────────────────────────────────────────────────────────────────
 echo ""
+echo "--- Wiring into fs/Makefile ---"
+
+if grep -q "susfs_compat" "$MAKEFILE"; then
+    echo "  [skip] susfs_compat.o already in Makefile"
+else
+    # Add it on the same line as susfs.o so it is always compiled in
+    sed -i 's/obj-y.*+=.*susfs\.o/& susfs_compat.o/' "$MAKEFILE"
+
+    # If that pattern didn't match (susfs.o might be on its own line), append
+    if ! grep -q "susfs_compat" "$MAKEFILE"; then
+        # Find the susfs.o line and append after it
+        sed -i '/susfs\.o/a obj-y += susfs_compat.o' "$MAKEFILE"
+    fi
+
+    # Last resort: just append to end of file
+    if ! grep -q "susfs_compat" "$MAKEFILE"; then
+        echo "obj-y += susfs_compat.o" >> "$MAKEFILE"
+    fi
+
+    echo "  [ok]  susfs_compat.o added to fs/Makefile"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ensure the symbols are declared in susfs.h so all callers see the prototype
+# Step 3: Ensure symbols are declared in susfs.h so all callers compile clean
 # ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "--- Checking susfs.h declarations ---"
 
-if [ -f "$SUSFS_H" ]; then
-    add_decl() {
-        local sym="$1" decl="$2"
-        if grep -q "\b${sym}\b" "$SUSFS_H"; then
-            echo "  [skip] ${sym} — already declared in susfs.h"
-        else
-            echo "  [fix]  ${sym} — adding declaration to susfs.h"
-            # Insert before the final #endif of the header guard
-            python3 -c "
+add_decl() {
+    local sym="$1" decl="$2"
+    if grep -q "\b${sym}\b" "$SUSFS_H"; then
+        echo "  [skip] ${sym} — already in susfs.h"
+    else
+        echo "  [fix]  ${sym} — adding to susfs.h"
+        python3 - "$SUSFS_H" "$decl" << 'PYEOF'
 import sys
 path, decl = sys.argv[1], sys.argv[2]
 with open(path) as f:
     src = f.read()
-# Insert before last #endif
 idx = src.rfind('#endif')
-if idx == -1:
-    src += '\n' + decl + '\n'
-else:
-    src = src[:idx] + decl + '\n\n' + src[idx:]
+src = (src[:idx] + decl + '\n\n' + src[idx:]) if idx != -1 else (src + '\n' + decl + '\n')
 with open(path, 'w') as f:
     f.write(src)
-" "$SUSFS_H" "$decl"
-        fi
-    }
+PYEOF
+    fi
+}
 
-    add_decl "susfs_ksu_sid"             "extern u32 susfs_ksu_sid;"
-    add_decl "susfs_priv_app_sid"        "extern u32 susfs_priv_app_sid;"
-    add_decl "susfs_is_current_ksu_domain" "extern bool susfs_is_current_ksu_domain(void);"
-else
-    echo "  [warn] susfs.h not found — skipping header declarations"
-fi
+add_decl "susfs_ksu_sid"               "extern u32 susfs_ksu_sid;"
+add_decl "susfs_priv_app_sid"          "extern u32 susfs_priv_app_sid;"
+add_decl "susfs_is_current_ksu_domain" "extern bool susfs_is_current_ksu_domain(void);"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 4: Verify
+# ─────────────────────────────────────────────────────────────────────────────
 echo ""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Verify all three symbols are now present in susfs.c
-# ─────────────────────────────────────────────────────────────────────────────
 echo "--- Verification ---"
 FAIL=0
+
+if [ -f "$COMPAT_C" ]; then
+    echo "  ✅ fs/susfs_compat.c exists"
+else
+    echo "  ❌ fs/susfs_compat.c missing"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "susfs_compat" "$MAKEFILE"; then
+    echo "  ✅ susfs_compat.o in fs/Makefile"
+else
+    echo "  ❌ susfs_compat.o NOT in fs/Makefile"
+    FAIL=$((FAIL+1))
+fi
+
 for sym in susfs_ksu_sid susfs_priv_app_sid susfs_is_current_ksu_domain; do
-    if grep -q "\b${sym}\b" "$SUSFS_C"; then
-        echo "  ✅ ${sym} defined in susfs.c"
+    if grep -q "\b${sym}\b" "$COMPAT_C"; then
+        echo "  ✅ ${sym} defined in susfs_compat.c"
     else
-        echo "  ❌ ${sym} still missing from susfs.c"
-        FAIL=$((FAIL + 1))
+        echo "  ❌ ${sym} missing from susfs_compat.c"
+        FAIL=$((FAIL+1))
     fi
 done
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then
-    echo "❌ $FAIL symbol(s) still missing"
+    echo "❌ $FAIL check(s) failed"
     exit 1
 fi
-
-if [ "$FIXED" -eq 0 ]; then
-    echo "✅ All symbols were already present — no changes needed"
-else
-    echo "✅ $FIXED symbol(s) added — linker errors should be resolved"
-fi
+echo "✅ All fixes applied — linker errors should be resolved"
