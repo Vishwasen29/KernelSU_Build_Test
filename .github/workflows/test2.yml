@@ -169,53 +169,7 @@ jobs:
         run: |
           cd kernel_workspace/android-kernel
 
-          FAIL=0
-          check_file() {
-            local file="$1" pattern="$2" label="$3"
-            if grep -q "$pattern" "$file" 2>/dev/null; then
-              echo "  ✅ $label"
-            else
-              echo "  ❌ MISSING: $label  (in $file)"
-              FAIL=$((FAIL + 1))
-            fi
-          }
-
-          echo "=== Core SUSFS files ==="
-          [ -f fs/susfs.c ]                && echo "  ✅ fs/susfs.c"                || { echo "  ❌ fs/susfs.c missing";                FAIL=$((FAIL+1)); }
-          [ -f include/linux/susfs.h ]     && echo "  ✅ include/linux/susfs.h"     || { echo "  ❌ include/linux/susfs.h missing";     FAIL=$((FAIL+1)); }
-          [ -f include/linux/susfs_def.h ] && echo "  ✅ include/linux/susfs_def.h" || { echo "  ❌ include/linux/susfs_def.h missing"; FAIL=$((FAIL+1)); }
-
-          echo ""
-          echo "=== fs/Makefile ==="
-          check_file fs/Makefile "susfs.o" "susfs.o in fs/Makefile"
-
-          echo ""
-          echo "=== fs/namespace.c ==="
-          check_file fs/namespace.c "susfs_def\.h"           "susfs_def.h include"
-          check_file fs/namespace.c "susfs_alloc_sus_vfsmnt" "susfs_alloc_sus_vfsmnt call"
-          check_file fs/namespace.c "bypass_orig_flow"       "bypass_orig_flow label"
-          check_file fs/namespace.c "CL_COPY_MNT_NS"         "CL_COPY_MNT_NS define"
-
-          echo ""
-          echo "=== include/linux/mount.h ==="
-          check_file include/linux/mount.h "susfs_mnt_id_backup" "susfs_mnt_id_backup KABI entry"
-
-          echo ""
-          echo "=== fs/proc/task_mmu.c ==="
-          check_file fs/proc/task_mmu.c "BIT_SUS_MAPS" "BIT_SUS_MAPS guard"
-
-          echo ""
-          echo "=== fs/proc/base.c ==="
-          check_file fs/proc/base.c "susfs" "susfs hooks in proc/base.c"
-
-          echo "========================================="
-          if [ "$FAIL" -gt 0 ]; then
-            echo "❌ $FAIL source check(s) failed — patches incomplete"
-            echo "   Review the susfs-reject-files artifact for .rej details"
-            exit 1
-          fi
-          echo "✅ All source patch checks passed"
-
+          bash $GITHUB_WORKSPACE/patches/verify_susfs.sh .
       # ─────────────────────────────────────────────────────────────────────
       # Add SUSFS options to defconfig
       # ─────────────────────────────────────────────────────────────────────
