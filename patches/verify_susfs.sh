@@ -147,9 +147,12 @@ check_file "fs/overlayfs/inode.c" "#include <linux/susfs" \
 check_file_absent "fs/overlayfs/inode.c" "susfs_sus_kstat(" \
     "fs/overlayfs/inode.c has NO susfs_sus_kstat() call  ← would cause compiler error"
 
-# readdir.c: the SUS_PATH hook function does exist in this SUSFS version
-check_file "fs/overlayfs/readdir.c" "susfs" \
-    "susfs hooks in fs/overlayfs/readdir.c"
+# readdir.c: same rule as inode.c — include only, no function call.
+# susfs_sus_path_for_readdir() does not exist in this SUSFS version.
+check_file "fs/overlayfs/readdir.c" "#include <linux/susfs" \
+    "fs/overlayfs/readdir.c has susfs.h include"
+check_file_absent "fs/overlayfs/readdir.c" "susfs_sus_path_for_readdir(" \
+    "fs/overlayfs/readdir.c has NO susfs_sus_path_for_readdir() call  ← would cause compiler error"
 
 # ── 9. KernelSU Kconfig symbols ──────────────────────────────────────────────
 _head "9. KernelSU Kconfig symbols"
