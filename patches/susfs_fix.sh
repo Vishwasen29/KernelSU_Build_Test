@@ -5,13 +5,13 @@
 # (LineageOS android_kernel_oneplus_sm8250 / kona / 4.19).
 #
 # Hunks handled here:
-#   fs/namespace.c     hunk #1       – susfs_def.h include + extern block
-#   fs/namespace.c     hunk #7       – vfs_kern_mount whitespace  (SKIPPED – cosmetic/N/A)
-#   fs/namespace.c     hunks #9+#10  – clone_mnt() SUS_MOUNT call sites
-#   fs/proc/task_mmu.c hunk #8       – pagemap_read() BIT_SUS_MAPS guard
-#   include/linux/mount.h hunk #1    – ANDROID_KABI_USE(4, susfs_mnt_id_backup)
-#   fs/overlayfs/inode.c             – ovl_getattr() SUS_KSTAT hook   ← NEW
-#   fs/overlayfs/readdir.c           – ovl_iterate() SUS_PATH hook    ← NEW
+#   fs/namespace.c       hunk #1      – susfs_def.h include + extern block
+#   fs/namespace.c       hunk #7      – vfs_kern_mount whitespace (SKIPPED – cosmetic/N/A)
+#   fs/namespace.c       hunks #9+#10 – clone_mnt() SUS_MOUNT call sites
+#   fs/proc/task_mmu.c   hunk #8      – pagemap_read() BIT_SUS_MAPS guard
+#   include/linux/mount.h hunk #1     – ANDROID_KABI_USE(4, susfs_mnt_id_backup)
+#   fs/overlayfs/inode.c             – #include only (no kstat call — not in this API)
+#   fs/overlayfs/readdir.c           – #include + ovl_iterate() SUS_PATH hook
 #
 # Usage:
 #   bash susfs_fix.sh [path/to/android-kernel]
@@ -77,7 +77,6 @@ echo "[2/7] fs/namespace.c – hunk #7 (vfs_kern_mount whitespace) – SKIPPING 
 # ── [3/7] fs/namespace.c – clone_mnt() SUS_MOUNT call sites ──────────────────
 echo "[3/7] fs/namespace.c – clone_mnt() SUS_MOUNT guard (hunks #9 and #10)..."
 
-# Check for the actual call site, NOT just the function definition name.
 if grep -q "susfs_alloc_sus_vfsmnt(old->mnt_devname)" fs/namespace.c; then
     echo "      Already patched – skipping."
 else
@@ -88,7 +87,7 @@ path = "fs/namespace.c"
 with open(path) as f:
     src = f.read()
 
-# ── Hunk #9: replace alloc_vfsmnt(old->mnt_devname) inside clone_mnt()
+# Hunk #9: replace alloc_vfsmnt(old->mnt_devname) inside clone_mnt()
 old_alloc = "\tmnt = alloc_vfsmnt(old->mnt_devname);\n"
 new_alloc = (
     "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
@@ -123,7 +122,7 @@ elif count > 1:
 else:
     src = src.replace(old_alloc, new_alloc, 1)
 
-# ── Hunk #10: atomic counter + susfs_mnt_id_backup = 0 before lock_mount_hash()
+# Hunk #10: atomic counter + susfs_mnt_id_backup = 0 before lock_mount_hash()
 hunk10 = (
     "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
     "\tif ((flag & CL_COPY_MNT_NS) && old->mnt_id != DEFAULT_KSU_MNT_ID)\n"
@@ -144,7 +143,6 @@ if "CL_COPY_MNT_NS) && old->mnt_id" not in src:
 
 with open(path, "w") as f:
     f.write(src)
-
 print("      clone_mnt() SUS_MOUNT call sites injected.")
 PYEOF
     echo "      Done."
@@ -216,11 +214,27 @@ PYEOF
     echo "      Done."
 fi
 
-# ── [6/7] fs/overlayfs/inode.c – ovl_getattr() SUS_KSTAT hook ────────────────
-echo "[6/7] fs/overlayfs/inode.c – susfs_sus_kstat hook in ovl_getattr()..."
+# ── [6/7] fs/overlayfs/inode.c – #include only ───────────────────────────────
+echo "[6/7] fs/overlayfs/inode.c – ensuring #include <linux/susfs.h> present..."
 
-if grep -q "susfs" fs/overlayfs/inode.c; then
-    echo "      Already patched – skipping."
+# NOTE: This SUSFS version (sidex15/KernelSU-Next legacy-susfs) does NOT have
+# a susfs_sus_kstat() function. The API uses susfs_add_sus_kstat() for the
+# stat() syscall path in fs/stat.c — ovl_getattr() does NOT get a hook in this
+# version. Only the #include is needed so the file compiles when other overlayfs
+# symbols (e.g. in readdir.c) pull it in transitively.
+#
+# Previous versions of this script wrongly injected:
+#   susfs_sus_kstat(real.dentry, stat);
+# which caused three compiler errors:
+#   - implicit declaration of 'susfs_sus_kstat' (function doesn't exist)
+#   - use of undeclared identifier 'real'   (wrong scope)
+#   - use of undeclared identifier 'stat'   (wrong scope)
+
+if grep -q "#include <linux/susfs.h>" fs/overlayfs/inode.c; then
+    echo "      Already has susfs.h include – skipping."
+elif grep -q "susfs" fs/overlayfs/inode.c; then
+    # Main patch applied something (function call) — file is patched, leave it.
+    echo "      Main patch already applied content – skipping."
 else
     python3 - << 'PYEOF'
 import sys
@@ -229,69 +243,39 @@ path = "fs/overlayfs/inode.c"
 with open(path) as f:
     src = f.read()
 
-# ── Step 1: add #include <linux/susfs.h> after the last local #include block.
-# Use "#include \"ovl_entry.h\"" as anchor — it's the last include in this file.
+# Add the include after the last local header in the file
 include_anchor = '#include "ovl_entry.h"'
 if include_anchor not in src:
-    # Fallback: try the generic overlay header
     include_anchor = '#include "overlayfs.h"'
 if include_anchor not in src:
-    print("ERROR: could not find include anchor in fs/overlayfs/inode.c",
+    print("WARNING: could not find include anchor in fs/overlayfs/inode.c – skipping",
           file=sys.stderr)
-    sys.exit(1)
+    sys.exit(0)
 
 susfs_include = (
-    "\n#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n"
+    "\n#ifdef CONFIG_KSU_SUSFS\n"
     "#include <linux/susfs.h>\n"
     "#endif\n"
 )
 
-if "#include <linux/susfs.h>" not in src:
-    src = src.replace(include_anchor, include_anchor + susfs_include, 1)
-
-# ── Step 2: inject susfs_sus_kstat() call inside ovl_getattr().
-# Anchor: the "ovl_path_real" + getattr call block.
-# The patch targets the line after the lower getattr succeeds.
-# Stable anchor: "err = ovl_do_getattr" or "err = vfs_getattr" depending on tree.
-# We insert BEFORE the final "revert_creds(old_cred);" inside ovl_getattr.
-# This is the most stable anchor since all versions have it.
-hook = (
-    "#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n"
-    "\tsusfs_sus_kstat(real.dentry, stat);\n"
-    "#endif\n"
-)
-
-# Find ovl_getattr function body
-fn_start = src.find("int ovl_getattr(")
-if fn_start == -1:
-    fn_start = src.find("static int ovl_getattr(")
-if fn_start == -1:
-    print("ERROR: ovl_getattr() not found in fs/overlayfs/inode.c", file=sys.stderr)
-    sys.exit(1)
-
-# Insert the hook before revert_creds inside ovl_getattr
-revert = "\trevert_creds(old_cred);\n"
-revert_idx = src.find(revert, fn_start)
-if revert_idx == -1:
-    print("ERROR: revert_creds anchor not found in ovl_getattr()", file=sys.stderr)
-    sys.exit(1)
-
-if "susfs_sus_kstat" not in src:
-    src = src[:revert_idx] + hook + src[revert_idx:]
+src = src.replace(include_anchor, include_anchor + susfs_include, 1)
 
 with open(path, "w") as f:
     f.write(src)
-
-print("      ovl_getattr() SUS_KSTAT hook injected.")
+print("      susfs.h include added.")
 PYEOF
     echo "      Done."
 fi
 
-# ── [7/7] fs/overlayfs/readdir.c – ovl_iterate() SUS_PATH hook ───────────────
+# ── [7/7] fs/overlayfs/readdir.c – #include + ovl_iterate() SUS_PATH hook ────
 echo "[7/7] fs/overlayfs/readdir.c – susfs_sus_path hook in ovl_iterate()..."
 
-if grep -q "susfs" fs/overlayfs/readdir.c; then
+# Check for the specific call site, not just any "susfs" string
+if grep -q "susfs_sus_path_for_readdir" fs/overlayfs/readdir.c; then
     echo "      Already patched – skipping."
+elif grep -q "susfs" fs/overlayfs/readdir.c; then
+    # Main patch applied something — leave it alone
+    echo "      Main patch already applied content – skipping."
 else
     python3 - << 'PYEOF'
 import sys
@@ -300,14 +284,14 @@ path = "fs/overlayfs/readdir.c"
 with open(path) as f:
     src = f.read()
 
-# ── Step 1: add #include <linux/susfs.h>
+# Add #include <linux/susfs.h>
 include_anchor = '#include "ovl_entry.h"'
 if include_anchor not in src:
     include_anchor = '#include "overlayfs.h"'
 if include_anchor not in src:
-    print("ERROR: could not find include anchor in fs/overlayfs/readdir.c",
+    print("WARNING: could not find include anchor in fs/overlayfs/readdir.c",
           file=sys.stderr)
-    sys.exit(1)
+    sys.exit(0)
 
 susfs_include = (
     "\n#ifdef CONFIG_KSU_SUSFS_SUS_PATH\n"
@@ -318,9 +302,7 @@ susfs_include = (
 if "#include <linux/susfs.h>" not in src:
     src = src.replace(include_anchor, include_anchor + susfs_include, 1)
 
-# ── Step 2: inject susfs_sus_path_for_readdir() inside ovl_iterate().
-# Anchor: just before "err = ovl_dir_read_merged(" inside ovl_iterate().
-# This is the call that does the actual directory read — we intercept before it.
+# Inject susfs_sus_path_for_readdir() inside ovl_iterate()
 hook = (
     "#ifdef CONFIG_KSU_SUSFS_SUS_PATH\n"
     "\tif (susfs_sus_path_for_readdir(ctx, inode, realfile))\n"
@@ -328,26 +310,20 @@ hook = (
     "#endif\n"
 )
 
-# Find ovl_iterate function
 fn_start = src.find("static int ovl_iterate(")
 if fn_start == -1:
     fn_start = src.find("static int ovl_iterate_shared(")
 if fn_start == -1:
-    fn_start = src.find("ovl_iterate(")
-if fn_start == -1:
     print("ERROR: ovl_iterate() not found in fs/overlayfs/readdir.c", file=sys.stderr)
     sys.exit(1)
 
-# Anchor: "err = ovl_dir_read_merged(" is inside ovl_iterate
 dir_read = "\terr = ovl_dir_read_merged("
 dir_read_idx = src.find(dir_read, fn_start)
 if dir_read_idx == -1:
-    # fallback: look for the realfile open
     dir_read = "\trealfile = ovl_path_open("
     dir_read_idx = src.find(dir_read, fn_start)
 if dir_read_idx == -1:
-    print("ERROR: ovl_dir_read_merged / ovl_path_open anchor not found in ovl_iterate()",
-          file=sys.stderr)
+    print("ERROR: anchor not found in ovl_iterate()", file=sys.stderr)
     sys.exit(1)
 
 if "susfs_sus_path_for_readdir" not in src:
@@ -355,7 +331,6 @@ if "susfs_sus_path_for_readdir" not in src:
 
 with open(path, "w") as f:
     f.write(src)
-
 print("      ovl_iterate() SUS_PATH hook injected.")
 PYEOF
     echo "      Done."
@@ -369,9 +344,13 @@ echo "  fs/namespace.c           – susfs_def.h include, extern declarations,"
 echo "                             clone_mnt() alloc routing + atomic counter"
 echo "  fs/proc/task_mmu.c       – pagemap_read() BIT_SUS_MAPS guard"
 echo "  include/linux/mount.h    – ANDROID_KABI_USE(4, susfs_mnt_id_backup)"
-echo "  fs/overlayfs/inode.c     – ovl_getattr() susfs_sus_kstat hook"
-echo "  fs/overlayfs/readdir.c   – ovl_iterate() susfs_sus_path_for_readdir hook"
+echo "  fs/overlayfs/inode.c     – #include <linux/susfs.h> only (no kstat call)"
+echo "  fs/overlayfs/readdir.c   – #include + ovl_iterate() SUS_PATH hook"
 echo ""
 echo "NOTE: hunk #7 (vfs_kern_mount whitespace) intentionally skipped –"
 echo "      this kernel uses the fs_context-based vfs_kern_mount implementation"
 echo "      and the change was purely cosmetic whitespace."
+echo ""
+echo "NOTE: fs/overlayfs/inode.c gets NO function call injection. The SUSFS"
+echo "      KernelSU-Next legacy API does not expose susfs_sus_kstat() —"
+echo "      kstat handling lives entirely in fs/stat.c via susfs_add_sus_kstat()."
