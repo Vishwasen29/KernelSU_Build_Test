@@ -267,14 +267,22 @@ PYEOF
     echo "      Done."
 fi
 
-# ── [7/7] fs/overlayfs/readdir.c – #include + ovl_iterate() SUS_PATH hook ────
-echo "[7/7] fs/overlayfs/readdir.c – susfs_sus_path hook in ovl_iterate()..."
+# ── [7/7] fs/overlayfs/readdir.c – #include only ─────────────────────────────
+echo "[7/7] fs/overlayfs/readdir.c – ensuring #include <linux/susfs.h> present..."
 
-# Check for the specific call site, not just any "susfs" string
-if grep -q "susfs_sus_path_for_readdir" fs/overlayfs/readdir.c; then
-    echo "      Already patched – skipping."
+# NOTE: susfs_sus_path_for_readdir() does not exist in this SUSFS version
+# (sidex15/KernelSU-Next legacy-susfs). Injecting a call to it causes:
+#   - implicit declaration of 'susfs_sus_path_for_readdir'
+#   - use of undeclared identifier 'ctx'
+#   - use of undeclared identifier 'inode'
+#   - use of undeclared identifier 'realfile'
+# Only the #include is needed. The main patch handles any actual hooks when
+# they apply cleanly; this step is a fallback for when the main patch misses
+# the file entirely.
+
+if grep -q "#include <linux/susfs.h>" fs/overlayfs/readdir.c; then
+    echo "      Already has susfs.h include – skipping."
 elif grep -q "susfs" fs/overlayfs/readdir.c; then
-    # Main patch applied something — leave it alone
     echo "      Main patch already applied content – skipping."
 else
     python3 - << 'PYEOF'
@@ -284,54 +292,25 @@ path = "fs/overlayfs/readdir.c"
 with open(path) as f:
     src = f.read()
 
-# Add #include <linux/susfs.h>
 include_anchor = '#include "ovl_entry.h"'
 if include_anchor not in src:
     include_anchor = '#include "overlayfs.h"'
 if include_anchor not in src:
-    print("WARNING: could not find include anchor in fs/overlayfs/readdir.c",
+    print("WARNING: could not find include anchor in fs/overlayfs/readdir.c – skipping",
           file=sys.stderr)
     sys.exit(0)
 
 susfs_include = (
-    "\n#ifdef CONFIG_KSU_SUSFS_SUS_PATH\n"
+    "\n#ifdef CONFIG_KSU_SUSFS\n"
     "#include <linux/susfs.h>\n"
     "#endif\n"
 )
 
-if "#include <linux/susfs.h>" not in src:
-    src = src.replace(include_anchor, include_anchor + susfs_include, 1)
-
-# Inject susfs_sus_path_for_readdir() inside ovl_iterate()
-hook = (
-    "#ifdef CONFIG_KSU_SUSFS_SUS_PATH\n"
-    "\tif (susfs_sus_path_for_readdir(ctx, inode, realfile))\n"
-    "\t\treturn err;\n"
-    "#endif\n"
-)
-
-fn_start = src.find("static int ovl_iterate(")
-if fn_start == -1:
-    fn_start = src.find("static int ovl_iterate_shared(")
-if fn_start == -1:
-    print("ERROR: ovl_iterate() not found in fs/overlayfs/readdir.c", file=sys.stderr)
-    sys.exit(1)
-
-dir_read = "\terr = ovl_dir_read_merged("
-dir_read_idx = src.find(dir_read, fn_start)
-if dir_read_idx == -1:
-    dir_read = "\trealfile = ovl_path_open("
-    dir_read_idx = src.find(dir_read, fn_start)
-if dir_read_idx == -1:
-    print("ERROR: anchor not found in ovl_iterate()", file=sys.stderr)
-    sys.exit(1)
-
-if "susfs_sus_path_for_readdir" not in src:
-    src = src[:dir_read_idx] + hook + src[dir_read_idx:]
+src = src.replace(include_anchor, include_anchor + susfs_include, 1)
 
 with open(path, "w") as f:
     f.write(src)
-print("      ovl_iterate() SUS_PATH hook injected.")
+print("      susfs.h include added.")
 PYEOF
     echo "      Done."
 fi
@@ -344,13 +323,14 @@ echo "  fs/namespace.c           – susfs_def.h include, extern declarations,"
 echo "                             clone_mnt() alloc routing + atomic counter"
 echo "  fs/proc/task_mmu.c       – pagemap_read() BIT_SUS_MAPS guard"
 echo "  include/linux/mount.h    – ANDROID_KABI_USE(4, susfs_mnt_id_backup)"
-echo "  fs/overlayfs/inode.c     – #include <linux/susfs.h> only (no kstat call)"
-echo "  fs/overlayfs/readdir.c   – #include + ovl_iterate() SUS_PATH hook"
+echo "  fs/overlayfs/inode.c     – #include <linux/susfs.h> only (no function call)"
+echo "  fs/overlayfs/readdir.c   – #include <linux/susfs.h> only (no function call)"
 echo ""
 echo "NOTE: hunk #7 (vfs_kern_mount whitespace) intentionally skipped –"
 echo "      this kernel uses the fs_context-based vfs_kern_mount implementation"
 echo "      and the change was purely cosmetic whitespace."
 echo ""
-echo "NOTE: fs/overlayfs/inode.c gets NO function call injection. The SUSFS"
-echo "      KernelSU-Next legacy API does not expose susfs_sus_kstat() —"
-echo "      kstat handling lives entirely in fs/stat.c via susfs_add_sus_kstat()."
+echo "NOTE: Neither overlayfs file gets a function call injection."
+echo "      susfs_sus_kstat() and susfs_sus_path_for_readdir() do not exist in"
+echo "      the sidex15/KernelSU-Next legacy-susfs API — injecting them causes"
+echo "      implicit-declaration and undeclared-identifier compiler errors."
