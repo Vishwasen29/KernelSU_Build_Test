@@ -102,10 +102,18 @@ jobs:
         cd kernel_workspace/android-kernel
         set -o pipefail
         patch -p1 --forward \
-          < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch \
+          < $GITHUB_WORKSPACE/patches/sus_maps.patch \
           2>&1 | tee patch_main_log.txt || true
         echo "Main patch applied (failures expected for namespace.c, task_mmu.c, mount.h)"
 
+        patch -p1 --forward \
+          < $GITHUB_WORKSPACE/patches/susfs_mounts.patch \
+          2>&1 | tee patch_main_log.txt
+
+        
+        patch -p1 --forward \
+          < $GITHUB_WORKSPACE/patches/inline.patch \
+          2>&1 | tee patch_main_log.txt
     - name: Apply SUSFS supplementary fix
       # Fixes the 4 hunks that failed in the main patch due to
       # kernel-version differences (fs_context API, mmap_read_unlock, etc.)
@@ -114,8 +122,8 @@ jobs:
         chmod +x $GITHUB_WORKSPACE/patches/susfs_fix.sh
         bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
         echo "Supplementary fix applied"
-    - name: Fix SUSFS API compatibility
-      run: bash $GITHUB_WORKSPACE/patches/susfs_api_compat.sh kernel_workspace/android-kernel
+   # - name: Fix SUSFS API compatibility
+      #run: bash $GITHUB_WORKSPACE/patches/susfs_api_compat.sh kernel_workspace/android-kernel
 
     - name: Verify SUSFS patch coverage
       run: |
