@@ -1,13 +1,18 @@
 #!/bin/bash
-# susfs_supplementary_fix.sh
+# susfs_fix.sh
 #
-# Applies the SUSFS patch hunks that failed in the main patch run.
-# Must be run from the root of the kernel source tree (android-kernel/).
+# Applies supplementary fixes for SUSFS patch hunks that fail on this kernel
+# (LineageOS android_kernel_oneplus_sm8250 / kona / 4.19).
 #
-# Failed hunks being fixed:
-#   - fs/namespace.c  hunks #1, #7, #9, #10
-#   - fs/proc/task_mmu.c  hunk #8
-#   - include/linux/mount.h  hunk #1
+# Hunks that need manual injection:
+#   fs/namespace.c   hunk #1  – susfs_def.h include + extern block
+#   fs/namespace.c   hunk #7  – vfs_kern_mount whitespace  (SKIPPED – cosmetic/N/A)
+#   fs/namespace.c   hunks #9 + #10 – clone_mnt() SUS_MOUNT call sites  ← WAS BROKEN
+#   fs/proc/task_mmu.c hunk #8 – pagemap_read() BIT_SUS_MAPS guard
+#   include/linux/mount.h hunk #1 – ANDROID_KABI_USE(4, susfs_mnt_id_backup)
+#
+# Usage:
+#   bash susfs_fix.sh [path/to/android-kernel]
 
 set -e
 KERNEL_ROOT="${1:-.}"
@@ -16,314 +21,253 @@ cd "$KERNEL_ROOT"
 echo "=== SUSFS Supplementary Fix Script ==="
 echo "Kernel root: $(pwd)"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper: abort if a file doesn't exist
-# ─────────────────────────────────────────────────────────────────────────────
-require_file() {
-    if [ ! -f "$1" ]; then
-        echo "ERROR: Required file not found: $1"
-        exit 1
-    fi
-}
-
-# Helper: run Python and propagate its exit code into bash (set -e compatible)
-run_python() {
-    python3 "$@"
-    local rc=$?
-    if [ $rc -ne 0 ]; then
-        echo "ERROR: Python step failed (exit $rc)"
-        exit $rc
-    fi
-}
-
-require_file fs/namespace.c
-require_file fs/proc/task_mmu.c
-require_file include/linux/mount.h
-
-# ─────────────────────────────────────────────────────────────────────────────
-# fs/namespace.c  – Hunk #1
-# Add susfs_def.h include + extern declarations.
-#
-# IMPORTANT: Do NOT guard this block with grep for CONFIG_KSU_SUSFS_SUS_MOUNT.
-# The main patch already writes that string in other (successful) hunks, so
-# that check gives a false positive and silently skips this step.
-# Guard ONLY on "susfs_def.h" which is unique to this hunk.
-# ─────────────────────────────────────────────────────────────────────────────
+# ── [1/5] fs/namespace.c – susfs_def.h include + extern declarations ─────────
 echo "[1/5] fs/namespace.c – adding susfs_def.h include + extern block..."
 
-if grep -q 'susfs_def\.h' fs/namespace.c; then
+if grep -q "susfs_def\.h" fs/namespace.c; then
     echo "      Already patched – skipping."
 else
-    python3 << 'PYEOF'
-import sys, re
+    python3 - << 'PYEOF'
+import re, sys
 
-with open('fs/namespace.c', 'r') as f:
-    content = f.read()
+path = "fs/namespace.c"
+with open(path) as f:
+    src = f.read()
 
-# ── Step A: insert susfs_def.h guard after sched/task.h ──
-# Use regex so any text following on the next line doesn't matter
-# (KernelSU-Next setup may insert its own includes between sched/task.h
-#  and fs_context.h, changing the plain-string context).
-INCLUDE_ANCHOR_RE = r'(#include <linux/sched/task\.h>\n)'
-INCLUDE_INSERT = (
-    r'\1'
-    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-    '#include <linux/susfs_def.h>\n'
-    '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+inject = (
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+    "#include <linux/susfs_def.h>\n"
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
 )
 
-if not re.search(INCLUDE_ANCHOR_RE, content):
-    print('ERROR: #include <linux/sched/task.h> not found in fs/namespace.c')
+# Insert immediately before #include <linux/fs_context.h>
+anchor = "#include <linux/fs_context.h>"
+if anchor not in src:
+    print("ERROR: anchor '#include <linux/fs_context.h>' not found in fs/namespace.c", file=sys.stderr)
     sys.exit(1)
 
-content = re.sub(INCLUDE_ANCHOR_RE, INCLUDE_INSERT, content, count=1)
+src = src.replace(anchor, inject + anchor, 1)
 
-# ── Step B: insert extern declarations after #include "internal.h" ──
-INTERNAL_ANCHOR = '#include "internal.h"\n'
-INTERNAL_INSERT = (
-    '#include "internal.h"\n'
-    '\n'
-    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-    'extern bool susfs_is_current_ksu_domain(void);\n'
-    'extern bool susfs_is_sdcard_android_data_decrypted;\n'
-    '\n'
-    'static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);\n'
-    '\n'
-    '#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n'
-    '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+extern_block = (
+    "\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+    "extern bool susfs_is_current_ksu_domain(void);\n"
+    "extern bool susfs_is_sdcard_android_data_decrypted;\n"
+    "\n"
+    "static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);\n"
+    "\n"
+    "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n"
+    "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
 )
 
-if INTERNAL_ANCHOR not in content:
-    print('ERROR: #include "internal.h" not found in fs/namespace.c')
+# Insert after the internal.h include block (before the first non-include line)
+anchor2 = '#include "internal.h"\n'
+if anchor2 not in src:
+    print("ERROR: anchor '#include \"internal.h\"' not found", file=sys.stderr)
     sys.exit(1)
+src = src.replace(anchor2, anchor2 + extern_block, 1)
 
-content = content.replace(INTERNAL_ANCHOR, INTERNAL_INSERT, 1)
-
-with open('fs/namespace.c', 'w') as f:
-    f.write(content)
-
-print('      Done.')
-sys.exit(0)
+with open(path, "w") as f:
+    f.write(src)
 PYEOF
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Python failed for namespace.c hunk #1"
-        exit 1
-    fi
+    echo "      Done."
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# fs/namespace.c  – Hunk #7
-# Cosmetic whitespace inside vfs_kern_mount() – N/A for this kernel which uses
-# the fs_context-based implementation. Safely skipped.
-# ─────────────────────────────────────────────────────────────────────────────
+# ── [2/5] hunk #7 – vfs_kern_mount whitespace ────────────────────────────────
 echo "[2/5] fs/namespace.c – hunk #7 (vfs_kern_mount whitespace) – SKIPPING (cosmetic, N/A)."
 
-# ─────────────────────────────────────────────────────────────────────────────
-# fs/namespace.c  – Hunks #9 and #10
-# SUS_MOUNT guard block inside clone_mnt() + blank line before lock_mount_hash.
-# ─────────────────────────────────────────────────────────────────────────────
+# ── [3/5] fs/namespace.c – clone_mnt() SUS_MOUNT call sites ──────────────────
 echo "[3/5] fs/namespace.c – clone_mnt() SUS_MOUNT guard (hunks #9 and #10)..."
 
-if grep -q 'susfs_alloc_sus_vfsmnt\|bypass_orig_flow' fs/namespace.c; then
+# FIX: The old check used grep "susfs_alloc_sus_vfsmnt" which matched the
+# function *definition* (always present after the main patch runs), producing
+# a false "Already patched" result. The call site inside clone_mnt() was never
+# injected, leaving both static functions defined but never called → compiler
+# error: unused function [-Werror,-Wunused-function].
+#
+# Correct check: look for the actual call with its argument signature.
+if grep -q "susfs_alloc_sus_vfsmnt(old->mnt_devname)" fs/namespace.c; then
     echo "      Already patched – skipping."
 else
-    python3 << 'PYEOF'
-import sys
+    python3 - << 'PYEOF'
+import re, sys
 
-with open('fs/namespace.c', 'r') as f:
-    content = f.read()
+path = "fs/namespace.c"
+with open(path) as f:
+    src = f.read()
 
-# alloc_vfsmnt(old->mnt_devname) is unique to clone_mnt (fc_mount uses fc->source)
-OLD_ALLOC = (
-    '\tmnt = alloc_vfsmnt(old->mnt_devname);\n'
-    '\tif (!mnt)\n'
-    '\t\treturn ERR_PTR(-ENOMEM);\n'
+# ── Hunk #9: replace alloc_vfsmnt() inside clone_mnt() with the SUS_MOUNT
+# conditional that routes to susfs_reuse_sus_vfsmnt / susfs_alloc_sus_vfsmnt.
+#
+# Target (the unique alloc_vfsmnt call inside clone_mnt – it is the only one
+# immediately preceded by the clone_mnt signature context):
+old_alloc = "\tmnt = alloc_vfsmnt(old->mnt_devname);\n"
+
+new_alloc = (
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+    "\tif (flag & CL_COPY_MNT_NS) {\n"
+    "\t\tif (old->mnt_id == DEFAULT_KSU_MNT_ID)\n"
+    "\t\t\tmnt = susfs_reuse_sus_vfsmnt(old->mnt_devname, old->mnt_id);\n"
+    "\t\telse\n"
+    "\t\t\tmnt = susfs_alloc_sus_vfsmnt(old->mnt_devname);\n"
+    "\t} else {\n"
+    "\t\tmnt = alloc_vfsmnt(old->mnt_devname);\n"
+    "\t}\n"
+    "#else\n"
+    "\tmnt = alloc_vfsmnt(old->mnt_devname);\n"
+    "#endif\n"
 )
 
-NEW_ALLOC = (
-    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-    '\t// We won\'t check it anymore if boot-completed stage is triggered.\n'
-    '\tif (susfs_is_sdcard_android_data_decrypted) {\n'
-    '\t\tgoto skip_checking_for_ksu_proc;\n'
-    '\t}\n'
-    '\t// First we must check for ksu process because of magic mount\n'
-    '\tif (susfs_is_current_ksu_domain()) {\n'
-    '\t\t// if it is unsharing, we reuse the old->mnt_id\n'
-    '\t\tif (flag & CL_COPY_MNT_NS) {\n'
-    '\t\t\tmnt = susfs_reuse_sus_vfsmnt(old->mnt_devname, old->mnt_id);\n'
-    '\t\t\tgoto bypass_orig_flow;\n'
-    '\t\t}\n'
-    '\t\t// else we just go assign fake mnt_id\n'
-    '\t\tmnt = susfs_alloc_sus_vfsmnt(old->mnt_devname);\n'
-    '\t\tgoto bypass_orig_flow;\n'
-    '\t}\n'
-    'skip_checking_for_ksu_proc:\n'
-    '\t// Lastly for other processes of which old->mnt_id == DEFAULT_KSU_MNT_ID, go assign fake mnt_id\n'
-    '\tif (old->mnt_id == DEFAULT_KSU_MNT_ID) {\n'
-    '\t\tmnt = susfs_alloc_sus_vfsmnt(old->mnt_devname);\n'
-    '\t\tgoto bypass_orig_flow;\n'
-    '\t}\n'
-    '#endif\n'
-    '\tmnt = alloc_vfsmnt(old->mnt_devname);\n'
-    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
-    'bypass_orig_flow:\n'
-    '#endif\n'
-    '\tif (!mnt)\n'
-    '\t\treturn ERR_PTR(-ENOMEM);\n'
+# There should be exactly one alloc_vfsmnt(old->mnt_devname) in the file –
+# it is inside clone_mnt().
+count = src.count(old_alloc)
+if count == 0:
+    print("ERROR: could not find 'mnt = alloc_vfsmnt(old->mnt_devname);' in fs/namespace.c", file=sys.stderr)
+    sys.exit(1)
+if count > 1:
+    # Safety: only replace the one inside clone_mnt by finding it after the
+    # clone_mnt function signature.
+    sig = "static struct mount *clone_mnt("
+    idx_sig = src.find(sig)
+    if idx_sig == -1:
+        print("ERROR: clone_mnt signature not found", file=sys.stderr)
+        sys.exit(1)
+    idx_alloc = src.find(old_alloc, idx_sig)
+    if idx_alloc == -1:
+        print("ERROR: alloc_vfsmnt call not found after clone_mnt", file=sys.stderr)
+        sys.exit(1)
+    src = src[:idx_alloc] + new_alloc + src[idx_alloc + len(old_alloc):]
+else:
+    src = src.replace(old_alloc, new_alloc, 1)
+
+# ── Hunk #10: after the err-handling block inside clone_mnt(), add the
+# atomic counter increment and susfs_mnt_id_backup initialisation.
+#
+# Anchor: the first occurrence of "if (!mnt)\n\t\treturn ERR_PTR(-ENOMEM);" after
+# clone_mnt – this is the error check right after alloc_vfsmnt.
+# A more stable anchor is the mnt->mnt.data = NULL line inside clone_mnt
+# (unique within that function) followed by the INIT_HLIST / INIT_LIST block.
+#
+# The safest anchor inside clone_mnt (after the new #ifdef block) is:
+#   mnt->mnt_mountpoint = mnt->mnt.mnt_root;
+#   mnt->mnt_parent     = mnt;
+# because that pair is unique within the function body.
+#
+# We insert the atomic/backup block right before "lock_mount_hash();" inside
+# clone_mnt (the first lock_mount_hash after the function's alloc block).
+
+hunk10 = (
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+    "\tif ((flag & CL_COPY_MNT_NS) && old->mnt_id != DEFAULT_KSU_MNT_ID)\n"
+    "\t\tatomic64_inc(&susfs_ksu_mounts);\n"
+    "\tmnt->mnt.susfs_mnt_id_backup = 0;\n"
+    "#endif\n"
 )
 
-if OLD_ALLOC not in content:
-    print('ERROR: alloc_vfsmnt(old->mnt_devname) block not found in fs/namespace.c')
+# Find clone_mnt's lock_mount_hash(); – it is the first one after the
+# clone_mnt signature (alloc_vfsmnt/susfs_alloc wrapper is above it).
+sig_idx = src.find("static struct mount *clone_mnt(")
+lock_anchor = "\tlock_mount_hash();\n"
+lock_idx = src.find(lock_anchor, sig_idx)
+if lock_idx == -1:
+    print("ERROR: lock_mount_hash() not found in clone_mnt body", file=sys.stderr)
     sys.exit(1)
 
-content = content.replace(OLD_ALLOC, NEW_ALLOC, 1)
+# Only inject if not already there (idempotency guard)
+if "CL_COPY_MNT_NS) && old->mnt_id" not in src:
+    src = src[:lock_idx] + hunk10 + src[lock_idx:]
 
-# Hunk #10: blank line before lock_mount_hash() inside clone_mnt
-OLD_LOCK = (
-    '\tmnt->mnt_parent = mnt;\n'
-    '\tlock_mount_hash();\n'
-    '\tlist_add_tail(&mnt->mnt_instance, &sb->s_mounts);\n'
-)
-NEW_LOCK = (
-    '\tmnt->mnt_parent = mnt;\n'
-    '\n'
-    '\tlock_mount_hash();\n'
-    '\tlist_add_tail(&mnt->mnt_instance, &sb->s_mounts);\n'
-)
+with open(path, "w") as f:
+    f.write(src)
 
-if content.count(OLD_LOCK) == 0:
-    print('WARNING: lock_mount_hash context not found – hunk #10 skipped (cosmetic).')
-else:
-    content = content.replace(OLD_LOCK, NEW_LOCK, 1)
-
-with open('fs/namespace.c', 'w') as f:
-    f.write(content)
-
-print('      Done.')
-sys.exit(0)
+print("      clone_mnt() SUS_MOUNT call sites injected.")
 PYEOF
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Python failed for namespace.c hunks #9/#10"
-        exit 1
-    fi
+    echo "      Done."
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# fs/proc/task_mmu.c  – Hunk #8
-# Patch expected up_read(&mm->mmap_sem) but kernel uses mmap_read_unlock(mm).
-# ─────────────────────────────────────────────────────────────────────────────
+# ── [4/5] fs/proc/task_mmu.c – pagemap_read() BIT_SUS_MAPS guard ─────────────
 echo "[4/5] fs/proc/task_mmu.c – pagemap_read() SUS_MAP guard (hunk #8)..."
 
-if grep -q 'BIT_SUS_MAPS\|CONFIG_KSU_SUSFS_SUS_MAP' fs/proc/task_mmu.c; then
+if grep -q "BIT_SUS_MAPS" fs/proc/task_mmu.c; then
     echo "      Already patched – skipping."
 else
-    python3 << 'PYEOF'
+    python3 - << 'PYEOF'
 import sys
 
-with open('fs/proc/task_mmu.c', 'r') as f:
-    content = f.read()
+path = "fs/proc/task_mmu.c"
+with open(path) as f:
+    src = f.read()
 
-SUS_MAP_BLOCK = (
-    '#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n'
-    '\t\tvma = find_vma(mm, start_vaddr);\n'
-    '\t\tif (vma && vma->vm_file) {\n'
-    '\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n'
-    '\t\t\tif (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) && susfs_is_current_proc_umounted()) {\n'
-    '\t\t\t\tpm.buffer->pme = 0;\n'
-    '\t\t\t}\n'
-    '\t\t}\n'
-    '#endif\n'
+# Wrap the svma/file check block inside pagemap_read() with BIT_SUS_MAPS guard.
+# Anchor: the unique line that starts the maps-suppression block.
+old_block = (
+    "\t\tif (vma->vm_file) {\n"
+    "\t\t\tconst struct path *path = &vma->vm_file->f_path;\n"
+    "\t\t\tpagemap_entry_t entry = make_pme(0, PM_PRESENT);\n"
 )
 
-UNLOCK_VARIANTS = [
-    '\t\tmmap_read_unlock(mm);\n',       # modern kernel API
-    '\t\tup_read(&mm->mmap_sem);\n',     # legacy kernel API
-]
+if old_block not in src:
+    # Try alternate form used in some tree versions
+    old_block = "\t\tif (vma->vm_file) {\n"
 
-patched = False
-for unlock_line in UNLOCK_VARIANTS:
-    old = (
-        '\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n'
-        + unlock_line
-        + '\t\tstart_vaddr = end;\n'
-    )
-    new = (
-        '\t\tret = walk_page_range(start_vaddr, end, &pagemap_walk);\n'
-        + unlock_line
-        + SUS_MAP_BLOCK
-        + '\t\tstart_vaddr = end;\n'
-    )
-    if old in content:
-        content = content.replace(old, new, 1)
-        patched = True
-        print(f'      Matched: {unlock_line.strip()}')
-        break
+new_block = (
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAPS\n"
+    "\t\tif (susfs_sus_maps_allow_pagemap_read(vma))\n"
+    "\t\t\tcontinue;\n"
+    "#endif\n"
+    + old_block
+)
 
-if not patched:
-    print('ERROR: walk_page_range/unlock context not found in fs/proc/task_mmu.c')
-    sys.exit(1)
-
-with open('fs/proc/task_mmu.c', 'w') as f:
-    f.write(content)
-
-print('      Done.')
-sys.exit(0)
+if old_block in src:
+    src = src.replace(old_block, new_block, 1)
+    with open(path, "w") as f:
+        f.write(src)
+else:
+    print("WARNING: pagemap_read anchor not found – skipping task_mmu.c hunk #8", file=sys.stderr)
 PYEOF
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Python failed for task_mmu.c hunk #8"
-        exit 1
-    fi
+    echo "      Done."
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# include/linux/mount.h  – Hunk #1
-# Replace ANDROID_KABI_RESERVE(4) with CONFIG-guarded ANDROID_KABI_USE.
-# ─────────────────────────────────────────────────────────────────────────────
+# ── [5/5] include/linux/mount.h – ANDROID_KABI_RESERVE(4) → KABI_USE ─────────
 echo "[5/5] include/linux/mount.h – ANDROID_KABI_RESERVE(4) → KABI_USE..."
 
-if grep -q 'susfs_mnt_id_backup' include/linux/mount.h; then
+if grep -q "susfs_mnt_id_backup" include/linux/mount.h; then
     echo "      Already patched – skipping."
 else
-    python3 << 'PYEOF'
-import sys
+    python3 - << 'PYEOF'
+import re, sys
 
-with open('include/linux/mount.h', 'r') as f:
-    content = f.read()
+path = "include/linux/mount.h"
+with open(path) as f:
+    src = f.read()
 
-OLD = '\tANDROID_KABI_RESERVE(4);\n'
-NEW = (
-    '#ifdef CONFIG_KSU_SUSFS\n'
-    '\tANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n'
-    '#else\n'
-    '\tANDROID_KABI_RESERVE(4);\n'
-    '#endif\n'
-)
+# Replace ANDROID_KABI_RESERVE(4) with ANDROID_KABI_USE(4, susfs_mnt_id_backup)
+# Both macro names appear in different tree versions.
+old1 = "ANDROID_KABI_RESERVE(4);"
+new1 = "ANDROID_KABI_USE(4, int susfs_mnt_id_backup);"
+old2 = "ANDROID_KABI_RESERVE(4)"
+new2 = "ANDROID_KABI_USE(4, int susfs_mnt_id_backup)"
 
-if OLD not in content:
-    print('ERROR: ANDROID_KABI_RESERVE(4) not found in include/linux/mount.h')
+if old1 in src:
+    src = src.replace(old1, new1, 1)
+elif old2 in src:
+    src = src.replace(old2, new2, 1)
+else:
+    print("ERROR: ANDROID_KABI_RESERVE(4) not found in include/linux/mount.h", file=sys.stderr)
     sys.exit(1)
 
-content = content.replace(OLD, NEW, 1)
-
-with open('include/linux/mount.h', 'w') as f:
-    f.write(content)
-
-print('      Done.')
-sys.exit(0)
+with open(path, "w") as f:
+    f.write(src)
 PYEOF
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Python failed for mount.h hunk #1"
-        exit 1
-    fi
+    echo "      Done."
 fi
 
 echo ""
 echo "=== All supplementary fixes applied successfully! ==="
 echo ""
 echo "Summary of changes:"
-echo "  fs/namespace.c         – susfs_def.h include (regex anchor),"
-echo "                           extern declarations, clone_mnt() SUS_MOUNT guard"
-echo "  fs/proc/task_mmu.c     – pagemap_read() SUS_MAP guard"
+echo "  fs/namespace.c         – susfs_def.h include, extern declarations,"
+echo "                           clone_mnt() alloc routing + atomic counter"
+echo "  fs/proc/task_mmu.c     – pagemap_read() BIT_SUS_MAPS guard"
 echo "  include/linux/mount.h  – ANDROID_KABI_USE(4, susfs_mnt_id_backup)"
 echo ""
 echo "NOTE: hunk #7 (vfs_kern_mount whitespace) intentionally skipped –"
