@@ -195,6 +195,11 @@ jobs:
         chmod +x $GITHUB_WORKSPACE/patches/susfs_fix.sh
         bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
         echo "Supplementary fix applied"
+    - name: Apply SUSFS reject fixes
+      run: |
+       cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+       python3 $GITHUB_WORKSPACE/patches/susfs_reject_fix.py .
+       echo "Reject fixes applied"
 
     - name: Verify SUSFS patch coverage
       run: |
