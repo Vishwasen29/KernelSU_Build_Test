@@ -204,7 +204,7 @@ jobs:
     - name: Verify SUSFS patch coverage
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        bash $GITHUB_WORKSPACE/patches/verify_susfs_patches.sh .
+        bash $GITHUB_WORKSPACE/patches/verify_susfs.sh .
 
     - name: Add KernelSU & SUSFS configs
       run: |
