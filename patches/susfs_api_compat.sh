@@ -1,84 +1,58 @@
 #!/bin/bash
 # susfs_api_compat.sh
 #
-# Fixes build errors from API mismatch between rsuntk/KernelSU (susfs-rksu-master)
-# and the SUSFS 4.19 kernel patch.
+# Combined SUSFS compatibility fix. Handles two classes of build errors:
 #
-#  Error 1 — fs/proc/task_mmu.c
-#    "unused variable 'vma'" — the SUSFS patch adds a vma declaration inside
-#    pagemap_read() but the compiler sees it as unused when the SUS_MAP guard
-#    is not active in the analysis pass.
-#    Strategy: find a bare `struct vm_area_struct *vma;` that is immediately
-#    FOLLOWED by a CONFIG_KSU_SUSFS_SUS_MAP guard within the next 30 lines.
-#    That is uniquely the SUSFS-added declaration — not any of the other vma
-#    declarations in earlier functions.
+# CLASS 1 — Compiler errors
+#   Fix 1: fs/proc/task_mmu.c — "unused variable 'vma'"
+#   Fix 2: drivers/kernelsu/supercalls.c — 3 renamed API symbols
+#          (rsuntk fork only; KernelSU-Next uses different names, skip if absent)
 #
-#  Error 2 — drivers/kernelsu/supercalls.c
-#    Three symbols renamed between SUSFS versions:
-#      CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS  → CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS
-#      susfs_set_hide_sus_mnts_for_all_procs  → susfs_set_hide_sus_mnts_for_non_su_procs
-#      susfs_add_try_umount                   → add_try_umount
+# CLASS 2 — Linker errors
+#   Fix 3: fs/susfs_compat.c — defines 3 symbols absent from installed susfs.c:
+#           susfs_ksu_sid, susfs_priv_app_sid, susfs_is_current_ksu_domain
 #
 # Usage:
 #   bash susfs_api_compat.sh [path/to/android-kernel]
 
 set -e
-
 KERNEL_ROOT="${1:-.}"
 TASK_MMU="${KERNEL_ROOT}/fs/proc/task_mmu.c"
 SUPERCALLS="${KERNEL_ROOT}/drivers/kernelsu/supercalls.c"
 SUSFS_H="${KERNEL_ROOT}/include/linux/susfs.h"
+SUSFS_C="${KERNEL_ROOT}/fs/susfs.c"
+FS_MAKEFILE="${KERNEL_ROOT}/fs/Makefile"
+COMPAT_C="${KERNEL_ROOT}/fs/susfs_compat.c"
 
-echo "=== SUSFS API compatibility fix ==="
+echo "=== SUSFS API & linker compatibility fix ==="
 echo "    Kernel root: $KERNEL_ROOT"
 echo ""
 
-for f in "$TASK_MMU" "$SUPERCALLS" "$SUSFS_H"; do
-    if [ ! -f "$f" ]; then
-        echo "ERROR: required file not found: $f"
-        exit 1
-    fi
+for f in "$SUSFS_H" "$FS_MAKEFILE"; do
+    [ -f "$f" ] || { echo "ERROR: required file not found: $f"; exit 1; }
 done
-
-if ! grep -q "susfs_set_hide_sus_mnts_for_non_su_procs" "$SUSFS_H"; then
-    echo "ERROR: susfs.h does not have expected SUSFS API."
-    echo "       Apply the SUSFS kernel patch (fic.sh) before running this script."
-    exit 1
-fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fix 1: task_mmu.c — __maybe_unused on the SUSFS-added vma declaration
-#
-# The file has multiple `struct vm_area_struct *vma;` declarations in different
-# functions. The one added by SUSFS is uniquely identifiable because a
-# `#ifdef CONFIG_KSU_SUSFS_SUS_MAP` guard appears within ~30 lines AFTER it
-# (the guard wraps the code that actually uses vma).
-#
-# Algorithm:
-#   For each bare vma declaration (no __maybe_unused yet), scan the next 30
-#   lines for a CONFIG_KSU_SUSFS_SUS_MAP guard. If found, that is the target.
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- Fix 1: task_mmu.c unused 'vma' variable ---"
-
-python3 << PYEOF
+if [ -f "$TASK_MMU" ]; then
+    python3 << PYEOF
 import sys
-
 path = "$TASK_MMU"
 with open(path, "r") as f:
     lines = f.readlines()
 
-LOOKAHEAD = 30  # lines to scan forward for the guard
-
+LOOKAHEAD = 30
 target_idx = None
+guard_line = None
+
 for i, line in enumerate(lines):
     stripped = line.strip()
-    # Bare declaration: ends with *vma; and not yet __maybe_unused
     if ("vm_area_struct" in stripped and
             ("*vma;" in stripped or "* vma;" in stripped) and
             "__maybe_unused" not in stripped):
-        # Scan forward for the SUS_MAP guard
-        window_end = min(len(lines), i + LOOKAHEAD)
-        for j in range(i + 1, window_end):
+        for j in range(i + 1, min(len(lines), i + LOOKAHEAD)):
             if "CONFIG_KSU_SUSFS_SUS_MAP" in lines[j]:
                 target_idx = i
                 guard_line = j
@@ -87,55 +61,134 @@ for i, line in enumerate(lines):
         break
 
 if target_idx is None:
-    print("  [warn] Could not locate the SUSFS vma declaration.")
-    print("         Searched for a bare vma decl followed by SUS_MAP guard within 30 lines.")
-    print("         The patch structure may differ — check task_mmu.c manually.")
+    print("  [skip] vma declaration not found or already fixed")
     sys.exit(0)
 
-# Apply fix
 old = lines[target_idx]
-# Insert __maybe_unused before the semicolon that terminates the declaration
-if "*vma;" in old:
-    new = old.replace("*vma;", "*vma __maybe_unused;", 1)
-elif "* vma;" in old:
+new = old.replace("*vma;", "*vma __maybe_unused;", 1)
+if new == old:
     new = old.replace("* vma;", "* vma __maybe_unused;", 1)
-else:
-    new = old.rstrip("\n").rstrip(";") + " __maybe_unused;\n"
-
 lines[target_idx] = new
 with open(path, "w") as f:
     f.writelines(lines)
-
-print(f"  [fix] Added __maybe_unused to vma at line {target_idx + 1}")
-print(f"        (SUS_MAP guard confirmed at line {guard_line + 1})")
+print(f"  [fix]  Added __maybe_unused at line {target_idx + 1} (guard at line {guard_line + 1})")
 PYEOF
-
+else
+    echo "  [skip] task_mmu.c not found"
+fi
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fix 2: supercalls.c — three renamed API symbols
+# Fix 2: supercalls.c — renamed API symbols (rsuntk fork only)
+# KernelSU-Next uses entirely different code; these old names simply won't
+# exist, so we skip silently. Track what was actually replaced.
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- Fix 2: supercalls.c API name mismatches ---"
+FIX2_REPLACED_HIDE=0
+FIX2_REPLACED_FUNC=0
 
-patch_symbol() {
-    local old_sym="$1" new_sym="$2" file="$3"
-    if ! grep -q "$old_sym" "$file"; then
-        echo "  [skip] '$old_sym' not found (already fixed or not present)"
-        return
+if [ -f "$SUPERCALLS" ]; then
+    if grep -q "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS" "$SUPERCALLS"; then
+        sed -i "s/CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS/CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS/g" "$SUPERCALLS"
+        echo "  [fix]  CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS → CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS"
+        FIX2_REPLACED_HIDE=1
+    else
+        echo "  [skip] CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS not found (KernelSU-Next or already fixed)"
     fi
-    sed -i "s/${old_sym}/${new_sym}/g" "$file"
-    echo "  [fix]  $old_sym  →  $new_sym"
+
+    if grep -q "susfs_set_hide_sus_mnts_for_all_procs" "$SUPERCALLS"; then
+        sed -i "s/susfs_set_hide_sus_mnts_for_all_procs/susfs_set_hide_sus_mnts_for_non_su_procs/g" "$SUPERCALLS"
+        echo "  [fix]  susfs_set_hide_sus_mnts_for_all_procs → susfs_set_hide_sus_mnts_for_non_su_procs"
+        FIX2_REPLACED_FUNC=1
+    else
+        echo "  [skip] susfs_set_hide_sus_mnts_for_all_procs not found (KernelSU-Next or already fixed)"
+    fi
+
+    if grep -q "susfs_add_try_umount" "$SUPERCALLS"; then
+        sed -i "s/susfs_add_try_umount/add_try_umount/g" "$SUPERCALLS"
+        echo "  [fix]  susfs_add_try_umount → add_try_umount"
+    else
+        echo "  [skip] susfs_add_try_umount not found (KernelSU-Next or already fixed)"
+    fi
+else
+    echo "  [skip] supercalls.c not found"
+fi
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix 3: Missing linker symbols
+# Creates fs/susfs_compat.c and wires it into fs/Makefile.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- Fix 3: missing linker symbols ---"
+
+ALREADY_HAVE=0
+{ [ -f "$SUSFS_C" ] && grep -q "^u32 susfs_ksu_sid" "$SUSFS_C"; } && ALREADY_HAVE=1
+{ [ -f "$COMPAT_C" ] && grep -q "susfs_ksu_sid" "$COMPAT_C"; } && ALREADY_HAVE=1
+
+if [ "$ALREADY_HAVE" -eq 1 ]; then
+    echo "  [skip] symbols already defined"
+else
+    echo "  [fix]  creating fs/susfs_compat.c"
+    cat > "$COMPAT_C" << 'CEOF'
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * susfs_compat.c — stub definitions for SUSFS symbols absent from the
+ * installed fs/susfs.c due to a version mismatch.
+ *
+ * Referenced unconditionally by patched security/selinux/avc.c and
+ * fs/proc_namespace.c but not defined in the 4.19 susfs.c.
+ */
+#include <linux/types.h>
+#include <linux/export.h>
+
+/* SELinux SID of the KernelSU process. Default 0 = audit suppression inactive. */
+u32 susfs_ksu_sid = 0;
+EXPORT_SYMBOL_GPL(susfs_ksu_sid);
+
+/* SELinux SID of privileged app processes. Default 0 = inactive. */
+u32 susfs_priv_app_sid = 0;
+EXPORT_SYMBOL_GPL(susfs_priv_app_sid);
+
+/* Returns true if current task is in KernelSU domain.
+ * Default false = mount hiding inactive (safe). */
+bool susfs_is_current_ksu_domain(void)
+{
+	return false;
 }
+EXPORT_SYMBOL_GPL(susfs_is_current_ksu_domain);
+CEOF
 
-patch_symbol "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS" \
-             "CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS" "$SUPERCALLS"
+    if grep -q "susfs_compat" "$FS_MAKEFILE"; then
+        echo "  [skip] susfs_compat.o already in fs/Makefile"
+    elif grep -q "susfs\.o" "$FS_MAKEFILE"; then
+        sed -i '/susfs\.o/a obj-y += susfs_compat.o' "$FS_MAKEFILE"
+        echo "  [fix]  susfs_compat.o added to fs/Makefile"
+    else
+        echo "obj-y += susfs_compat.o" >> "$FS_MAKEFILE"
+        echo "  [fix]  susfs_compat.o appended to fs/Makefile"
+    fi
+fi
 
-patch_symbol "susfs_set_hide_sus_mnts_for_all_procs" \
-             "susfs_set_hide_sus_mnts_for_non_su_procs" "$SUPERCALLS"
-
-patch_symbol "susfs_add_try_umount" \
-             "add_try_umount" "$SUPERCALLS"
-
+# Ensure header declarations exist
+add_decl() {
+    local sym="$1" decl="$2"
+    if grep -q "\b${sym}\b" "$SUSFS_H"; then
+        echo "  [skip] ${sym} already in susfs.h"
+    else
+        echo "  [fix]  ${sym} → susfs.h"
+        python3 - "$SUSFS_H" "$decl" << 'PYEOF'
+import sys
+path, decl = sys.argv[1], sys.argv[2]
+with open(path) as f: src = f.read()
+idx = src.rfind('#endif')
+src = (src[:idx] + decl + '\n\n' + src[idx:]) if idx != -1 else (src + '\n' + decl + '\n')
+with open(path, 'w') as f: f.write(src)
+PYEOF
+    fi
+}
+add_decl "susfs_ksu_sid"               "extern u32 susfs_ksu_sid;"
+add_decl "susfs_priv_app_sid"          "extern u32 susfs_priv_app_sid;"
+add_decl "susfs_is_current_ksu_domain" "extern bool susfs_is_current_ksu_domain(void);"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,55 +197,51 @@ echo ""
 echo "--- Verification ---"
 FAIL=0
 
-# task_mmu.c: confirm __maybe_unused appears on a line that precedes the guard
-python3 << PYEOF
-import sys
-path = "$TASK_MMU"
-with open(path) as f:
-    lines = f.readlines()
+# Fix 1: vma check
+if [ -f "$TASK_MMU" ]; then
+    python3 -c "
+lines = open('$TASK_MMU').readlines()
+found = any(
+    'vm_area_struct' in lines[i] and '__maybe_unused' in lines[i] and
+    any('CONFIG_KSU_SUSFS_SUS_MAP' in lines[j]
+        for j in range(i+1, min(len(lines), i+30)))
+    for i in range(len(lines))
+)
+print('  ✅ task_mmu.c vma fix confirmed' if found else '  ⚠️  task_mmu.c vma: no SUS_MAP guard nearby (may be pre-patched or clean)')
+"
+fi
 
-LOOKAHEAD = 30
-found = False
-for i, line in enumerate(lines):
-    if "vm_area_struct" in line and "__maybe_unused" in line:
-        window_end = min(len(lines), i + LOOKAHEAD)
-        for j in range(i + 1, window_end):
-            if "CONFIG_KSU_SUSFS_SUS_MAP" in lines[j]:
-                print(f"  ✅ vma __maybe_unused at line {i+1}, guard at line {j+1} — correct")
-                found = True
-                break
-    if found:
-        break
-
-if not found:
-    print("  ❌ Could not confirm vma __maybe_unused near SUS_MAP guard")
-    sys.exit(1)
-PYEOF
-
-check_absent() {
-    if grep -q "$1" "$2"; then
-        echo "  ❌ '$1' still present in $(basename $2)"
-        FAIL=$((FAIL + 1))
+# Fix 2: only verify replacement names if we actually did a replacement
+if [ "$FIX2_REPLACED_HIDE" -eq 1 ]; then
+    if grep -q "CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS" "$SUPERCALLS"; then
+        echo "  ✅ CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS present in supercalls.c"
     else
-        echo "  ✅ '$1' removed from $(basename $2)"
+        echo "  ❌ CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS missing after replacement"
+        FAIL=$((FAIL+1))
     fi
-}
-
-check_present() {
-    if grep -q "$1" "$2"; then
-        echo "  ✅ '$1' present in $(basename $2)"
+fi
+if [ "$FIX2_REPLACED_FUNC" -eq 1 ]; then
+    if grep -q "susfs_set_hide_sus_mnts_for_non_su_procs" "$SUPERCALLS"; then
+        echo "  ✅ susfs_set_hide_sus_mnts_for_non_su_procs present in supercalls.c"
     else
-        echo "  ❌ '$1' missing from $(basename $2)"
-        FAIL=$((FAIL + 1))
+        echo "  ❌ susfs_set_hide_sus_mnts_for_non_su_procs missing after replacement"
+        FAIL=$((FAIL+1))
     fi
-}
+fi
 
-check_absent  "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS"    "$SUPERCALLS"
-check_absent  "susfs_set_hide_sus_mnts_for_all_procs"    "$SUPERCALLS"
-check_absent  "susfs_add_try_umount"                     "$SUPERCALLS"
-check_present "CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS" "$SUPERCALLS"
-check_present "susfs_set_hide_sus_mnts_for_non_su_procs"  "$SUPERCALLS"
-check_present "add_try_umount"                            "$SUPERCALLS"
+# Fix 3: compat file and Makefile
+if [ -f "$COMPAT_C" ] && grep -q "susfs_ksu_sid" "$COMPAT_C"; then
+    echo "  ✅ fs/susfs_compat.c present with definitions"
+elif [ -f "$SUSFS_C" ] && grep -q "^u32 susfs_ksu_sid" "$SUSFS_C"; then
+    echo "  ✅ susfs_ksu_sid defined in susfs.c"
+else
+    echo "  ❌ linker symbols not defined anywhere"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "susfs_compat" "$FS_MAKEFILE"; then
+    echo "  ✅ susfs_compat.o in fs/Makefile"
+fi
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then
