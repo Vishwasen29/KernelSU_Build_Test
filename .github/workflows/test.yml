@@ -114,6 +114,8 @@ jobs:
         chmod +x $GITHUB_WORKSPACE/patches/susfs_fix.sh
         bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
         echo "Supplementary fix applied"
+    - name: Fix SUSFS API compatibility
+      run: bash $GITHUB_WORKSPACE/patches/susfs_api_compat.sh kernel_workspace/android-kernel
 
     - name: Verify SUSFS patch coverage
       run: |
