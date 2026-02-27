@@ -159,6 +159,9 @@ jobs:
           name: susfs-reject-files
           path: susfs_debug/
 
+      - name: Fix SUSFS API compatibility
+        run: bash $GITHUB_WORKSPACE/patches/susfs_api_compat.sh kernel_workspace/android-kernel
+
       # ─────────────────────────────────────────────────────────────────────
       # Verify the kernel SOURCE FILES were patched correctly.
       # Runs AFTER fic.sh so we see the actual post-patch state.
