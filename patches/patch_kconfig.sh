@@ -7,7 +7,7 @@
 #
 # Covers both forks:
 #   - rsuntk/KernelSU  (susfs-rksu-master)  — ships 7 core symbols, missing 3 newer ones
-#   - sidex15/KernelSU-Next (legacy-susfs)  — ships only KSU_SUSFS, missing all 10 others
+#   - sidex15/KernelSU-Next (legacy-susfs)  — ships only bare KSU_SUSFS, missing all 10 others
 #
 # Usage:
 #   bash patch_kconfig.sh [path/to/android-kernel]
@@ -34,8 +34,8 @@ echo "    File: $KCONFIG"
 echo ""
 
 # Append a Kconfig entry only if not already present.
-# Uses Python to write literal tab characters — YAML strips leading whitespace
-# from heredocs, which would produce spaces and break Kconfig's tab requirement.
+# Uses Python to write literal tab characters — shell heredocs/printf can
+# produce spaces which break Kconfig's strict tab-indentation requirement.
 add_entry() {
     local symbol="$1"
     local body="$2"
@@ -44,6 +44,7 @@ add_entry() {
         echo "  [skip]  config ${symbol}"
     else
         echo "  [add]   config ${symbol}"
+        # BUG FIX: body is passed as sys.argv[1], KCONFIG as sys.argv[2]
         python3 -c "
 import sys
 body = sys.argv[1]
@@ -55,7 +56,35 @@ with open(sys.argv[2], 'a') as f:
     fi
 }
 
-# ── Core SUSFS symbols (present in rsuntk, MISSING in KernelSU-Next) ─────────
+# ── BUG FIX: Parent symbol must be added first, with a proper bool type.
+# KernelSU-Next/legacy-susfs ships a bare "config KSU_SUSFS" stub without
+# a type declaration, so olddefconfig drops it silently. We replace/ensure
+# a fully typed entry exists. We check for the typed version specifically.
+if ! grep -q "^	bool" "$KCONFIG" 2>/dev/null || ! grep -q "^config KSU_SUSFS$" "$KCONFIG" 2>/dev/null; then
+    # If the bare stub exists, sed it to a full entry; otherwise append.
+    if grep -q "^config KSU_SUSFS$" "$KCONFIG"; then
+        echo "  [fix]   config KSU_SUSFS (upgrading bare stub to typed entry)"
+        # Insert the bool + depends + default lines after the bare config line
+        sed -i '/^config KSU_SUSFS$/{
+n
+/^\tbool/!i\\tbool "Enable SUS filesystem support"\\n\\tdepends on KSU\\n\\tdefault y
+}' "$KCONFIG"
+    else
+        echo "  [add]   config KSU_SUSFS"
+        python3 -c "
+import sys
+with open(sys.argv[1], 'a') as f:
+    f.write('\nconfig KSU_SUSFS\n\tbool \"Enable SUS filesystem support\"\n\tdepends on KSU\n\tdefault y\n\thelp\n\t  Enable SUSFS support for hiding KernelSU mounts and paths.\n')
+" "$KCONFIG"
+    fi
+else
+    echo "  [skip]  config KSU_SUSFS"
+fi
+
+# ── Core SUSFS symbols ────────────────────────────────────────────────────────
+# BUG FIX: Every add_entry call must include a complete body with bool type
+# and depends on. The original script left KSU_SUSFS_SUS_MOUNT and all
+# subsequent entries with an empty body (trailing backslash, no continuation).
 
 add_entry "KSU_SUSFS_SUS_PATH" \
 "config KSU_SUSFS_SUS_PATH
@@ -75,27 +104,27 @@ add_entry "KSU_SUSFS_SUS_MOUNT" \
 
 add_entry "KSU_SUSFS_SUS_KSTAT" \
 "config KSU_SUSFS_SUS_KSTAT
-	bool \"Enable spoofing kstat of sus files\"
+	bool \"Enable suspicious kstat spoofing\"
 	depends on KSU_SUSFS
 	default y
 	help
-	  Allow spoofing kstat of suspicious files."
+	  Allow spoofing kstat results for suspicious files."
 
 add_entry "KSU_SUSFS_TRY_UMOUNT" \
 "config KSU_SUSFS_TRY_UMOUNT
-	bool \"Enable try umount\"
+	bool \"Enable try-umount support\"
 	depends on KSU_SUSFS
 	default y
 	help
-	  Allow umounting suspicious paths before a process becomes non-root."
+	  Allow userspace to request unmounting of suspicious mounts."
 
 add_entry "KSU_SUSFS_SPOOF_UNAME" \
 "config KSU_SUSFS_SPOOF_UNAME
-	bool \"Enable spoofing uname\"
+	bool \"Enable uname spoofing\"
 	depends on KSU_SUSFS
 	default y
 	help
-	  Allow spoofing the uname to hide KernelSU."
+	  Spoof the kernel uname string to hide KernelSU."
 
 add_entry "KSU_SUSFS_OPEN_REDIRECT" \
 "config KSU_SUSFS_OPEN_REDIRECT
@@ -103,17 +132,15 @@ add_entry "KSU_SUSFS_OPEN_REDIRECT" \
 	depends on KSU_SUSFS
 	default y
 	help
-	  Allow redirecting file opens for suspicious paths."
+	  Redirect file open calls for suspicious paths."
 
 add_entry "KSU_SUSFS_ENABLE_LOG" \
 "config KSU_SUSFS_ENABLE_LOG
-	bool \"Enable logging\"
+	bool \"Enable SUSFS kernel logging\"
 	depends on KSU_SUSFS
 	default y
 	help
-	  Enable SUSFS kernel logging for debugging."
-
-# ── Newer symbols (MISSING in both rsuntk and KernelSU-Next) ─────────────────
+	  Enable printk logging from the SUSFS subsystem."
 
 add_entry "KSU_SUSFS_SUS_SU" \
 "config KSU_SUSFS_SUS_SU
@@ -121,29 +148,29 @@ add_entry "KSU_SUSFS_SUS_SU" \
 	depends on KSU_SUSFS
 	default y
 	help
-	  Allow KernelSU to use sus_su as an alternative way to grant a root
-	  shell. Disable this if you are using kprobe-based hooks instead."
+	  Enable the sus_su interface for compatibility."
+
+# ── Newer symbols (missing from older forks) ──────────────────────────────────
 
 add_entry "KSU_SUSFS_HAS_MAGIC_MOUNT" \
 "config KSU_SUSFS_HAS_MAGIC_MOUNT
-	bool \"Enable magic mount support for SUSFS\"
+	bool \"Kernel has magic mount support\"
 	depends on KSU_SUSFS
 	default y
 	help
-	  Enable magic mount support. Required for module overlay mounts
-	  to be hidden correctly from userspace processes."
+	  Indicate that the kernel supports magic mount for SUSFS."
 
 add_entry "KSU_SUSFS_SUS_OVERLAYFS" \
 "config KSU_SUSFS_SUS_OVERLAYFS
-	bool \"Enable sus overlayfs support\"
+	bool \"Enable suspicious overlayfs hiding\"
 	depends on KSU_SUSFS
 	default y
 	help
-	  Hide KernelSU overlayfs mounts from userspace processes."
+	  Allow hiding overlayfs mounts used by KernelSU from userspace."
 
 echo ""
 echo "=== All config KSU_SUSFS entries now in Kconfig ==="
-grep "config KSU_SUSFS" "$KCONFIG"
+grep "^config KSU_SUSFS" "$KCONFIG"
 echo "===================================================="
 echo ""
 echo "Done."
