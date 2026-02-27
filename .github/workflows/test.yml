@@ -107,7 +107,7 @@ jobs:
         echo "Main patch applied (failures expected for namespace.c, task_mmu.c, mount.h)"
 
         patch -p1 --forward \
-          < $GITHUB_WORKSPACE/patches/susfs_mounts.patch \
+          < $GITHUB_WORKSPACE/patches/sus_mounts.patch \
           2>&1 | tee patch_main_log.txt
 
         
