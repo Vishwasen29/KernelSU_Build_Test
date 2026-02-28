@@ -127,6 +127,9 @@ jobs:
         bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
         python3 $GITHUB_WORKSPACE/patches/fix_task_mmu_pagemap.py .
 
+    - name: Fix SUSFS API compatibility
+      run: bash $GITHUB_WORKSPACE/patches/susfs_api_compat.sh kernel_workspace/android-kernel
+
     - name: Collect patch rejects and originals
       # FIX: was if: failure() â€” but all patch commands use || true so the
       # patch step never exits non-zero; changed to always() so this runs
