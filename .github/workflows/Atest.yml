@@ -125,14 +125,24 @@ jobs:
  
     - name: Apply susfs patch
       run: |
-       cd kernel_workspace/android-kernel
-       set -o pipefail
-       patch -p1 --forward \
-       < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch \
-       2>&1 | tee patch_main_log.txt || true
+        cd kernel_workspace/android-kernel
+        # Apply the main patch, ignore failures as we fix them next
+        patch -p1 --forward < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
 
-       bash $GITHUB_WORKSPACE/patches/fix_susfs_patch.sh
+    - name: Fix Rejects Manually
+      run: |
+        cd kernel_workspace/android-kernel
+        # Make sure the script is executable and run it from the kernel root
+        bash $GITHUB_WORKSPACE/patches/fix_susfs_patch.sh
 
+    - name: Verify Integration in Workflow
+      run: |
+        # Check if the compilation would actually include SUSFS
+        cd kernel_workspace/android-kernel
+        echo "Check: Verification of source code injection"
+        grep -q "susfs_mnt_id_backup" include/linux/mount.h && echo "✅ mount.h OK" || (echo "❌ mount.h FAIL"; exit 1)
+        grep -q "susfs_def.h" fs/namespace.c && echo "✅ namespace.c OK" || (echo "❌ namespace.c FAIL"; exit 1)
+        
     - name: Collect patch debug files
       run: |
        mkdir -p patch_artifacts
