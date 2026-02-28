@@ -3,29 +3,87 @@
 # Define Tab character for kernel-compliant indentation
 T=$(printf '\t')
 
-echo "Starting Comprehensive SUSFS & KernelSU-Next Fix..."
+echo "Starting Definitive SUSFS & KernelSU-Next Fix..."
 
-# --- 1. Fix include/linux/mount.h (Resolve ANDROID_KABI Rejects) ---
+# ==========================================
+# 1. Fix include/linux/mount.h (ANDROID_KABI Rejects)
+# ==========================================
 if ! grep -q "susfs_mnt_id_backup" include/linux/mount.h; then
     echo "Patching include/linux/mount.h..."
     sed -i '/ANDROID_KABI_RESERVE(4);/c\#ifdef CONFIG_KSU_SUSFS\n'"$T"'ANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n#else\n'"$T"'ANDROID_KABI_RESERVE(4);\n#endif' include/linux/mount.h
 fi
 
-# --- 2. Fix fs/namespace.c (Headers and Externs) ---
+# ==========================================
+# 2. Fix fs/namespace.c (Headers and Externs)
+# ==========================================
 if ! grep -q "susfs_def.h" fs/namespace.c; then
-    echo "Patching fs/namespace.c..."
+    echo "Patching fs/namespace.c (Headers)..."
     sed -i '/#include <linux\/sched\/task.h>/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs_def.h>\n#endif' fs/namespace.c
-    sed -i '/#include "internal.h"/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_is_current_ksu_domain(void);\nextern bool susfs_is_sdcard_android_data_decrypted;\nstatic atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);\n#define CL_COPY_MNT_NS BIT(25)\n#endif' fs/namespace.c
+    
+    cat <<EOF > susfs_externs.txt
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_is_current_ksu_domain(void);
+extern bool susfs_is_sdcard_android_data_decrypted;
+static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);
+#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */
+#endif
+EOF
+    sed -i '/#include "internal.h"/r susfs_externs.txt' fs/namespace.c
+    rm susfs_externs.txt
 fi
 
-# --- 3. Fix fs/proc/task_mmu.c (Resolve 'unused vma' and Missing Logic) ---
+# ==========================================
+# 3. Fix fs/namespace.c (Core clone_mnt Logic)
+# THIS WAS MISSING PREVIOUSLY!
+# ==========================================
+if ! grep -q "susfs_is_sdcard_android_data_decrypted" fs/namespace.c; then
+    echo "Patching fs/namespace.c (clone_mnt logic)..."
+    cat <<EOF > susfs_clone_mnt.txt
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+${T}// We won't check it anymore if boot-completed stage is triggered.
+${T}if (susfs_is_sdcard_android_data_decrypted) {
+${T}${T}goto skip_checking_for_ksu_proc;
+${T}}
+${T}// First we must check for ksu process because of magic mount
+${T}if (susfs_is_current_ksu_domain()) {
+${T}${T}// if it is unsharing, we reuse the old->mnt_id
+${T}${T}if (flag & CL_COPY_MNT_NS) {
+${T}${T}${T}mnt = susfs_reuse_sus_vfsmnt(old->mnt_devname, old->mnt_id);
+${T}${T}${T}goto bypass_orig_flow;
+${T}${T}}
+${T}${T}// else we just go assign fake mnt_id
+${T}${T}mnt = susfs_alloc_sus_vfsmnt(old->mnt_devname);
+${T}${T}goto bypass_orig_flow;
+${T}}
+skip_checking_for_ksu_proc:
+${T}// Lastly for other processes of which old->mnt_id == DEFAULT_KSU_MNT_ID, go assign fake mnt_id
+${T}if (old->mnt_id == DEFAULT_KSU_MNT_ID) {
+${T}${T}mnt = susfs_alloc_sus_vfsmnt(old->mnt_devname);
+${T}${T}goto bypass_orig_flow;
+${T}}
+#endif
+${T}mnt = alloc_vfsmnt(old->mnt_devname);
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+bypass_orig_flow:
+#endif
+EOF
+    # Replace the standard alloc_vfsmnt call inside clone_mnt with our new block
+    sed -i '/mnt = alloc_vfsmnt(old->mnt_devname);/ {
+        r susfs_clone_mnt.txt
+        d
+    }' fs/namespace.c
+    rm susfs_clone_mnt.txt
+fi
+
+# ==========================================
+# 4. Fix fs/proc/task_mmu.c (Unused variable & pagemap logic)
+# ==========================================
 if ! grep -q "CONFIG_KSU_SUSFS_SUS_MAP" fs/proc/task_mmu.c; then
     echo "Patching fs/proc/task_mmu.c..."
-    # Wrap the declaration that was already added by the patch to prevent unused warning
+    # Wrap the declaration to prevent 'unused-variable' compiler error
     sed -i 's/struct vm_area_struct \*vma;/#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma;\n#endif/' fs/proc/task_mmu.c
 
-    # Use a heredoc to inject the missing SUSFS usage logic
-    cat <<EOF > susfs_task_mmu.txt
+    cat <<EOF > susfs_task_mmu_logic.txt
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 ${T}${T}vma = find_vma(mm, start_vaddr);
 ${T}${T}if (vma && vma->vm_file) {
@@ -36,25 +94,24 @@ ${T}${T}${T}}
 ${T}${T}}
 #endif
 EOF
-    sed -i '/up_read(&mm->mmap_sem);/r susfs_task_mmu.txt' fs/proc/task_mmu.c
-    rm susfs_task_mmu.txt
+    sed -i '/up_read(&mm->mmap_sem);/r susfs_task_mmu_logic.txt' fs/proc/task_mmu.c
+    rm susfs_task_mmu_logic.txt
 fi
 
-# --- 4. Fix drivers/kernelsu/supercalls.c (KSU-Next Compatibility Bridge) ---
+# ==========================================
+# 5. Fix drivers/kernelsu/supercalls.c (KSU-Next Bridge)
+# ==========================================
 if [ -f "drivers/kernelsu/supercalls.c" ]; then
     echo "Patching drivers/kernelsu/supercalls.c..."
     
-    # Define the missing command ID required by KernelSU-Next
+    # Define the missing command ID used by KernelSU-Next
     if ! grep -q "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS" drivers/kernelsu/supercalls.c; then
         sed -i '/#include "ksu.h"/a #define CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS 0x511' drivers/kernelsu/supercalls.c
     fi
 
-    # Bridge renamed functions from SUSFS patch to KSU-Next expectations
-    # Fix: for_all_procs -> for_non_su_procs
+    # Remap function names from KernelSU-Next expectations to SUSFS header availability
     sed -i 's/susfs_set_hide_sus_mnts_for_all_procs/susfs_set_hide_sus_mnts_for_non_su_procs/g' drivers/kernelsu/supercalls.c
-    
-    # Fix: susfs_add_try_umount -> add_try_umount (KSU-Next local implementation)
     sed -i 's/susfs_add_try_umount/add_try_umount/g' drivers/kernelsu/supercalls.c
 fi
 
-echo "All SUSFS rejects and compatibility issues have been fixed."
+echo "✅ All SUSFS rejects, compiler errors, and missing logic blocks have been fixed."
