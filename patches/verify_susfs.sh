@@ -116,7 +116,9 @@ check_file_absent "include/linux/mount.h" "ANDROID_KABI_RESERVE(4)" "ANDROID_KAB
 
 # ── 5. fs/proc/task_mmu.c ────────────────────────────────────────────────────
 _head "5. fs/proc/task_mmu.c"
-check_file "fs/proc/task_mmu.c" "BIT_SUS_MAPS" "BIT_SUS_MAPS guard in pagemap_read()"
+check_file "fs/proc/task_mmu.c" \
+    "find_vma(mm, start_vaddr)" \
+    "BIT_SUS_MAPS block in pagemap_read()  ← find_vma call confirms injection, not just smaps"
 
 # ── 6. fs/proc/base.c ────────────────────────────────────────────────────────
 _head "6. fs/proc/base.c"
