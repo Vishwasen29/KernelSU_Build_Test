@@ -259,6 +259,77 @@ jobs:
           exit 1
         fi
 
+    - name: Post-Build SUSFS Verification
+      if: env.CHECK_IMAGE == 'true'
+      run: |
+          cd kernel_workspace/android-kernel
+          FAIL=0
+
+          echo "=== 1. susfs.o compiled? ==="
+          if find out -name "susfs.o" | grep -q .; then
+            echo "  ✅ susfs.o found:"
+            find out -name "susfs.o"
+          else
+            echo "  ❌ susfs.o NOT found — SUSFS compiled out entirely"
+            FAIL=$((FAIL + 1))
+          fi
+
+          echo ""
+          echo "=== 2. SUSFS symbols in System.map ==="
+          if [ -f out/System.map ]; then
+            SUSFS_SYMS=$(grep -ic "susfs" out/System.map)
+            if [ "$SUSFS_SYMS" -gt 0 ]; then
+              echo "  ✅ $SUSFS_SYMS SUSFS symbols linked into kernel:"
+              grep -i "susfs" out/System.map | head -20
+            else
+              echo "  ❌ No SUSFS symbols in System.map — code was compiled out"
+              FAIL=$((FAIL + 1))
+            fi
+          else
+            echo "  ⚠️  System.map not found — skipping symbol check"
+          fi
+
+          echo ""
+          echo "=== 3. Key SUSFS function symbols present? ==="
+          if [ -f out/System.map ]; then
+            check_sym() {
+              if grep -q " $1$" out/System.map; then
+                echo "  ✅ $1"
+              else
+                echo "  ❌ MISSING: $1"
+                FAIL=$((FAIL + 1))
+              fi
+            }
+            check_sym "susfs_add_sus_path"
+            check_sym "susfs_set_uname"
+            check_sym "susfs_add_sus_kstat"
+          fi
+
+          echo ""
+          echo "=== 4. CONFIG_KSU_SUSFS_* defines in autoconf.h ==="
+          # autoconf.h is what the compiler actually sees — ground truth
+          if [ -f out/include/generated/autoconf.h ]; then
+            SUSFS_DEFS=$(grep -c "define CONFIG_KSU_SUSFS" out/include/generated/autoconf.h)
+            if [ "$SUSFS_DEFS" -gt 0 ]; then
+              echo "  ✅ $SUSFS_DEFS CONFIG_KSU_SUSFS_* defines in autoconf.h:"
+              grep "define CONFIG_KSU_SUSFS" out/include/generated/autoconf.h
+            else
+              echo "  ❌ No CONFIG_KSU_SUSFS defines in autoconf.h"
+              echo "     SUSFS not compiled despite being in .config"
+              FAIL=$((FAIL + 1))
+            fi
+          else
+            echo "  ⚠️  autoconf.h not found"
+          fi
+
+          echo ""
+          echo "======================================="
+          if [ "$FAIL" -gt 0 ]; then
+            echo "❌ Post-build: $FAIL check(s) failed — SUSFS not properly integrated"
+            exit 1
+          fi
+          echo "✅ Post-build verification passed — SUSFS fully integrated"
+
     - name: Prepare AnyKernel3 and package
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
