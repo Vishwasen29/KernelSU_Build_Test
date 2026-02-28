@@ -151,7 +151,15 @@ fi
 # ── [4/7] fs/proc/task_mmu.c – pagemap_read() BIT_SUS_MAPS guard ─────────────
 echo "[4/7] fs/proc/task_mmu.c – pagemap_read() SUS_MAP guard (hunk #8)..."
 
-if grep -q "BIT_SUS_MAPS" fs/proc/task_mmu.c; then
+# FIX: The old check was `grep -q "BIT_SUS_MAPS"` which is a FALSE POSITIVE.
+# BIT_SUS_MAPS appears in the smaps/show_map functions (from hunks that DID apply),
+# but the pagemap_read block (hunk #8) may still be missing.
+# The pagemap_read block is the only place that calls find_vma(mm, start_vaddr),
+# so that is the correct idempotency guard.
+#
+# Without this block the `struct vm_area_struct *vma;` declared by a prior hunk
+# in pagemap_read is never used → [-Werror,-Wunused-variable] at compile time.
+if grep -q "find_vma(mm, start_vaddr)" fs/proc/task_mmu.c; then
     echo "      Already patched – skipping."
 else
     python3 - << 'PYEOF'
@@ -161,21 +169,36 @@ path = "fs/proc/task_mmu.c"
 with open(path) as f:
     src = f.read()
 
-old_block = "\t\tif (vma->vm_file) {\n"
-new_block = (
-    "#ifdef CONFIG_KSU_SUSFS_SUS_MAPS\n"
-    "\t\tif (susfs_sus_maps_allow_pagemap_read(vma))\n"
-    "\t\t\tcontinue;\n"
+# The injection point is inside pagemap_read()'s inner loop, after:
+#   up_read(&mm->mmap_sem);
+# and before:
+#   start_vaddr = end;
+#
+# We target the specific two-line sequence that is unique to this loop body.
+old_seq = "\t\tup_read(&mm->mmap_sem);\n\t\tstart_vaddr = end;\n"
+new_seq = (
+    "\t\tup_read(&mm->mmap_sem);\n"
+    "#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n"
+    "\t\tvma = find_vma(mm, start_vaddr);\n"
+    "\t\tif (vma && vma->vm_file) {\n"
+    "\t\t\tstruct inode *inode = file_inode(vma->vm_file);\n"
+    "\t\t\tif (unlikely(inode->i_state & BIT_SUS_MAPS) &&\n"
+    "\t\t\t\t\tsusfs_is_current_proc_umounted()) {\n"
+    "\t\t\t\tpm.show_pfn = false;\n"
+    "\t\t\t\tpm.buffer->pme = 0;\n"
+    "\t\t\t}\n"
+    "\t\t}\n"
     "#endif\n"
-    + old_block
+    "\t\tstart_vaddr = end;\n"
 )
 
-if old_block in src:
-    src = src.replace(old_block, new_block, 1)
+if old_seq in src:
+    src = src.replace(old_seq, new_seq, 1)
     with open(path, "w") as f:
         f.write(src)
+    print("      pagemap_read() BIT_SUS_MAPS block injected.")
 else:
-    print("WARNING: pagemap_read anchor not found – skipping task_mmu.c hunk #8",
+    print("WARNING: pagemap_read up_read/start_vaddr anchor not found – skipping",
           file=sys.stderr)
 PYEOF
     echo "      Done."
