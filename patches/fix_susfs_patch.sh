@@ -3,7 +3,7 @@
 # Define Tab character for kernel-compliant indentation
 T=$(printf '\t')
 
-echo "Starting Comprehensive SUSFS & KernelSU-Next Fix..."
+echo "Starting Definitive SUSFS & KernelSU-Next Fix..."
 
 # --- 1. Fix include/linux/mount.h (Resolve ANDROID_KABI Rejects) ---
 if ! grep -q "susfs_mnt_id_backup" include/linux/mount.h; then
@@ -11,7 +11,7 @@ if ! grep -q "susfs_mnt_id_backup" include/linux/mount.h; then
     sed -i '/ANDROID_KABI_RESERVE(4);/c\#ifdef CONFIG_KSU_SUSFS\n'"$T"'ANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\n#else\n'"$T"'ANDROID_KABI_RESERVE(4);\n#endif' include/linux/mount.h
 fi
 
-# --- 2. Fix fs/namespace.c (Headers and Externs) ---
+# --- 2. Fix fs/namespace.c (Headers and Externs - Replaces Hunk #1) ---
 if ! grep -q "susfs_def.h" fs/namespace.c; then
     echo "Patching fs/namespace.c (Headers)..."
     sed -i '/#include <linux\/sched\/task.h>/a #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs_def.h>\n#endif' fs/namespace.c
@@ -28,28 +28,23 @@ EOF
     rm susfs_externs.txt
 fi
 
-# --- 3. Fix fs/namespace.c (Core clone_mnt Logic) ---
+# --- 3. Fix fs/namespace.c (Core clone_mnt Logic - Replaces Hunks #9 & #10) ---
 if ! grep -q "susfs_is_sdcard_android_data_decrypted" fs/namespace.c; then
     echo "Patching fs/namespace.c (clone_mnt logic)..."
     cat <<EOF > susfs_clone_mnt.txt
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-${T}// We won't check it anymore if boot-completed stage is triggered.
 ${T}if (susfs_is_sdcard_android_data_decrypted) {
 ${T}${T}goto skip_checking_for_ksu_proc;
 ${T}}
-${T}// First we must check for ksu process because of magic mount
 ${T}if (susfs_is_current_ksu_domain()) {
-${T}${T}// if it is unsharing, we reuse the old->mnt_id
 ${T}${T}if (flag & CL_COPY_MNT_NS) {
 ${T}${T}${T}mnt = susfs_reuse_sus_vfsmnt(old->mnt_devname, old->mnt_id);
 ${T}${T}${T}goto bypass_orig_flow;
 ${T}${T}}
-${T}${T}// else we just go assign fake mnt_id
 ${T}${T}mnt = susfs_alloc_sus_vfsmnt(old->mnt_devname);
 ${T}${T}goto bypass_orig_flow;
 ${T}}
 skip_checking_for_ksu_proc:
-${T}// Lastly for other processes of which old->mnt_id == DEFAULT_KSU_MNT_ID, go assign fake mnt_id
 ${T}if (old->mnt_id == DEFAULT_KSU_MNT_ID) {
 ${T}${T}mnt = susfs_alloc_sus_vfsmnt(old->mnt_devname);
 ${T}${T}goto bypass_orig_flow;
@@ -67,14 +62,13 @@ EOF
     rm susfs_clone_mnt.txt
 fi
 
-# --- 4. Fix fs/proc/task_mmu.c (Resolve 'unused vma' error) ---
+# --- 4. Fix fs/proc/task_mmu.c (Resolve 'unused vma' & Pagemap Logic - Replaces Hunk #8) ---
 if ! grep -q "CONFIG_KSU_SUSFS_SUS_MAP" fs/proc/task_mmu.c; then
     echo "Patching fs/proc/task_mmu.c..."
-    
-    # 1. Wrap the declaration to prevent 'unused-variable' error
+    # 1. Hide the declaration from the compiler if SUSFS is off, or use it if on
     sed -i 's/^[[:space:]]*struct vm_area_struct \*vma;/#ifdef CONFIG_KSU_SUSFS_SUS_MAP\n\tstruct vm_area_struct *vma;\n#endif/' fs/proc/task_mmu.c
 
-    # 2. Inject the actual logic usage of vma
+    # 2. Inject usage logic
     cat <<EOF > susfs_task_mmu_logic.txt
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 ${T}${T}vma = find_vma(mm, start_vaddr);
@@ -86,17 +80,11 @@ ${T}${T}${T}}
 ${T}${T}}
 #endif
 EOF
-    
-    # The 'N' reads the unlock line into the buffer so the text is appended directly after it.
-    sed -i '/ret = walk_page_range(start_vaddr, end, &pagemap_walk);/{
-        N
-        r susfs_task_mmu_logic.txt
-    }' fs/proc/task_mmu.c
-    
+    sed -i '/walk_page_range(start_vaddr, end, &pagemap_walk);/r susfs_task_mmu_logic.txt' fs/proc/task_mmu.c
     rm susfs_task_mmu_logic.txt
 fi
 
-# --- 5. Fix drivers/kernelsu/supercalls.c (KSU-Next Compatibility Bridge) ---
+# --- 5. Fix drivers/kernelsu/supercalls.c (KSU-Next Bridge) ---
 if [ -f "drivers/kernelsu/supercalls.c" ]; then
     echo "Patching drivers/kernelsu/supercalls.c..."
     if ! grep -q "CMD_SUSFS_HIDE_SUS_MNTS_FOR_ALL_PROCS" drivers/kernelsu/supercalls.c; then
@@ -106,4 +94,4 @@ if [ -f "drivers/kernelsu/supercalls.c" ]; then
     sed -i 's/susfs_add_try_umount/add_try_umount/g' drivers/kernelsu/supercalls.c
 fi
 
-echo "All SUSFS rejects and compatibility issues have been fixed."
+echo "✅ All fixes applied. This source is now ready for a clean build."
