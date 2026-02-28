@@ -107,3 +107,4 @@ if __name__ == '__main__':
     print('[task_mmu fix] Injecting BIT_SUS_MAPS block into fs/proc/task_mmu.c ...')
     ok = fix_task_mmu(kernel_root)
     sys.exit(0 if ok else 1)
+    
