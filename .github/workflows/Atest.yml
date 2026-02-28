@@ -131,6 +131,8 @@ jobs:
        < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch \
        2>&1 | tee patch_main_log.txt || true
 
+       bash $GITHUB_WORKSPACE/patches/fix_susfs_patch.sh
+
     - name: Collect patch debug files
       run: |
        mkdir -p patch_artifacts
