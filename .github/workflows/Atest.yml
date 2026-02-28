@@ -183,6 +183,39 @@ jobs:
         make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
         make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
 
+    - name: Verify SUSFS Integration in Workflow
+      run: |
+        cd kernel_workspace/android-kernel/out
+        
+        echo "Check 1: Verification of .config"
+        if grep -q "CONFIG_KSU_SUSFS=y" .config; then
+            echo "✅ CONFIG_KSU_SUSFS is active in build config."
+        else
+            echo "❌ ERROR: CONFIG_KSU_SUSFS is not set! Check your defconfig/fragments."
+            exit 1
+        fi
+
+        echo "Check 2: Symbol Table Check (System.map)"
+        # This confirms the C files were actually compiled and linked
+        SUSFS_SYMBOLS=$(grep "susfs_" System.map | wc -l)
+        if [ "$SUSFS_SYMBOLS" -gt 0 ]; then
+            echo "✅ Found $SUSFS_SYMBOLS SUSFS symbols in System.map."
+        else
+            echo "❌ ERROR: No SUSFS symbols found. The code was skipped during compilation."
+            exit 1
+        fi
+
+        echo "Check 3: Binary String Search (Image)"
+        # Ultimate check: look for the susfs identifier inside the raw kernel image
+        if strings arch/arm64/boot/Image | grep -qi "susfs"; then
+            echo "✅ SUSFS binary strings verified in Image."
+        else
+            echo "❌ ERROR: SUSFS signature missing from final Image."
+            exit 1
+        fi
+        
+        
+
     - name: Verify kernel output
       run: |
         cd kernel_workspace/android-kernel/out
