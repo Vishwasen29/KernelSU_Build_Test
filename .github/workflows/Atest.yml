@@ -34,10 +34,10 @@ jobs:
 
     - name: Download Clang
       run: |
-        cd kernel_workspace
-        mkdir clang
-        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz -O clang.tar.gz
-        tar -xf clang.tar.gz -C clang
+       cd kernel_workspace
+       mkdir clang
+       wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${CLANG_VERSION}.tar.gz -O clang.tar.gz
+       tar -xf clang.tar.gz -C clang
 
     - name: Clone Kernel Source
       run: |
