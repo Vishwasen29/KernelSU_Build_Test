@@ -67,7 +67,7 @@ jobs:
         # FIX: branch argument changed from 'legacy' (deleted) to 'next'
         curl -LSs \
           https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-          | bash -s next
+          | bash -s legacy
 
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
