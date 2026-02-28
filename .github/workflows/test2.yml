@@ -153,6 +153,17 @@ jobs:
           chmod +x $GITHUB_WORKSPACE/patches/susfs_fix.sh
           bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
           echo "Supplementary fix applied"
+          python3 $GITHUB_WORKSPACE/patches/fix_task_mmu_pagemap.py .
+
+      - name: Apply SUSFS reject fixes
+        run: |
+         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+         if [ "$HAS_REJECTS" = "true" ]; then
+         python3 $GITHUB_WORKSPACE/patches/susfs_reject_fix.py .
+         # Fix: add susfs_def.h include + correct BIT_OPEN_REDIRECT field in namei.c
+         python3 $GITHUB_WORKSPACE/patches/fix_namei.py .
+         fi
+#       echo "Reject fixes applied"
 
       - name: Fix SUSFS API compatibility
         run: bash $GITHUB_WORKSPACE/patches/susfs_api_compat.sh kernel_workspace/android-kernel
