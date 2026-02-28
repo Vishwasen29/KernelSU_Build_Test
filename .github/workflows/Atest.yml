@@ -258,8 +258,8 @@ jobs:
         fi
 
     - name: Post-Build SUSFS Verification
-        if: env.CHECK_IMAGE == 'true'
-        run: |
+      if: env.CHECK_IMAGE == 'true'
+      run: |
           cd kernel_workspace/android-kernel
           FAIL=0
 
