@@ -124,6 +124,9 @@ jobs:
           2>&1 | tee patch_inline.log || true
         echo "inline.patch applied"
 
+        bash $GITHUB_WORKSPACE/patches/susfs_fix.sh .
+        python3 $GITHUB_WORKSPACE/patches/fix_task_mmu_pagemap.py .
+
     - name: Collect patch rejects and originals
       # FIX: was if: failure() â€” but all patch commands use || true so the
       # patch step never exits non-zero; changed to always() so this runs
