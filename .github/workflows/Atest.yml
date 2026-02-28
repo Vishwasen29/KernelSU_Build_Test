@@ -105,6 +105,53 @@ jobs:
           cp -r kernel/include/linux backup_originals/include_linux 2>/dev/null || true
 
  
+    - name: Verify SUSFS Kconfig symbols exist in KernelSU
+      run: |
+          cd kernel_workspace/android-kernel
+
+          KCONFIG="KernelSU-Next/kernel/Kconfig"
+
+          if [ ! -f "$KCONFIG" ]; then
+            echo "❌ $KCONFIG not found — KernelSU setup failed"
+            exit 1
+          fi
+
+          echo "=== KSU_SUSFS config entries in $KCONFIG ==="
+          grep "config KSU_SUSFS" "$KCONFIG" || echo "  (none found)"
+          echo "============================================="
+
+          REQUIRED_SYMBOLS=(
+            "config KSU_SUSFS"
+            "config KSU_SUSFS_SUS_PATH"
+            "config KSU_SUSFS_SUS_MOUNT"
+            "config KSU_SUSFS_SUS_KSTAT"
+            "config KSU_SUSFS_TRY_UMOUNT"
+            "config KSU_SUSFS_SPOOF_UNAME"
+            "config KSU_SUSFS_OPEN_REDIRECT"
+            "config KSU_SUSFS_ENABLE_LOG"
+            "config KSU_SUSFS_SUS_SU"
+          )
+
+          MISSING=0
+          for sym in "${REQUIRED_SYMBOLS[@]}"; do
+            if grep -q "$sym" "$KCONFIG"; then
+              echo "  ✅ $sym"
+            else
+              echo "  ❌ MISSING: $sym"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+
+          if [ "$MISSING" -gt 0 ]; then
+            echo ""
+            echo "❌ $MISSING Kconfig symbol(s) missing."
+            echo "   The branch 'susfs-rksu-master' may not have SUSFS Kconfig."
+            echo "   Apply 10_enable_susfs_for_ksu.patch to KernelSU/ and retry."
+            exit 1
+          fi
+
+          echo "✅ All SUSFS Kconfig symbols present"
+          
     - name: Apply susfs patch
       run: |
        cd kernel_workspace/android-kernel
@@ -112,6 +159,8 @@ jobs:
        patch -p1 --forward \
        < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch \
        2>&1 | tee patch_main_log.txt || true
+
+       bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
 
     - name: Collect patch debug files
       run: |
@@ -146,6 +195,37 @@ jobs:
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEF
           echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $DEF
           echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> $DEF
+
+    - name: Verify SUSFS patch coverage
+      run: |
+        cd kernel_workspace/android-kernel
+        echo "=== Checking critical SUSFS symbols are present ==="
+
+        MISSING=0
+
+        check() {
+          if grep -rq "$1" $2; then
+            echo "  [OK] $1 found in $2"
+          else
+            echo "  [MISSING] $1 NOT found in $2"
+            MISSING=$((MISSING+1))
+          fi
+        }
+
+        check "CONFIG_KSU_SUSFS_SUS_MOUNT"   fs/namespace.c
+        check "susfs_alloc_sus_vfsmnt"        fs/namespace.c
+        check "bypass_orig_flow"              fs/namespace.c
+        check "susfs_def.h"                   fs/namespace.c
+        check "CL_COPY_MNT_NS"               fs/namespace.c
+        check "BIT_SUS_MAPS"                  fs/proc/task_mmu.c
+        check "susfs_mnt_id_backup"           include/linux/mount.h
+
+        if [ "$MISSING" -gt 0 ]; then
+          echo "ERROR: $MISSING required SUSFS symbol(s) missing after patching!"
+          exit 1
+        fi
+        echo "All SUSFS symbols verified."
+        
           
     - name: Build kernel
       run: |
@@ -176,6 +256,78 @@ jobs:
           echo "Kernel output file is empty"
           exit 1
         fi
+
+    - name: Post-Build SUSFS Verification
+        if: env.CHECK_IMAGE == 'true'
+        run: |
+          cd kernel_workspace/android-kernel
+          FAIL=0
+
+          echo "=== 1. susfs.o compiled? ==="
+          if find out -name "susfs.o" | grep -q .; then
+            echo "  ✅ susfs.o found:"
+            find out -name "susfs.o"
+          else
+            echo "  ❌ susfs.o NOT found — SUSFS compiled out entirely"
+            FAIL=$((FAIL + 1))
+          fi
+
+          echo ""
+          echo "=== 2. SUSFS symbols in System.map ==="
+          if [ -f out/System.map ]; then
+            SUSFS_SYMS=$(grep -ic "susfs" out/System.map)
+            if [ "$SUSFS_SYMS" -gt 0 ]; then
+              echo "  ✅ $SUSFS_SYMS SUSFS symbols linked into kernel:"
+              grep -i "susfs" out/System.map | head -20
+            else
+              echo "  ❌ No SUSFS symbols in System.map — code was compiled out"
+              FAIL=$((FAIL + 1))
+            fi
+          else
+            echo "  ⚠️  System.map not found — skipping symbol check"
+          fi
+
+          echo ""
+          echo "=== 3. Key SUSFS function symbols present? ==="
+          if [ -f out/System.map ]; then
+            check_sym() {
+              if grep -q " $1$" out/System.map; then
+                echo "  ✅ $1"
+              else
+                echo "  ❌ MISSING: $1"
+                FAIL=$((FAIL + 1))
+              fi
+            }
+            check_sym "susfs_add_sus_path"
+            check_sym "susfs_set_uname"
+            check_sym "susfs_add_sus_kstat"
+          fi
+
+          echo ""
+          echo "=== 4. CONFIG_KSU_SUSFS_* defines in autoconf.h ==="
+          # autoconf.h is what the compiler actually sees — ground truth
+          if [ -f out/include/generated/autoconf.h ]; then
+            SUSFS_DEFS=$(grep -c "define CONFIG_KSU_SUSFS" out/include/generated/autoconf.h)
+            if [ "$SUSFS_DEFS" -gt 0 ]; then
+              echo "  ✅ $SUSFS_DEFS CONFIG_KSU_SUSFS_* defines in autoconf.h:"
+              grep "define CONFIG_KSU_SUSFS" out/include/generated/autoconf.h
+            else
+              echo "  ❌ No CONFIG_KSU_SUSFS defines in autoconf.h"
+              echo "     SUSFS not compiled despite being in .config"
+              FAIL=$((FAIL + 1))
+            fi
+          else
+            echo "  ⚠️  autoconf.h not found"
+          fi
+
+          echo ""
+          echo "======================================="
+          if [ "$FAIL" -gt 0 ]; then
+            echo "❌ Post-build: $FAIL check(s) failed — SUSFS not properly integrated"
+            exit 1
+          fi
+          echo "✅ Post-build verification passed — SUSFS fully integrated"
+          
 
     - name: Prepare AnyKernel3 and package
       run: |
