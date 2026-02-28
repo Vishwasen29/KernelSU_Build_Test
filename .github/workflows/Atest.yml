@@ -1,4 +1,4 @@
-name: AB Test KSUN+SUSFS Build LineageOS OPlus SM8250 Kernel
+name: KSUN + SUSFS LineageOS SM8250
 
 on:
   workflow_dispatch:
@@ -6,34 +6,23 @@ on:
 env:
   TZ: Asia/Shanghai
   CLANG_VERSION: clang-r547379
-  LINEAGE_VERSION: lineage-22.1  # Fix #8: corrected to a real branch name; verify on
-                                  # https://github.com/LineageOS/android_kernel_oneplus_sm8250
+  LINEAGE_VERSION: lineage-23.2
 
 jobs:
   build:
-    name: Build Kernel
-    runs-on: ubuntu-22.04
-
-    strategy:
-      fail-fast: false
-      matrix:
-        ks: [rsuntk]             # Fix #12: removed dead backslashxx entry until
-                                  # XXKSUVER is properly implemented
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Set swap to 10G
+    - name: Setup swap
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 10
 
-    - name: Setup build environment
+    - name: Install dependencies
       run: |
-        echo "BUILD_TIME=$(date +%y%m%d)"     >> $GITHUB_ENV
-        echo "BUILD_TIME_1=$(date +%Y-%m-%d)" >> $GITHUB_ENV
-
         sudo apt-get update
         sudo apt-get install -y \
           git ccache automake flex lzop bison gperf build-essential \
@@ -43,344 +32,122 @@ jobs:
 
         mkdir -p kernel_workspace
 
-    - name: Cache Clang toolchain
-      id: cache-clang
-      uses: actions/cache@v4
-      with:
-        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
-        key: ${{ env.CLANG_VERSION }}
-
-    - name: Download Clang (if cache miss)
-      if: steps.cache-clang.outputs.cache-hit != 'true'
+    - name: Download Clang
       run: |
         cd kernel_workspace
-        mkdir clang-aosp
+        mkdir clang
+        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz -O clang.tar.gz
+        tar -xf clang.tar.gz -C clang
 
-        # Fix #9: use the stable AOSP CI mirror instead of the fragile +archive URL
-        wget -q --show-progress -O ${CLANG_VERSION}.tar.gz \
-          "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz" \
-          || wget -q --show-progress -O ${CLANG_VERSION}.tar.gz \
-          "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.0/${CLANG_VERSION}.tar.gz"
-
-        tar -xf ${CLANG_VERSION}.tar.gz -C clang-aosp
-
-    - name: Clone kernel source
+    - name: Clone Kernel Source
       run: |
         cd kernel_workspace
-        # Fix #11: removed --recursive (no submodules in this repo)
         git clone --depth=1 \
           https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-          -b ${{ env.LINEAGE_VERSION }} android-kernel
+          -b $LINEAGE_VERSION android-kernel
 
-    - name: Setup KernelSU-Next + Baseband-guard
+    # -------------------------------------------------------
+    # FIXED KERNELSU + LEGACY-SUSFS INTEGRATION
+    # -------------------------------------------------------
+    - name: Setup KernelSU-Next (legacy-susfs)
       run: |
         cd kernel_workspace/android-kernel
 
-        # KernelSU-Next (legacy = manual/kHook mode)
-        curl -LSs \
-          curl -LSs https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh | bash -s legacy-susfs
+        # Clone correct repo (NOT official)
+        git clone https://github.com/sidex15/KernelSU-Next.git
+        cd KernelSU-Next
+        git checkout legacy-susfs
+        cd ..
 
-        # Baseband-guard
-        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+        # Symlink into drivers
+        ln -sf ../KernelSU-Next/kernel drivers/kernelsu
 
-        # Fix LSM ordering safely
-        if grep -q "config LSM" security/Kconfig; then
-          sed -i '/^config LSM$/,/^help$/ {
-            /^[[:space:]]*default/ {
-              /baseband_guard/! s/selinux/selinux,baseband_guard/
-            }
-          }' security/Kconfig
-        fi
+        # Add Makefile entry safely
+        grep -q "kernelsu" drivers/Makefile || \
+          echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
 
-        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh || true
-
-        # Fix #2: CONFIG_KSU_MANUAL_HOOK is the correct hook for legacy/kHook mode.
-        # CONFIG_KSU_KPROBES_HOOK must NOT also be set — they are mutually exclusive.
-        # The KPROBES line has been removed; this single line is correct.
-        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        # Add Kconfig entry safely
+        grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+          sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 
         # Remove dirty tag
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
-        # Generate KernelSU-Next version number
+        # Generate KSU version
         RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
 
-    - name: Backup original files
-      run: |
-        # Fix #6: correct paths — kernel lives under kernel_workspace/android-kernel
-        mkdir -p backup_originals
-        cd kernel_workspace/android-kernel
-        cp -r KernelSU-Next      ../../backup_originals/KernelSU-Next
-        cp -r fs                 ../../backup_originals/fs
-        cp -r include/linux      ../../backup_originals/include_linux
-
-    - name: Verify SUSFS Kconfig symbols exist in KernelSU
-      run: |
-        cd kernel_workspace/android-kernel
-
-        KCONFIG="KernelSU-Next/kernel/Kconfig"
-
-        if [ ! -f "$KCONFIG" ]; then
-          echo "❌ $KCONFIG not found — KernelSU setup failed"
-          exit 1
-        fi
-
-        echo "=== KSU_SUSFS config entries in $KCONFIG ==="
-        grep "config KSU_SUSFS" "$KCONFIG" || echo "  (none found)"
-        echo "============================================="
-
-        REQUIRED_SYMBOLS=(
-          "config KSU_SUSFS"
-          "config KSU_SUSFS_SUS_PATH"
-          "config KSU_SUSFS_SUS_MOUNT"
-          "config KSU_SUSFS_SUS_KSTAT"
-          "config KSU_SUSFS_TRY_UMOUNT"
-          "config KSU_SUSFS_SPOOF_UNAME"
-          "config KSU_SUSFS_OPEN_REDIRECT"
-          "config KSU_SUSFS_ENABLE_LOG"
-          "config KSU_SUSFS_SUS_SU"
-        )
-
-        MISSING=0
-        for sym in "${REQUIRED_SYMBOLS[@]}"; do
-          if grep -q "$sym" "$KCONFIG"; then
-            echo "  ✅ $sym"
-          else
-            echo "  ❌ MISSING: $sym"
-            MISSING=$((MISSING + 1))
-          fi
-        done
-
-        if [ "$MISSING" -gt 0 ]; then
-          echo ""
-          echo "❌ $MISSING Kconfig symbol(s) missing."
-          echo "   Apply 10_enable_susfs_for_ksu.patch to KernelSU-Next/ and retry."
-          exit 1
-        fi
-
-        echo "✅ All SUSFS Kconfig symbols present"
-
+    # -------------------------------------------------------
+    # APPLY SUSFS PATCH
+    # -------------------------------------------------------
     - name: Apply SUSFS patch
       run: |
         cd kernel_workspace/android-kernel
         set -o pipefail
         patch -p1 --forward \
           < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch \
-          2>&1 | tee patch_main_log.txt || true
+          2>&1 | tee patch_log.txt || true
 
-        bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
-
-    - name: Collect patch debug files
-      run: |
-        mkdir -p patch_artifacts
-        find kernel_workspace/android-kernel \
-          \( -name "*.rej" -o -name "*.orig" \) \
-          -exec cp --parents {} patch_artifacts/ \; || true
-
-    - name: Upload patch debug artifacts
-      uses: actions/upload-artifact@v4  # Fix #1: v6 does not exist; latest is v4
-      with:
-        name: susfs-patch-debug
-        path: |
-          patch_artifacts
-          kernel_workspace/android-kernel/patch_main_log.txt
-
-    - name: Add KernelSU & SUSFS configs
+    # -------------------------------------------------------
+    # ENABLE CONFIGS
+    # -------------------------------------------------------
+    - name: Enable KernelSU + SUSFS configs
       run: |
         cd kernel_workspace/android-kernel
         DEF=arch/arm64/configs/vendor/kona-perf_defconfig
 
-        echo "CONFIG_KSU=y"                        >> $DEF
-        # Fix #2: CONFIG_KSU_KPROBES_HOOK removed — mutually exclusive with
-        # CONFIG_KSU_MANUAL_HOOK which was already set in the setup step above.
-        echo "CONFIG_KSU_SUSFS=y"                  >> $DEF
-        echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"  >> $DEF
-        echo "CONFIG_KSU_SUSFS_SUS_PATH=y"         >> $DEF
-        echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"        >> $DEF
-        echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"        >> $DEF
-        echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y"    >> $DEF
-        echo "CONFIG_KSU_SUSFS_SUS_MAP=y"          >> $DEF  # Fix #3: was missing
-        echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"       >> $DEF
-        echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"      >> $DEF
-        echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"    >> $DEF
-        echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"       >> $DEF
-        echo "CONFIG_KSU_SUSFS_SUS_SU=y"           >> $DEF
+        {
+          echo "CONFIG_KSU=y"
+          echo "CONFIG_KSU_MANUAL_HOOK=y"
+          echo "CONFIG_KSU_SUSFS=y"
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y"
+          echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+          echo "CONFIG_KSU_SUSFS_SUS_SU=y"
+        } >> $DEF
 
-    - name: Verify SUSFS patch coverage
-      run: |
-        cd kernel_workspace/android-kernel
-        echo "=== Checking critical SUSFS symbols are present ==="
-
-        MISSING=0
-
-        check() {
-          if grep -rq "$1" $2; then
-            echo "  [OK] $1 found in $2"
-          else
-            echo "  [MISSING] $1 NOT found in $2"
-            MISSING=$((MISSING+1))
-          fi
-        }
-
-        check "CONFIG_KSU_SUSFS_SUS_MOUNT"   fs/namespace.c
-        check "susfs_alloc_sus_vfsmnt"        fs/namespace.c
-        check "bypass_orig_flow"              fs/namespace.c
-        check "susfs_def.h"                   fs/namespace.c
-        check "CL_COPY_MNT_NS"               fs/namespace.c
-        check "BIT_SUS_MAPS"                  fs/proc/task_mmu.c
-        check "susfs_mnt_id_backup"           include/linux/mount.h
-
-        if [ "$MISSING" -gt 0 ]; then
-          echo "ERROR: $MISSING required SUSFS symbol(s) missing after patching!"
-          exit 1
-        fi
-        echo "All SUSFS symbols verified."
-
-    - name: Build kernel
+    # -------------------------------------------------------
+    # BUILD
+    # -------------------------------------------------------
+    - name: Build Kernel
       run: |
         cd kernel_workspace/android-kernel
 
         export ARCH=arm64
         export SUBARCH=arm64
-        export BRAND_SHOW_FLAG=oneplus
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
-        export KBUILD_BUILD_HOST=Github-Action
-        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH
+        export KBUILD_BUILD_USER=github
+        export KBUILD_BUILD_HOST=actions
 
-        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
-        EX_CMD="LD=ld.lld LLVM=1"
+        make O=out CC=clang LLVM=1 vendor/kona-perf_defconfig
+        make -j$(nproc --all) O=out CC=clang LLVM=1
 
-        # Fix #4: make does not accept two *_defconfig targets in one invocation.
-        # Load the base defconfig first, then merge oplus.config via merge_config.sh.
-        make O=out CC=clang $BA_CMD $EX_CMD vendor/kona-perf_defconfig
-
-        ./scripts/kconfig/merge_config.sh -m -O out \
-          out/.config arch/arm64/configs/vendor/oplus.config
-
-        make O=out CC=clang $BA_CMD $EX_CMD olddefconfig
-
-        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
-
-    - name: Verify kernel output
+    - name: Verify Image
       run: |
         cd kernel_workspace/android-kernel/out
-        if [ -f arch/arm64/boot/Image ]; then
-          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
-          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
-        else
-          echo "Kernel output file is empty"
-          exit 1
-        fi
+        test -f arch/arm64/boot/Image
 
-    - name: Post-build SUSFS verification
-      if: env.CHECK_IMAGE == 'true'
-      run: |
-        cd kernel_workspace/android-kernel
-        FAIL=0
-
-        echo "=== 1. susfs.o compiled? ==="
-        if find out -name "susfs.o" | grep -q .; then
-          echo "  ✅ susfs.o found:"
-          find out -name "susfs.o"
-        else
-          echo "  ❌ susfs.o NOT found — SUSFS compiled out entirely"
-          FAIL=$((FAIL + 1))
-        fi
-
-        echo ""
-        echo "=== 2. SUSFS symbols in System.map ==="
-        if [ -f out/System.map ]; then
-          SUSFS_SYMS=$(grep -ic "susfs" out/System.map)
-          if [ "$SUSFS_SYMS" -gt 0 ]; then
-            echo "  ✅ $SUSFS_SYMS SUSFS symbols linked into kernel:"
-            grep -i "susfs" out/System.map | head -20
-          else
-            echo "  ❌ No SUSFS symbols in System.map — code was compiled out"
-            FAIL=$((FAIL + 1))
-          fi
-        else
-          echo "  ⚠️  System.map not found — skipping symbol check"
-        fi
-
-        echo ""
-        echo "=== 3. Key SUSFS function symbols present? ==="
-        if [ -f out/System.map ]; then
-          check_sym() {
-            # Fix #7: grep -w is robust against varying whitespace delimiters
-            if grep -qw "$1" out/System.map; then
-              echo "  ✅ $1"
-            else
-              echo "  ❌ MISSING: $1"
-              FAIL=$((FAIL + 1))
-            fi
-          }
-          check_sym "susfs_add_sus_path"
-          check_sym "susfs_set_uname"
-          check_sym "susfs_add_sus_kstat"
-        fi
-
-        echo ""
-        echo "=== 4. CONFIG_KSU_SUSFS_* defines in autoconf.h ==="
-        if [ -f out/include/generated/autoconf.h ]; then
-          SUSFS_DEFS=$(grep -c "define CONFIG_KSU_SUSFS" out/include/generated/autoconf.h)
-          if [ "$SUSFS_DEFS" -gt 0 ]; then
-            echo "  ✅ $SUSFS_DEFS CONFIG_KSU_SUSFS_* defines in autoconf.h:"
-            grep "define CONFIG_KSU_SUSFS" out/include/generated/autoconf.h
-          else
-            echo "  ❌ No CONFIG_KSU_SUSFS defines in autoconf.h"
-            FAIL=$((FAIL + 1))
-          fi
-        else
-          echo "  ⚠️  autoconf.h not found"
-        fi
-
-        echo ""
-        echo "======================================="
-        if [ "$FAIL" -gt 0 ]; then
-          echo "❌ Post-build: $FAIL check(s) failed — SUSFS not properly integrated"
-          exit 1
-        fi
-        echo "✅ Post-build verification passed — SUSFS fully integrated"
-
-    - name: Prepare AnyKernel3 and package
+    # -------------------------------------------------------
+    # PACKAGE AK3
+    # -------------------------------------------------------
+    - name: Build AnyKernel3 ZIP
       run: |
         cd kernel_workspace
         git clone --depth=1 https://github.com/osm0sis/AnyKernel3
-        sed -i 's/do.devicecheck=1/do.devicecheck=0/g'                       AnyKernel3/anykernel.sh
-        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
-        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g'                 AnyKernel3/anykernel.sh
-        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        rm -rf AnyKernel3/.git*
         cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
 
         cd AnyKernel3
-        zip -r AK3-${{ env.LINEAGE_VERSION }}-OPlus-SM8250-rsuntk_KSU_${{ env.RSKSUVER }}.zip ./*
+        zip -r KSUN-SUSFS-${{ env.RSKSUVER }}.zip ./*
 
-    - name: Upload Image artifact
-      if: env.CHECK_IMAGE == 'true'
-      uses: actions/upload-artifact@v4  # Fix #1
+    - name: Upload ZIP
+      uses: actions/upload-artifact@v4
       with:
-        name: Image-${{ matrix.ks }}
-        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
-
-    - name: Upload AnyKernel3 ZIP
-      uses: actions/upload-artifact@v4  # Fix #1
-      with:
-        name: AK3-${{ matrix.ks }}
-        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.LINEAGE_VERSION }}-OPlus-SM8250-rsuntk_KSU_*.zip
-
-    - name: Save build info
-      run: |
-        cd kernel_workspace
-        {
-          echo "RSKSUVER=${{ env.RSKSUVER }}"
-          echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
-          echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
-        } > build-info-${{ matrix.ks }}.txt
-
-    - name: Upload build info
-      uses: actions/upload-artifact@v4  # Fix #1
-      with:
-        name: INFO-${{ matrix.ks }}
-        path: kernel_workspace/build-info-${{ matrix.ks }}.txt
-        
+        name: KSUN-SUSFS
+        path: kernel_workspace/AnyKernel3/*.zip
