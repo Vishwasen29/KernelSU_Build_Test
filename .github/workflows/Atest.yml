@@ -133,11 +133,8 @@ jobs:
       run: |
         cd kernel_workspace/android-kernel
         # Make sure the script is executable and run it from the kernel root
-        bash $GITHUB_WORKSPACE/patches/fix_susfs_patch.sh
-        bash $GITHUB_WORKSPACE/patches/namespace_fix.sh
-        bash $GITHUB_WORKSPACE/patches/fix_vma_unused.sh
-        bash $GITHUB_WORKSPACE/patches/fix_supercalls.sh
-        bash $GITHUB_WORKSPACE/patches/fix_reboot.sh
+        bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
+        
         
 
     - name: Verify Integration in Workflow
