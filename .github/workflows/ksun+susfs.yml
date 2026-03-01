@@ -120,6 +120,8 @@ jobs:
        dos2unix susfs_fix.txt
 
        bash susfs_fix.txt
+
+       bash GITHUB_WORKSPACE/patches/valid.sh
        
 
     - name: Collect patch debug files
