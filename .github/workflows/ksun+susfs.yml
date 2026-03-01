@@ -155,10 +155,7 @@ jobs:
           echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $DEF
           echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> $DEF
 
-    - name: Fix KernelSU for 4.19
-      run: |
-       cd kernel_workspace/android-kernel
-       sed -i 's/TWA_RESUME/TWA_SIGNAL/g' drivers/kernelsu/allowlist.c
+    
           
     - name: Build kernel
       run: |
