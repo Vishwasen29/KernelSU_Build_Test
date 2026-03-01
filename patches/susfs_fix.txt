@@ -1,0 +1,124 @@
+#!/bin/bash
+set -e
+
+echo "==== SUSFS 4.19 Clean Fix Script ===="
+
+########################################
+# 1️⃣ Fix include/linux/mount.h
+########################################
+
+if grep -q "ANDROID_KABI_RESERVE(4);" include/linux/mount.h && \
+   ! grep -q "susfs_mnt_id_backup" include/linux/mount.h; then
+
+    echo "[mount.h] Fixing KABI reserve..."
+
+    sed -i '/ANDROID_KABI_RESERVE(4);/c\
+#ifdef CONFIG_KSU_SUSFS\
+    ANDROID_KABI_USE(4, u64 susfs_mnt_id_backup);\
+#else\
+    ANDROID_KABI_RESERVE(4);\
+#endif' include/linux/mount.h
+fi
+
+########################################
+# 2️⃣ Fix fs/proc/task_mmu.c
+########################################
+
+if ! grep -q "BIT_SUS_MAPS" fs/proc/task_mmu.c; then
+    echo "[task_mmu.c] Injecting SUS_MAP logic..."
+
+    sed -i '/up_read(&mm->mmap_sem);/a\
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP\
+    vma = find_vma(mm, start_vaddr);\
+    if (vma && vma->vm_file) {\
+        struct inode *inode = file_inode(vma->vm_file);\
+        if (unlikely(inode->i_mapping->flags & BIT_SUS_MAPS) &&\
+            susfs_is_current_proc_umounted()) {\
+            pm.buffer->pme = 0;\
+        }\
+    }\
+#endif' fs/proc/task_mmu.c
+fi
+
+########################################
+# 3️⃣ Fix fs/namespace.c header block
+########################################
+
+if ! grep -q "susfs_def.h" fs/namespace.c; then
+    echo "[namespace.c] Adding SUSFS header block..."
+
+    sed -i '/#include "internal.h"/a\
+#ifdef CONFIG_KSU_SUSFS\
+#include <linux/susfs_def.h>\
+extern bool susfs_is_current_ksu_domain(void);\
+extern bool susfs_is_sdcard_android_data_decrypted;\
+static atomic64_t susfs_ksu_mounts = ATOMIC64_INIT(0);\
+#define CL_COPY_MNT_NS BIT(25)\
+#endif' fs/namespace.c
+fi
+
+########################################
+# 4️⃣ Fix clone_mnt() safely (no gotos)
+########################################
+
+if ! grep -q "susfs_reuse_sus_vfsmnt" fs/namespace.c; then
+    echo "[namespace.c] Injecting clone_mnt SUSFS logic..."
+
+    sed -i '/mnt = alloc_vfsmnt(old->mnt_devname);/i\
+#ifdef CONFIG_KSU_SUSFS\
+    if (!susfs_is_sdcard_android_data_decrypted) {\
+        if (susfs_is_current_ksu_domain()) {\
+            if (flag & CL_COPY_MNT_NS)\
+                return susfs_reuse_sus_vfsmnt(old->mnt_devname, old->mnt_id);\
+            else\
+                return susfs_alloc_sus_vfsmnt(old->mnt_devname);\
+        }\
+        if (old->mnt_id == DEFAULT_KSU_MNT_ID)\
+            return susfs_alloc_sus_vfsmnt(old->mnt_devname);\
+    }\
+#endif' fs/namespace.c
+fi
+
+########################################
+# 5️⃣ Remove reject files
+########################################
+
+find . -name "*.rej" -delete
+
+########################################
+# 6️⃣ VALIDATION
+########################################
+
+echo ""
+echo "==== VALIDATION ===="
+
+FAIL=0
+
+check() {
+    if ! grep -q "$2" "$1"; then
+        echo "❌ Missing $2 in $1"
+        FAIL=1
+    else
+        echo "✔ $2 present in $1"
+    fi
+}
+
+check "include/linux/mount.h" "susfs_mnt_id_backup"
+check "fs/proc/task_mmu.c" "BIT_SUS_MAPS"
+check "fs/namespace.c" "susfs_def.h"
+check "fs/namespace.c" "susfs_reuse_sus_vfsmnt"
+
+if [ $FAIL -eq 0 ]; then
+    echo ""
+    echo "✅ SUSFS integration looks structurally correct."
+else
+    echo ""
+    echo "❌ Integration incomplete. Inspect manually."
+fi
+
+echo ""
+echo "Now run clean build:"
+echo "make O=out mrproper"
+echo "rm -rf out"
+echo "make O=out vendor/kona-perf_defconfig vendor/oplus.config"
+echo "make O=out -j\$(nproc)"
