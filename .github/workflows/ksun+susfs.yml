@@ -155,6 +155,7 @@ jobs:
 
     - name: Fix KernelSU for 4.19
       run: |
+       cd kernel_workspace/android-kernel
        sed -i 's/TWA_RESUME/TWA_SIGNAL/g' drivers/kernelsu/allowlist.c
           
     - name: Build kernel
