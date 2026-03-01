@@ -70,7 +70,7 @@ jobs:
         cd kernel_workspace/android-kernel
 
         # KernelSU-Next
-        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-legacy
+        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-rksu-master
         
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
@@ -94,7 +94,7 @@ jobs:
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
         # Generate version
-        RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+        RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         
 
