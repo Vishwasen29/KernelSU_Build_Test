@@ -1,26 +1,29 @@
 #!/bin/bash
 # =============================================================================
-# check_susfs.sh
-# Checks if SUSFS entries are present in fs/Kconfig and fs/Makefile.
-# If missing, adds them. Then validates everything is correct.
+# check_susfs.sh — Validates and repairs SUSFS wiring for kernel 4.19
+#
+# On 4.19, SUSFS is a single file: fs/susfs.c (NOT a fs/susfs/ subdirectory).
+# Makefile entry : obj-$(CONFIG_KSU_SUSFS) += susfs.o
+# Kconfig entry  : source "fs/susfs/Kconfig"
+#
 # Usage: bash check_susfs.sh [kernel_root]
-#   kernel_root: path to the kernel source root (default: current directory)
+#   kernel_root: path to kernel source root (default: current directory)
 # =============================================================================
 
-set -e
+set -euo pipefail
 
 # ── Colours ──────────────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Colour
+RED='\033[0;31m';  GREEN='\033[0;32m'
+YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
 pass()  { echo -e "${GREEN}  [PASS]${NC} $*"; }
-fail()  { echo -e "${RED}  [FAIL]${NC} $*"; }
+fail()  { echo -e "${RED}  [FAIL]${NC} $*"; ERRORS=$((ERRORS+1)); }
 info()  { echo -e "${CYAN}  [INFO]${NC} $*"; }
 warn()  { echo -e "${YELLOW}  [WARN]${NC} $*"; }
 title() { echo -e "\n${CYAN}=== $* ===${NC}"; }
+fixed() { echo -e "${YELLOW}  [FIXED]${NC} $*"; }
+
+ERRORS=0
 
 # ── Resolve kernel root ───────────────────────────────────────────────────────
 KERNEL_ROOT="${1:-$(pwd)}"
@@ -28,199 +31,203 @@ KERNEL_ROOT="$(realpath "$KERNEL_ROOT")"
 
 FS_KCONFIG="$KERNEL_ROOT/fs/Kconfig"
 FS_MAKEFILE="$KERNEL_ROOT/fs/Makefile"
-SUSFS_DIR="$KERNEL_ROOT/fs/susfs"
 
-ERRORS=0
+# On kernel 4.19, SUSFS is a flat single file in fs/, not a subdirectory
+SUSFS_C="$KERNEL_ROOT/fs/susfs.c"
+SUSFS_H="$KERNEL_ROOT/include/linux/susfs.h"
+SUSFS_DEF_H="$KERNEL_ROOT/include/linux/susfs_def.h"
 
-# ── Sanity check: is this actually a kernel tree? ────────────────────────────
-title "Checking kernel source tree"
+# What we expect in each file
+KCONFIG_ENTRY='source "fs/susfs/Kconfig"'
+MAKEFILE_ENTRY='obj-$(CONFIG_KSU_SUSFS) += susfs.o'
 
-if [ ! -f "$FS_KCONFIG" ]; then
-    fail "fs/Kconfig not found at: $FS_KCONFIG"
-    fail "Are you pointing at the right kernel root? (given: $KERNEL_ROOT)"
-    exit 1
-fi
-pass "fs/Kconfig found"
-
-if [ ! -f "$FS_MAKEFILE" ]; then
-    fail "fs/Makefile not found at: $FS_MAKEFILE"
-    exit 1
-fi
-pass "fs/Makefile found"
-
-# ── Backup originals before touching anything ────────────────────────────────
-title "Backing up originals"
-
-backup() {
+# =============================================================================
+# Helper: deduplicate a literal string in a file safely (no awk regex)
+# Keeps only the FIRST occurrence, removes all subsequent duplicates
+# =============================================================================
+dedup_entry() {
     local file="$1"
-    local bak="${file}.susfs_bak"
-    if [ ! -f "$bak" ]; then
-        cp "$file" "$bak"
-        info "Backed up $(basename $file) → $(basename $bak)"
+    local entry="$2"
+    local count
+    count=$(grep -cF "$entry" "$file" 2>/dev/null || true)
+
+    if [ "$count" -le 1 ]; then
+        return 0
+    fi
+
+    warn "Found $count duplicate entries in $(basename $file) — deduplicating"
+
+    local tmp seen line
+    tmp=$(mktemp)
+    seen=0
+    while IFS= read -r line; do
+        if [ "$line" = "$entry" ]; then
+            if [ "$seen" -eq 0 ]; then
+                printf '%s\n' "$line" >> "$tmp"
+                seen=1
+            fi
+            # silently drop subsequent duplicates
+        else
+            printf '%s\n' "$line" >> "$tmp"
+        fi
+    done < "$file"
+    mv "$tmp" "$file"
+    fixed "$(basename $file) now has exactly 1 occurrence of the entry"
+}
+
+# =============================================================================
+# Helper: add a line to a file if not already present
+# Usage: ensure_entry <file> <literal_entry> [before_grep_pattern]
+# =============================================================================
+ensure_entry() {
+    local file="$1"
+    local entry="$2"
+    local before="${3:-}"
+
+    if grep -qF "$entry" "$file"; then
+        pass "Already present: '$entry'"
+        return 0
+    fi
+
+    warn "Missing: '$entry' — adding to $(basename $file)"
+
+    if [ -n "$before" ] && grep -q "$before" "$file"; then
+        local tmp line
+        tmp=$(mktemp)
+        while IFS= read -r line; do
+            if echo "$line" | grep -q "$before"; then
+                printf '%s\n' "$entry" >> "$tmp"
+            fi
+            printf '%s\n' "$line" >> "$tmp"
+        done < "$file"
+        mv "$tmp" "$file"
+        fixed "Inserted '$entry' before '$before' in $(basename $file)"
     else
-        info "Backup already exists for $(basename $file), skipping"
+        printf '\n%s\n' "$entry" >> "$file"
+        fixed "Appended '$entry' to $(basename $file)"
     fi
 }
 
-backup "$FS_KCONFIG"
-backup "$FS_MAKEFILE"
+# =============================================================================
+# 0. Sanity: is this a kernel tree?
+# =============================================================================
+title "Checking kernel source tree at: $KERNEL_ROOT"
+
+[ -f "$FS_KCONFIG"  ] && pass "fs/Kconfig found"  || { fail "fs/Kconfig not found — is the kernel root correct?"; exit 1; }
+[ -f "$FS_MAKEFILE" ] && pass "fs/Makefile found" || { fail "fs/Makefile not found"; exit 1; }
 
 # =============================================================================
-# 1. fs/Kconfig
+# 1. Check the SUSFS patch was actually applied (must come before this script)
 # =============================================================================
-title "Checking fs/Kconfig"
+title "Checking SUSFS patch was applied"
 
-# The source line we expect to find
-KCONFIG_SOURCE='source "fs/susfs/Kconfig"'
+PATCH_OK=true
 
-if grep -qF "$KCONFIG_SOURCE" "$FS_KCONFIG"; then
-    pass "SUSFS Kconfig source entry already present"
+if [ -f "$SUSFS_C" ]; then
+    pass "fs/susfs.c exists"
 else
-    warn "SUSFS Kconfig source entry missing — adding it"
-
-    # Insert before endmenu at the end of fs/Kconfig
-    if grep -q "^endmenu" "$FS_KCONFIG"; then
-        sed -i "/^endmenu/i\\
-\\
-$KCONFIG_SOURCE" "$FS_KCONFIG"
-        info "Inserted '$KCONFIG_SOURCE' before endmenu"
-    else
-        # No endmenu — just append
-        printf '\n%s\n' "$KCONFIG_SOURCE" >> "$FS_KCONFIG"
-        info "Appended '$KCONFIG_SOURCE' to end of fs/Kconfig (no endmenu found)"
-    fi
+    fail "fs/susfs.c is missing — SUSFS patch has NOT been applied or failed entirely"
+    PATCH_OK=false
 fi
 
-# =============================================================================
-# 2. fs/Makefile — susfs.o
-# =============================================================================
-title "Checking fs/Makefile"
-
-MAKEFILE_OBJ='obj-$(CONFIG_KSU_SUSFS) += susfs/'
-
-if grep -qF "$MAKEFILE_OBJ" "$FS_MAKEFILE"; then
-    pass "SUSFS Makefile obj entry already present"
-else
-    warn "SUSFS Makefile obj entry missing — adding it"
-
-    # Try to insert after the last obj- line for a clean grouping
-    if grep -q "^obj-" "$FS_MAKEFILE"; then
-        # Append after the last obj- line
-        LAST_OBJ_LINE=$(grep -n "^obj-" "$FS_MAKEFILE" | tail -1 | cut -d: -f1)
-        sed -i "${LAST_OBJ_LINE}a\\
-$MAKEFILE_OBJ" "$FS_MAKEFILE"
-        info "Inserted obj entry after line $LAST_OBJ_LINE in fs/Makefile"
-    else
-        printf '\n%s\n' "$MAKEFILE_OBJ" >> "$FS_MAKEFILE"
-        info "Appended obj entry to fs/Makefile"
-    fi
-fi
-
-# =============================================================================
-# 3. Check fs/susfs/ directory and its own Kconfig/Makefile exist
-# =============================================================================
-title "Checking fs/susfs/ directory"
-
-if [ -d "$SUSFS_DIR" ]; then
-    pass "fs/susfs/ directory exists"
-else
-    fail "fs/susfs/ directory does NOT exist — the SUSFS patch may not have been applied"
-    warn "Apply your susfs patch first, then re-run this script"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# fs/susfs/Kconfig
-if [ -f "$SUSFS_DIR/Kconfig" ]; then
-    pass "fs/susfs/Kconfig exists"
-else
-    fail "fs/susfs/Kconfig is missing"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# fs/susfs/Makefile
-if [ -f "$SUSFS_DIR/Makefile" ]; then
-    pass "fs/susfs/Makefile exists"
-else
-    fail "fs/susfs/Makefile is missing"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# susfs.c source file
-if [ -f "$SUSFS_DIR/susfs.c" ]; then
-    pass "fs/susfs/susfs.c exists"
-else
-    fail "fs/susfs/susfs.c is missing"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# susfs.h header
-SUSFS_HEADER="$KERNEL_ROOT/include/linux/susfs.h"
-if [ -f "$SUSFS_HEADER" ]; then
+if [ -f "$SUSFS_H" ]; then
     pass "include/linux/susfs.h exists"
 else
     fail "include/linux/susfs.h is missing"
-    ERRORS=$((ERRORS + 1))
+    PATCH_OK=false
+fi
+
+if [ -f "$SUSFS_DEF_H" ]; then
+    pass "include/linux/susfs_def.h exists"
+else
+    fail "include/linux/susfs_def.h is missing"
+    PATCH_OK=false
+fi
+
+if [ "$PATCH_OK" = false ]; then
+    echo ""
+    echo -e "${RED}SUSFS patch must be applied before running this script. Aborting.${NC}"
+    exit 1
 fi
 
 # =============================================================================
-# 4. Validate — re-read the files and confirm entries are present
+# 2. Backup originals (skip if backup already exists from a prior run)
 # =============================================================================
-title "Validating final state"
+title "Backing up originals"
 
-VALIDATION_ERRORS=0
-
-if grep -qF "$KCONFIG_SOURCE" "$FS_KCONFIG"; then
-    pass "fs/Kconfig  → '$KCONFIG_SOURCE'"
-else
-    fail "fs/Kconfig  → entry still missing after attempted fix!"
-    VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-fi
-
-if grep -qF "$MAKEFILE_OBJ" "$FS_MAKEFILE"; then
-    pass "fs/Makefile → '$MAKEFILE_OBJ'"
-else
-    fail "fs/Makefile → entry still missing after attempted fix!"
-    VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-fi
-
-# Check no duplicate entries were accidentally added
-KCONFIG_COUNT=$(grep -cF "$KCONFIG_SOURCE" "$FS_KCONFIG" || true)
-MAKEFILE_COUNT=$(grep -cF "$MAKEFILE_OBJ" "$FS_MAKEFILE" || true)
-
-if [ "$KCONFIG_COUNT" -gt 1 ]; then
-    warn "fs/Kconfig has $KCONFIG_COUNT duplicate SUSFS entries — deduplicating"
-    # Keep only first occurrence
-    awk '!seen[/'"$KCONFIG_SOURCE"'/]++' "$FS_KCONFIG" > "$FS_KCONFIG.tmp" && mv "$FS_KCONFIG.tmp" "$FS_KCONFIG"
-    pass "Deduplicated fs/Kconfig"
-else
-    pass "fs/Kconfig has exactly 1 SUSFS entry (no duplicates)"
-fi
-
-if [ "$MAKEFILE_COUNT" -gt 1 ]; then
-    warn "fs/Makefile has $MAKEFILE_COUNT duplicate SUSFS entries — deduplicating"
-    awk '!seen[/'"$MAKEFILE_OBJ"'/]++' "$FS_MAKEFILE" > "$FS_MAKEFILE.tmp" && mv "$FS_MAKEFILE.tmp" "$FS_MAKEFILE"
-    pass "Deduplicated fs/Makefile"
-else
-    pass "fs/Makefile has exactly 1 SUSFS entry (no duplicates)"
-fi
+for f in "$FS_KCONFIG" "$FS_MAKEFILE"; do
+    bak="${f}.susfs_bak"
+    if [ ! -f "$bak" ]; then
+        cp "$f" "$bak"
+        info "Backed up $(basename $f) → $(basename $bak)"
+    else
+        info "$(basename $bak) already exists — skipping"
+    fi
+done
 
 # =============================================================================
-# 5. Summary
+# 3. Remove any duplicates introduced by patch + prior script runs
+# =============================================================================
+title "Removing any duplicates"
+
+dedup_entry "$FS_KCONFIG"  "$KCONFIG_ENTRY"
+dedup_entry "$FS_MAKEFILE" "$MAKEFILE_ENTRY"
+
+# =============================================================================
+# 4. Ensure entries are present (adds only if missing after dedup)
+# =============================================================================
+title "Checking fs/Kconfig"
+ensure_entry "$FS_KCONFIG" "$KCONFIG_ENTRY" "^endmenu"
+
+title "Checking fs/Makefile"
+ensure_entry "$FS_MAKEFILE" "$MAKEFILE_ENTRY"
+
+# =============================================================================
+# 5. Final validation — confirm exactly 1 of each entry, correct content
+# =============================================================================
+title "Final validation"
+
+validate_entry() {
+    local file="$1"
+    local entry="$2"
+    local label="$3"
+    local count lineno
+    count=$(grep -cF "$entry" "$file" 2>/dev/null || true)
+
+    if [ "$count" -eq 1 ]; then
+        lineno=$(grep -nF "$entry" "$file" | head -1 | cut -d: -f1)
+        pass "$label — found exactly once (line $lineno)"
+    elif [ "$count" -eq 0 ]; then
+        fail "$label — STILL MISSING after fix attempt"
+    else
+        fail "$label — $count duplicates remain, manual fix needed"
+    fi
+}
+
+validate_entry "$FS_KCONFIG"  "$KCONFIG_ENTRY"  "fs/Kconfig  → Kconfig source line"
+validate_entry "$FS_MAKEFILE" "$MAKEFILE_ENTRY" "fs/Makefile → susfs.o obj entry"
+
+# Spot-check susfs.c for a key symbol to confirm it's a valid SUSFS file
+if grep -q "susfs_init" "$SUSFS_C" 2>/dev/null; then
+    pass "fs/susfs.c content looks valid (susfs_init found)"
+else
+    warn "fs/susfs.c may be incomplete — susfs_init symbol not found"
+fi
+
+# =============================================================================
+# 6. Summary
 # =============================================================================
 title "Summary"
-
-TOTAL_ERRORS=$((ERRORS + VALIDATION_ERRORS))
-
 echo ""
-echo -e "  fs/Kconfig  : $(grep -n "$KCONFIG_SOURCE" "$FS_KCONFIG" | head -1 | sed 's/^/line /' || echo 'NOT FOUND')"
-echo -e "  fs/Makefile : $(grep -n "$MAKEFILE_OBJ" "$FS_MAKEFILE" | head -1 | sed 's/^/line /' || echo 'NOT FOUND')"
+printf "  Kernel root : %s\n" "$KERNEL_ROOT"
+printf "  fs/Kconfig  : %s\n" "$(grep -nF "$KCONFIG_ENTRY"  "$FS_KCONFIG"  | head -1 | sed 's/^/line /')"
+printf "  fs/Makefile : %s\n" "$(grep -nF "$MAKEFILE_ENTRY" "$FS_MAKEFILE" | head -1 | sed 's/^/line /')"
 echo ""
 
-if [ "$TOTAL_ERRORS" -eq 0 ]; then
+if [ "$ERRORS" -eq 0 ]; then
     echo -e "${GREEN}All checks passed. SUSFS is correctly wired into the fs/ build system.${NC}"
     exit 0
 else
-    echo -e "${RED}$TOTAL_ERRORS error(s) found. Check the output above.${NC}"
-    echo -e "${YELLOW}Most likely cause: the SUSFS patch was not applied before running this script.${NC}"
+    echo -e "${RED}$ERRORS error(s) remain. See output above.${NC}"
     exit 1
 fi
