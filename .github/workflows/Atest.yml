@@ -136,6 +136,7 @@ jobs:
         bash $GITHUB_WORKSPACE/patches/fix_susfs_patch.sh
         bash $GITHUB_WORKSPACE/patches/fix_vma_unused.sh
         bash $GITHUB_WORKSPACE/patches/fix_supercalls.sh
+        bash $GITHUB_WORKSPACE/patches/fix_reboot.sh
         
 
     - name: Verify Integration in Workflow
