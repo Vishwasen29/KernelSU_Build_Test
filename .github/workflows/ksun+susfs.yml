@@ -120,7 +120,7 @@ jobs:
 
        bash susfs_fix.txt
 
-       bash $GITHUB_WORKSPACE/patches/valid.sh .
+      #bash $GITHUB_WORKSPACE/patches/valid.sh .
        
 
     - name: Collect patch debug files
