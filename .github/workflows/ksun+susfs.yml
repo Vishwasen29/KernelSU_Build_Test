@@ -121,7 +121,7 @@ jobs:
 
        bash susfs_fix.txt
 
-       bash GITHUB_WORKSPACE/patches/valid.sh kernel_workspace/android-kernel
+       bash $GITHUB_WORKSPACE/patches/valid.sh kernel_workspace/android-kernel
        
 
     - name: Collect patch debug files
