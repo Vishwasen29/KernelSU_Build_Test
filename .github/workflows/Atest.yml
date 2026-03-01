@@ -134,6 +134,7 @@ jobs:
         cd kernel_workspace/android-kernel
         # Make sure the script is executable and run it from the kernel root
         bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
+        bash $GITHUB_WORKSPACE/patches/susfs_match.sh
         
         
 
