@@ -73,6 +73,7 @@ jobs:
         
 
          curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy-susfs
+         bash $GITHUB_WORKSPACE/patches/a_fix.sh
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
