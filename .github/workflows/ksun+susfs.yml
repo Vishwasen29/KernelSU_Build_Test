@@ -105,6 +105,7 @@ jobs:
           cp -r kernel/KernelSU backup_originals/KernelSU 2>/dev/null || true
           cp -r kernel/fs backup_originals/fs 2>/dev/null || true
           cp -r kernel/include/linux backup_originals/include_linux 2>/dev/null || true
+          cp -rp kernel/kernelsu/allowlist.c backup_originals 2>/dev/null || true
 
  
     - name: Apply susfs patch
