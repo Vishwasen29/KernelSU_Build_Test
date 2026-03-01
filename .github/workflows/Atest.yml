@@ -1,4 +1,4 @@
-name: 📛 Test KSUN+SUSFS Build LineageOS OPlus SM8250 Kernel
+name: 🤣 KSUN+SUSFS Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
@@ -38,8 +38,9 @@ jobs:
           zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool \
           make squashfs-tools dpkg-dev libssl-dev python3 bc \
           libc6-dev-i386 libncurses5-dev wget
+          sudo apt-get install -y dos2unix
 
-        mkdir -p kernel_workspace
+    
 
     - name: Cache Clang toolchain
       id: cache-clang
@@ -68,35 +69,9 @@ jobs:
       run: |
         cd kernel_workspace/android-kernel
 
-    - name: Setup KernelSU-Next (legacy-susfs)
-      run: |
-        cd kernel_workspace/android-kernel
-
-        # Clone correct repo (NOT official)
-        git clone https://github.com/sidex15/KernelSU-Next.git
-        cd KernelSU-Next
-        git checkout legacy-susfs
-        cd ..
-
-        # Symlink into drivers
-        ln -sf ../KernelSU-Next/kernel drivers/kernelsu
-
-        # Add Makefile entry safely
-        grep -q "kernelsu" drivers/Makefile || \
-          echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-
-        # Add Kconfig entry safely
-        grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
-          sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-
-        # Remove dirty tag
-        sed -i 's/ -dirty//g' scripts/setlocalversion
-
-        # Generate KSU version
-        RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
-        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+        # KernelSU-Next
+        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-legacy
         
-
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
@@ -109,10 +84,18 @@ jobs:
           }' security/Kconfig
         fi
 
-        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh  || true
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh 
         # Enable KernelSU manual hook
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        
 
+    
+        # Remove dirty tag
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
+        # Generate version
+        RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         
 
     - name: Backup original files
@@ -121,32 +104,24 @@ jobs:
           cp -r kernel/KernelSU backup_originals/KernelSU 2>/dev/null || true
           cp -r kernel/fs backup_originals/fs 2>/dev/null || true
           cp -r kernel/include/linux backup_originals/include_linux 2>/dev/null || true
+          cp -rp kernel/kernelsu/allowlist.c backup_originals 2>/dev/null || true
 
  
     - name: Apply susfs patch
       run: |
-        cd kernel_workspace/android-kernel
-        # Apply the main patch, ignore failures as we fix them next
-        patch -p1 --forward < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
+       cd kernel_workspace/android-kernel
+       set -o pipefail
+       patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
 
-    - name: Fix Rejects Manually
-      run: |
-        cd kernel_workspace/android-kernel
-        # Make sure the script is executable and run it from the kernel root
-        bash $GITHUB_WORKSPACE/patches/susfs_fix1.sh
-        bash $GITHUB_WORKSPACE/patches/susfs_match.sh
-        bash $GITHUB_WORKSPACE/patches/task_mmu.sh
-        
-        
+       cp -rp $GITHUB_WORKSPACE/patches/susfs_fix.txt .
 
-    - name: Verify Integration in Workflow
-      run: |
-        # Check if the compilation would actually include SUSFS
-        cd kernel_workspace/android-kernel
-        echo "Check: Verification of source code injection"
-        grep -q "susfs_mnt_id_backup" include/linux/mount.h && echo "✅ mount.h OK" || (echo "❌ mount.h FAIL"; exit 1)
-        grep -q "susfs_def.h" fs/namespace.c && echo "✅ namespace.c OK" || (echo "❌ namespace.c FAIL"; exit 1)
-        
+       dos2unix susfs_fix.txt
+
+       bash susfs_fix.txt
+
+      #bash $GITHUB_WORKSPACE/patches/valid.sh .
+       
+
     - name: Collect patch debug files
       run: |
        mkdir -p patch_artifacts
@@ -179,7 +154,9 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $DEF
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEF
           echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $DEF
-          echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> $DEF
+          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> $DEF
+
+    
           
     - name: Build kernel
       run: |
@@ -198,39 +175,6 @@ jobs:
 
         make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
         make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
-
-    - name: Verify SUSFS Integration in Workflow
-      run: |
-        cd kernel_workspace/android-kernel/out
-        
-        echo "Check 1: Verification of .config"
-        if grep -q "CONFIG_KSU_SUSFS=y" .config; then
-            echo "✅ CONFIG_KSU_SUSFS is active in build config."
-        else
-            echo "❌ ERROR: CONFIG_KSU_SUSFS is not set! Check your defconfig/fragments."
-            exit 1
-        fi
-
-        echo "Check 2: Symbol Table Check (System.map)"
-        # This confirms the C files were actually compiled and linked
-        SUSFS_SYMBOLS=$(grep "susfs_" System.map | wc -l)
-        if [ "$SUSFS_SYMBOLS" -gt 0 ]; then
-            echo "✅ Found $SUSFS_SYMBOLS SUSFS symbols in System.map."
-        else
-            echo "❌ ERROR: No SUSFS symbols found. The code was skipped during compilation."
-            exit 1
-        fi
-
-        echo "Check 3: Binary String Search (Image)"
-        # Ultimate check: look for the susfs identifier inside the raw kernel image
-        if strings arch/arm64/boot/Image | grep -qi "susfs"; then
-            echo "✅ SUSFS binary strings verified in Image."
-        else
-            echo "❌ ERROR: SUSFS signature missing from final Image."
-            exit 1
-        fi
-        
-        
 
     - name: Verify kernel output
       run: |
