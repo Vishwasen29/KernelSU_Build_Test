@@ -120,7 +120,7 @@ jobs:
        dos2unix susfs_fix.txt
 
        bash susfs_fix.txt
-       cp -rp $GITHUB_WORKSPACE/patches/allowlist.c drivers/kernelsu
+       
 
     - name: Collect patch debug files
       run: |
