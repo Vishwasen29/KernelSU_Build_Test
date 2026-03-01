@@ -77,6 +77,8 @@ dedup_entry() {
 
 # =============================================================================
 # Helper: add a line to a file if not already present
+# Inserts before the LAST occurrence of before_grep_pattern (not every one),
+# or appends if the pattern is not found.
 # Usage: ensure_entry <file> <literal_entry> [before_grep_pattern]
 # =============================================================================
 ensure_entry() {
@@ -92,16 +94,13 @@ ensure_entry() {
     warn "Missing: '$entry' — adding to $(basename $file)"
 
     if [ -n "$before" ] && grep -q "$before" "$file"; then
-        local tmp line
-        tmp=$(mktemp)
-        while IFS= read -r line; do
-            if echo "$line" | grep -q "$before"; then
-                printf '%s\n' "$entry" >> "$tmp"
-            fi
-            printf '%s\n' "$line" >> "$tmp"
-        done < "$file"
-        mv "$tmp" "$file"
-        fixed "Inserted '$entry' before '$before' in $(basename $file)"
+        # Find the line number of the LAST match of before_pattern
+        local last_line
+        last_line=$(grep -n "$before" "$file" | tail -1 | cut -d: -f1)
+        # Insert the entry on the line before it using sed
+        sed -i "${last_line}i\\
+$entry" "$file"
+        fixed "Inserted '$entry' before last '$before' (line $last_line) in $(basename $file)"
     else
         printf '\n%s\n' "$entry" >> "$file"
         fixed "Appended '$entry' to $(basename $file)"
@@ -181,6 +180,12 @@ ensure_entry "$FS_KCONFIG" "$KCONFIG_ENTRY" "^endmenu"
 
 title "Checking fs/Makefile"
 ensure_entry "$FS_MAKEFILE" "$MAKEFILE_ENTRY"
+
+# Second dedup pass — catches any duplicates introduced by the insert above
+# (e.g. if the patch had already partially added the entry before this script ran)
+title "Second dedup pass (post-insert safety check)"
+dedup_entry "$FS_KCONFIG"  "$KCONFIG_ENTRY"
+dedup_entry "$FS_MAKEFILE" "$MAKEFILE_ENTRY"
 
 # =============================================================================
 # 5. Final validation — confirm exactly 1 of each entry, correct content
