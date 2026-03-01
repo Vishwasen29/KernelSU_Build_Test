@@ -91,22 +91,7 @@ jobs:
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         
 
-    - name: Fix KernelSU for old 4.19 CAF
-      run: |
-       FILE="drivers/kernelsu/allowlist.c"
-
-       echo "Fixing task_work_add API for old 4.19..."
-
-       # Convert new enum API to old bool API
-       sed -i 's/task_work_add(tsk, cb, TWA_RESUME)/task_work_add(tsk, cb, true)/g' $FILE
-       sed -i 's/task_work_add(tsk, cb, TWA_SIGNAL)/task_work_add(tsk, cb, true)/g' $FILE
-
-       # Ensure sched headers exist
-       grep -q "linux/sched.h" $FILE || sed -i '1i #include <linux/sched.h>' $FILE
-       grep -q "linux/sched/task.h" $FILE || sed -i '1i #include <linux/sched/task.h>' $FILE
-
-       echo "KernelSU compatibility patch applied."
-
+    
         # Remove dirty tag
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
