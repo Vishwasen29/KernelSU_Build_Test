@@ -1,4 +1,4 @@
-name: KSUN+SUSFS Build LineageOS OPlus SM8250 Kernel
+name: A New KSUN+SUSFS Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
@@ -69,10 +69,8 @@ jobs:
         cd kernel_workspace/android-kernel
 
         # KernelSU-Next
-        #curl -LSs \
-          #https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-         # | bash -s legacy
-         curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s
+        
+         curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy-sufs
 
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
@@ -86,9 +84,12 @@ jobs:
           }' security/Kconfig
         fi
 
-        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh  || true
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh 
         # Enable KernelSU manual hook
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        
+
+        
 
         # Remove dirty tag
         sed -i 's/ -dirty//g' scripts/setlocalversion
@@ -109,9 +110,9 @@ jobs:
       run: |
        cd kernel_workspace/android-kernel
        set -o pipefail
-       patch -p1 --forward \
-       < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch \
-       2>&1 | tee patch_main_log.txt || true
+       patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
+
+       bash $GITHUB_WORKSPACE/patches/susfs_fix.txt
 
     - name: Collect patch debug files
       run: |
