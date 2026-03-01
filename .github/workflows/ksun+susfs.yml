@@ -38,8 +38,9 @@ jobs:
           zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool \
           make squashfs-tools dpkg-dev libssl-dev python3 bc \
           libc6-dev-i386 libncurses5-dev wget
+          sudo apt-get install -y dos2unix
 
-        mkdir -p kernel_workspace
+    
 
     - name: Cache Clang toolchain
       id: cache-clang
@@ -112,7 +113,11 @@ jobs:
        set -o pipefail
        patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
 
-       bash $GITHUB_WORKSPACE/patches/susfs_fix.txt
+       cp -rp $GITHUB_WORKSPACE/patches/susfs_fix.txt .
+
+       dos2unix susfs_fix.txt
+
+       bash susfs_fix.txt
 
     - name: Collect patch debug files
       run: |
