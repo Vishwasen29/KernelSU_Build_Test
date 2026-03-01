@@ -73,7 +73,7 @@ jobs:
         
 
          curl -LSs "https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy-susfs
-         bash $GITHUB_WORKSPACE/patches/a_fix.sh
+        
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
@@ -91,7 +91,21 @@ jobs:
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         
 
-        
+    - name: Fix KernelSU for old 4.19 CAF
+      run: |
+       FILE="drivers/kernelsu/allowlist.c"
+
+       echo "Fixing task_work_add API for old 4.19..."
+
+       # Convert new enum API to old bool API
+       sed -i 's/task_work_add(tsk, cb, TWA_RESUME)/task_work_add(tsk, cb, true)/g' $FILE
+       sed -i 's/task_work_add(tsk, cb, TWA_SIGNAL)/task_work_add(tsk, cb, true)/g' $FILE
+
+       # Ensure sched headers exist
+       grep -q "linux/sched.h" $FILE || sed -i '1i #include <linux/sched.h>' $FILE
+       grep -q "linux/sched/task.h" $FILE || sed -i '1i #include <linux/sched/task.h>' $FILE
+
+       echo "KernelSU compatibility patch applied."
 
         # Remove dirty tag
         sed -i 's/ -dirty//g' scripts/setlocalversion
@@ -99,6 +113,7 @@ jobs:
         # Generate version
         RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+        
 
     - name: Backup original files
       run: |
