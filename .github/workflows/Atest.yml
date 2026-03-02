@@ -135,22 +135,17 @@ jobs:
 
        FILE="drivers/kernelsu/allowlist.c"
 
-       echo "---- Applying 4.19 compatibility fixes ----"
+       echo "---- Fixing task_work API for 4.19 CAF ----"
 
-       # 1️⃣ Replace TWA_RESUME → TWA_SIGNAL
-       sed -i 's/TWA_RESUME/TWA_SIGNAL/g' $FILE
+       # Replace any TWA_* usage with true
+       sed -i 's/task_work_add(\(.*\), \(.*\), .*))/task_work_add(\1, \2, true))/g' $FILE
 
-       # 2️⃣ Ensure sched header exists
+       # Ensure proper include
        if ! grep -q "sched/task.h" $FILE; then
-          sed -i '1i #include <linux/sched/task.h>' $FILE
+         sed -i '1i #include <linux/sched/task.h>' $FILE
        fi
 
-       # 3️⃣ If put_task_struct not available, fallback
-       if ! grep -r "put_task_struct" include/linux >/dev/null; then
-          sed -i 's/put_task_struct/put_task_stack/g' $FILE
-       fi
-
-       echo "---- Fix Applied ----"
+       echo "---- CAF fix applied ----"
      
       
  
