@@ -99,33 +99,14 @@ jobs:
         
 
 
-    - name: Download SUSFS patch
-      run: |
-       cd kernel_workspace/android-kernel
-
-       echo "Downloading SUSFS patch..."
-       curl -L -o susfs2.0.patch \
-       https://github.com/sidex15/android_kernel_lge_sm8150/compare/bb2f164bc19795ef704f17c82f04885d44421418%5E..b69c8cff50ae4306153ab318bf84f9eb3d6d3f88.patch
-
-       echo "Patch size:"
-       ls -lh susfs2.0.patch
-
-       echo "Patch line count:"
-       wc -l susfs2.0.patch
-
-       echo "First 5 lines:"
-       head -5 susfs2.0.patch
-
-       echo "Last 5 lines:"
-       tail -5 susfs2.0.patch
-
+    
     - name: Apply SUSFS patch
       run: |
        cd kernel_workspace/android-kernel
 
        echo "Applying patch..."
 
-       git apply --reject --whitespace=fix susfs2.0.patch
+       git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
  
     #- name: Apply susfs patch
     #  run: |
