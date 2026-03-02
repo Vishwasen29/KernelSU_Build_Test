@@ -65,6 +65,8 @@ jobs:
           https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel
           git rev-parse HEAD
+
+          cd android-kernel
           sed -n '1,200p' fs/namespace.c
 
           sed -n '1,200p' fs/Makefile
