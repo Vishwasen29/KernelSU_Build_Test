@@ -71,7 +71,7 @@ jobs:
 
         # KernelSU-RKSU
         
-        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-rksu-legacy
+        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-rksu-master
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
@@ -97,15 +97,7 @@ jobs:
         RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         
-
-    - name: Backup original files
-      run: |
-          mkdir -p backup_originals
-          cp -r kernel/KernelSU backup_originals/KernelSU 2>/dev/null || true
-          cp -r kernel/fs backup_originals/fs 2>/dev/null || true
-          cp -r kernel/include/linux backup_originals/include_linux 2>/dev/null || true
-          cp -rp kernel/kernelsu/allowlist.c backup_originals 2>/dev/null || true
-
+  
  
     - name: Apply susfs patch
       run: |
@@ -117,7 +109,7 @@ jobs:
 
        dos2unix susfs_fix.txt
 
-       bash susfs_fix.txt
+       # bash susfs_fix.txt
 
       #bash $GITHUB_WORKSPACE/patches/valid.sh .
        
