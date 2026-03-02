@@ -87,7 +87,7 @@ jobs:
 
         # KernelSU-RKSU
         
-        curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s susfs-rksu-master
+        curl -LSs https://raw.githubusercontent.com/sidex15/KernelSU-Next/legacy-susfs/kernel/setup.sh | bash -s legacy-susfs
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
@@ -110,7 +110,7 @@ jobs:
         sed -i 's/ -dirty//g' scripts/setlocalversion
 
         # Generate version
-        RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
+        RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         
 
@@ -122,7 +122,14 @@ jobs:
 
        echo "Applying patch..."
 
-       git apply --reject --whitespace=fix $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch
+       patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
+
+    - name: Apply susfs fixes
+      run: |
+       cd kernel_workspace/android-kernel
+       bash $GITHUB_WORKSPACE/patches/fix_rejects.sh
+     
+      
  
     #- name: Apply susfs patch
     #  run: |
