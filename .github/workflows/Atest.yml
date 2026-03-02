@@ -111,7 +111,7 @@ jobs:
       run: |
        cd kernel_workspace/android-kernel
        set -o pipefail
-       patch -p1 < $GITHUB_WORKSPACE/patches/susfs_patch_to_4.19.patch || true
+       patch -p1 < $GITHUB_WORKSPACE/patches/susfs2.0.patch || true
 
        cp -rp $GITHUB_WORKSPACE/patches/susfs_fix.txt .
 
