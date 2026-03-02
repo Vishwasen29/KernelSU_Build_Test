@@ -105,7 +105,7 @@ jobs:
        set -o pipefail
        git config --global user.email "you@example.com"
        git config --global user.name "Your Name"
-       git am $GITHUB_WORKSPACE/patches/susfs2.0.patch
+       git apply $GITHUB_WORKSPACE/patches/susfs2.0.patch
 
        cp -rp $GITHUB_WORKSPACE/patches/susfs_fix.txt .
 
