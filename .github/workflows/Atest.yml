@@ -114,7 +114,16 @@ jobs:
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         
 
+    - name: Fix KernelSU seccomp for 4.19 CAF
+      run: |
+        cd kernel_workspace/android-kernel
+        FILE="drivers/kernelsu/app_profile.c"
 
+        echo "---- Fixing seccomp API for 4.19 ----"
+
+        sed -i 's/atomic_set(&current->seccomp.filter_count, 0);/#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)\n    atomic_set(&current->seccomp.filter_count, 0);\n#endif/' $FILE
+
+        echo "---- Seccomp fix applied ----"
     
     - name: Apply SUSFS patch
       run: |
