@@ -64,6 +64,20 @@ jobs:
         git clone --depth=1 --recursive \
           https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
           -b ${{ env.Lineage_VERSION }} android-kernel
+          git rev-parse HEAD
+          sed -n '1,200p' fs/namespace.c
+
+          sed -n '1,200p' fs/Makefile
+
+          sed -n '/struct mount {/,/};/p' include/linux/mount.h
+
+          sed -n '1550,1700p' fs/proc/task_mmu.c
+          
+          sed -n '/struct mount {/,/};/p' include/linux/mount.h
+          
+          grep -n "mmap_sem" -n fs/proc/task_mmu.c
+          
+          
 
     - name: Setup KernelSU-Next + Baseband-guard
       run: |
