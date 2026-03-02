@@ -97,19 +97,47 @@ jobs:
         RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 30000)
         echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         
-  
- 
-    - name: Apply susfs patch
+
+
+    - name: Download SUSFS patch
       run: |
        cd kernel_workspace/android-kernel
-       set -o pipefail
-       git config --global user.email "you@example.com"
-       git config --global user.name "Your Name"
-       git apply $GITHUB_WORKSPACE/patches/susfs2.0.patch
 
-       cp -rp $GITHUB_WORKSPACE/patches/susfs_fix.txt .
+       echo "Downloading SUSFS patch..."
+       curl -L -o susfs2.0.patch \
+       https://github.com/sidex15/android_kernel_lge_sm8150/compare/bb2f164bc19795ef704f17c82f04885d44421418%5E..b69c8cff50ae4306153ab318bf84f9eb3d6d3f88.patch
 
-       dos2unix susfs_fix.txt
+       echo "Patch size:"
+       ls -lh susfs2.0.patch
+
+       echo "Patch line count:"
+       wc -l susfs2.0.patch
+
+       echo "First 5 lines:"
+       head -5 susfs2.0.patch
+
+       echo "Last 5 lines:"
+       tail -5 susfs2.0.patch
+
+    - name: Apply SUSFS patch
+      run: |
+       cd kernel_workspace/android-kernel
+
+       echo "Applying patch..."
+
+       git apply --reject --whitespace=fix susfs2.0.patch
+ 
+    #- name: Apply susfs patch
+    #  run: |
+     #  cd kernel_workspace/android-kernel
+      # set -o pipefail
+      # git config --global user.email "you@example.com"
+      # git config --global user.name "Your Name"
+       #git apply $GITHUB_WORKSPACE/patches/susfs2.0.patch
+
+       #cp -rp $GITHUB_WORKSPACE/patches/susfs_fix.txt .
+
+       #dos2unix susfs_fix.txt
 
        # bash susfs_fix.txt
 
