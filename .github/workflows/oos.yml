@@ -109,7 +109,7 @@ jobs:
 
         BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
         EX_CMD="LD=ld.lld LLVM=1"
-        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus-stock_debugfs.config"
 
         make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
         make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
