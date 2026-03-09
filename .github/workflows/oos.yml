@@ -61,8 +61,8 @@ jobs:
       run: |
         cd kernel_workspace
         git clone --depth=1 --recursive \
-          https://github.com/Vishwasen/android_kernel_oneplus_sm8250 \
-          -b ${{ env.Lineage_VERSION }} android-kernel
+          https://github.com/Vishwasen29/android_kernel_oneplus_sm8250 \
+          -b op8t android-kernel
 
     - name: Setup KernelSU-Next + Baseband-guard
       run: |
@@ -71,7 +71,7 @@ jobs:
         # KernelSU-Next
         curl -LSs \
           https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-          | bash -s legacy
+          | bash -s legacy_susfs
 
         # Baseband-guard
         wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
@@ -85,9 +85,9 @@ jobs:
           }' security/Kconfig
         fi
 
-        bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh  || true
+        #bash $GITHUB_WORKSPACE/patches/kernel-4.19_5.4-patch.sh  || true
         # Enable KernelSU manual hook
-        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        #echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
 
         # Remove dirty tag
         sed -i 's/ -dirty//g' scripts/setlocalversion
