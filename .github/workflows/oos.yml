@@ -65,7 +65,7 @@ jobs:
 
           curl -LSs \
             https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-            | bash -s legacy_susfs
+            | bash -s legacy
 
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
