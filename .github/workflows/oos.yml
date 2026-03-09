@@ -76,7 +76,7 @@ jobs:
 
           bash $GITHUB_WORKSPACE/patches/ksu_hook.sh  || true
           # Enable KernelSU manual hook
-          #echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
         
 
           # Create debugfs config fragment
