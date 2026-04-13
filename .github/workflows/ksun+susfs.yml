@@ -65,17 +65,15 @@ jobs:
             https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
             -b "${{ env.LINEAGE_VERSION }}" android-kernel
 
-      - name: Integrate KernelSU-Next legacy_susfs + manual hooks + SUSFS patch + TRY_UMOUNT
+      - name: Apply KernelSU-Next legacy_susfs fixes + SUSFS patch
         run: |
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          chmod +x "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250-v5.sh"
-          chmod +x "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks-v5.sh"
+          chmod +x "$GITHUB_WORKSPACE/patches/fix_ksunext_legacy_susfs_sm8250.sh"
 
-          bash "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250-v5.sh" \
+          bash "$GITHUB_WORKSPACE/patches/fix_ksunext_legacy_susfs_sm8250.sh" \
             . \
-            "$GITHUB_WORKSPACE/patches/susfix-419-lineage-sm8250-compat.patch" \
-            "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks-v5.sh"
+            "$GITHUB_WORKSPACE/patches/susfix-419-lineage-sm8250-compat.patch"
 
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
@@ -89,8 +87,12 @@ jobs:
 
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
-          RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
-          echo "RSKSUVER=$RSKSUVER" >> "$GITHUB_ENV"
+          if [ -d KernelSU-Next ]; then
+            RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+            echo "RSKSUVER=$RSKSUVER" >> "$GITHUB_ENV"
+          else
+            echo "RSKSUVER=30000" >> "$GITHUB_ENV"
+          fi
 
       - name: Save patch state and debug files
         if: always()
@@ -209,4 +211,3 @@ jobs:
         with:
           name: INFO-${{ matrix.ks }}
           path: ${{ github.workspace }}/kernel_workspace/build-info-${{ matrix.ks }}.txt
-          
