@@ -69,9 +69,9 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          chmod +x "$GITHUB_WORKSPACE/patches/fix_ksunext_legacy_susfs_sm8250.sh"
+          chmod +x "$GITHUB_WORKSPACE/patches/fix_ksunext_legacy_susfs_sm8250_v2.sh"
 
-          bash "$GITHUB_WORKSPACE/patches/fix_ksunext_legacy_susfs_sm8250.sh" \
+          bash "$GITHUB_WORKSPACE/patches/fix_ksunext_legacy_susfs_sm8250_v2.sh" \
             . \
             "$GITHUB_WORKSPACE/patches/susfix-419-lineage-sm8250-compat.patch"
 
@@ -211,3 +211,4 @@ jobs:
         with:
           name: INFO-${{ matrix.ks }}
           path: ${{ github.workspace }}/kernel_workspace/build-info-${{ matrix.ks }}.txt
+          
