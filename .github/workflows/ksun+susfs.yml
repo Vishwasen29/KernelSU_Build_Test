@@ -69,13 +69,13 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          chmod +x "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250-v4.sh"
-          chmod +x "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks-v4.sh"
+          chmod +x "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250-v5.sh"
+          chmod +x "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks-v5.sh"
 
-          bash "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250-v4.sh" \
+          bash "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250-v5.sh" \
             . \
             "$GITHUB_WORKSPACE/patches/susfix-419-lineage-sm8250-compat.patch" \
-            "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks-v4.sh"
+            "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks-v5.sh"
 
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
@@ -209,3 +209,4 @@ jobs:
         with:
           name: INFO-${{ matrix.ks }}
           path: ${{ github.workspace }}/kernel_workspace/build-info-${{ matrix.ks }}.txt
+          
