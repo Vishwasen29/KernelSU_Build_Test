@@ -1,4 +1,4 @@
-name: A latest KSUN+SUSFS Build LineageOS OPlus SM8250 Kernel
+name: A New KSUN+SUSFS Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 env:
   TZ: Asia/Shanghai
   CLANG_VERSION: clang-r547379
-  Lineage_VERSION: lineage-23.2
+  LINEAGE_VERSION: lineage-23.2
 
 jobs:
   build:
@@ -37,9 +37,10 @@ jobs:
             git ccache automake flex lzop bison gperf build-essential \
             zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool \
             make squashfs-tools dpkg-dev libssl-dev python3 bc \
-            libc6-dev-i386 libncurses5-dev wget dos2unix rsync
+            libc6-dev-i386 libncurses5-dev wget dos2unix rsync unzip
 
           mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
+          mkdir -p "$GITHUB_WORKSPACE/patch_artifacts"
 
       - name: Cache Clang toolchain
         id: cache-clang
@@ -62,19 +63,19 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           git clone --depth=1 --recursive \
             https://github.com/LineageOS/android_kernel_oneplus_sm8250 \
-            -b "${{ env.Lineage_VERSION }}" android-kernel
+            -b "${{ env.LINEAGE_VERSION }}" android-kernel
 
-      - name: Integrate KernelSU-Next legacy_susfs + manual hooks + SUSFS patch
+      - name: Integrate KernelSU-Next legacy_susfs + manual hooks + SUSFS patch + TRY_UMOUNT
         run: |
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
 
-          chmod +x "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250.sh"
-          chmod +x "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks.sh"
+          chmod +x "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250-v4.sh"
+          chmod +x "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks-v4.sh"
 
-          bash "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250-v2.sh" \
-          . \
-          "$GITHUB_WORKSPACE/patches/susfix-419-lineage-sm8250-compat.patch" \
-          "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks-v2.sh"
+          bash "$GITHUB_WORKSPACE/patches/apply_ksunext_legacy_susfs_sm8250-v4.sh" \
+            . \
+            "$GITHUB_WORKSPACE/patches/susfix-419-lineage-sm8250-compat.patch" \
+            "$GITHUB_WORKSPACE/patches/kernel-4.19-kernelsu-next-legacy-hooks-v4.sh"
 
           wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
 
@@ -94,9 +95,7 @@ jobs:
       - name: Save patch state and debug files
         if: always()
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/patch_artifacts"
           cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
-
           git diff --stat > "$GITHUB_WORKSPACE/patch_artifacts/patch_diffstat.txt" || true
           git diff > "$GITHUB_WORKSPACE/patch_artifacts/patch_full.diff" || true
           find . \( -name "*.rej" -o -name "*.orig" \) -exec cp --parents {} "$GITHUB_WORKSPACE/patch_artifacts/" \; || true
@@ -127,18 +126,16 @@ jobs:
             -d KSU_KPROBES_HOOK \
             -d KPROBES \
             -e KSU_SUSFS \
-            -e KSU_SUSFS_HAS_MAGIC_MOUNT \
             -e KSU_SUSFS_SUS_PATH \
             -e KSU_SUSFS_SUS_MOUNT \
             -e KSU_SUSFS_SUS_KSTAT \
-            -e KSU_SUSFS_SUS_OVERLAYFS \
             -e KSU_SUSFS_TRY_UMOUNT \
             -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_ENABLE_LOG \
+            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
             -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
             -e KSU_SUSFS_OPEN_REDIRECT \
-            -e KSU_SUSFS_SUS_MAP \
-            -e KSU_SUSFS_ENABLE_LOG \
-            -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+            -e KSU_SUSFS_SUS_MAP
 
           yes "" | make O=out CC=clang $BA_CMD $EX_CMD olddefconfig
 
@@ -168,7 +165,7 @@ jobs:
             echo "CHECK_IMAGE=true" >> "$GITHUB_ENV"
             echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> "$GITHUB_ENV"
           else
-            echo "Kernel output file is empty"
+            echo "Kernel output file is missing"
             exit 1
           fi
 
@@ -183,7 +180,7 @@ jobs:
           cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
 
           cd AnyKernel3
-          zip -r "AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_${{ env.RSKSUVER }}.zip" ./*
+          zip -r "AK3-${{ env.LINEAGE_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_${{ env.RSKSUVER }}.zip" ./*
 
       - name: Upload Image artifact
         if: env.CHECK_IMAGE == 'true'
@@ -196,7 +193,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AK3-${{ matrix.ks }}
-          path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_${{ env.RSKSUVER }}.zip
+          path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.LINEAGE_VERSION }}-OPlus-SM8250-${{ matrix.ks }}_KSU_${{ env.RSKSUVER }}.zip
 
       - name: Save build info
         run: |
