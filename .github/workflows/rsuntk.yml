@@ -62,11 +62,33 @@ jobs:
           curl -LSs https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh | bash -s main
           bash $GITHUB_WORKSPACE/patches/kernel-4.19-patch.sh || true
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+          # Baseband-guard
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+
+        # Fix LSM ordering safely
+        if grep -q "config LSM" security/Kconfig; then
+          sed -i '/^config LSM$/,/^help$/ {
+            /^[[:space:]]*default/ {
+              /baseband_guard/! s/selinux/selinux,baseband_guard/
+            }
+          }' security/Kconfig
+        fi
           RSKSUVER=$(cd KernelSU && expr $(git rev-list --count HEAD) + 29971)
           echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
         else
           curl -LSs https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh | bash -s master
           echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+          # Baseband-guard
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+
+        # Fix LSM ordering safely
+        if grep -q "config LSM" security/Kconfig; then
+          sed -i '/^config LSM$/,/^help$/ {
+            /^[[:space:]]*default/ {
+              /baseband_guard/! s/selinux/selinux,baseband_guard/
+            }
+          }' security/Kconfig
+        fi
           XXKSUVER=$(grep -oP 'KSU_VERSION\s*=\s*\K\d+' KernelSU/kernel/Makefile | tail -n1)
           echo "XXKSUVER=$XXKSUVER" >> $GITHUB_ENV
         fi
