@@ -61,7 +61,7 @@ jobs:
       run: |
         cd kernel_workspace
         git clone --depth=1 --recursive \
-          https://github.com/spidey-t/kernel_oneplus_sm8250.git \
+           https://github.com/LineageOS/android_kernel_oneplus_sm8250.git \
           -b ${{ env.Lineage_VERSION }} android-kernel
 
     - name: Setup KernelSU-Next + Baseband-guard
