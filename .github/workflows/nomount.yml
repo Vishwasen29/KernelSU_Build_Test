@@ -1,4 +1,4 @@
-name: KSUN + No Mount Build LineageOS OPlus SM8250 Kernel
+name: KSUN + no mount Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
@@ -88,32 +88,40 @@ jobs:
         bash $GITHUB_WORKSPACE/patches/kernel-4.19-patch.sh  || true
 
         # ── NoMount Integration ────────────────────────────────────────────────
-        # Clone NoMount repository
-        git clone --depth=1 https://github.com/maxsteeel/nomount.git \
-          $GITHUB_WORKSPACE/kernel_workspace/nomount
-
         NOMOUNT_DIR="$GITHUB_WORKSPACE/kernel_workspace/nomount"
 
-        # Apply the 4.19 kernel integration patch
-        # Use --fuzz=10 for tolerance against minor context differences in the
-        # LineageOS 4.19-based SM8250 kernel vs upstream 4.19
-        echo "[NoMount] Applying kernel integration patch for 4.19..."
-        patch -p1 --fuzz=10 \
-          < "${NOMOUNT_DIR}/patches/nomount_4.19_kernel_integration.patch" \
-          || {
-            echo "[NoMount] Patch apply failed or partially applied — check .rej files:"
-            find . -name "*.rej" | head -20
-            echo "[NoMount] Attempting to continue — manual review may be needed."
-          }
+        git clone --depth=1 https://github.com/maxsteeel/nomount.git "$NOMOUNT_DIR"
 
-        # Copy NoMount source files into fs/ subsystem
+        # Show actual repo layout so path issues are immediately visible in logs
+        echo "[NoMount] Repo contents:"
+        find "$NOMOUNT_DIR" -not -path '*/.git/*' | sort
+
+        # Kernel files live under kernel/ inside the repo
+        NOMOUNT_KERNEL_DIR="$NOMOUNT_DIR/kernel"
+
+        # Locate the 4.19 patch — filename may vary (nomount_4.19_*.patch)
+        PATCH_FILE=$(find "$NOMOUNT_KERNEL_DIR" -maxdepth 2 -name "*4.19*.patch" | head -1)
+
+        if [ -z "$PATCH_FILE" ]; then
+          echo "[NoMount] ERROR: No 4.19 patch file found under $NOMOUNT_KERNEL_DIR"
+          echo "[NoMount] Available patch files:"
+          find "$NOMOUNT_KERNEL_DIR" -name "*.patch" | sort
+          exit 1
+        fi
+
+        echo "[NoMount] Applying patch: $PATCH_FILE"
+        patch -p1 --fuzz=10 < "$PATCH_FILE" || {
+          echo "[NoMount] Patch failed — listing .rej files:"
+          find . -name "*.rej" | head -20
+          exit 1
+        }
+
+        # Copy NoMount source files (nomount.c, nomount.h) into kernel fs/
         echo "[NoMount] Copying source files to fs/..."
-        cp "${NOMOUNT_DIR}/src/"* fs/
+        cp "$NOMOUNT_KERNEL_DIR/src/"* fs/
 
-        # Verify the files landed correctly
-        echo "[NoMount] Installed files:"
-        ls -la fs/nomount.c fs/nomount.h 2>/dev/null || \
-          echo "[NoMount] WARNING: nomount.c/h not found in fs/ — check src/ contents"
+        echo "[NoMount] Installed files in fs/:"
+        ls -la fs/nomount.* 2>/dev/null || echo "[NoMount] WARNING: nomount files not found in fs/"
         # ── End NoMount Integration ────────────────────────────────────────────
 
         # Enable KernelSU manual hook
