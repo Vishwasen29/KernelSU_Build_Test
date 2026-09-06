@@ -1,4 +1,4 @@
-name: Singularity SUSFS + KSU-Next Build LineageOS OPlus SM8250 Kernel
+name: 1 Singularity SUSFS + KSU-Next Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
