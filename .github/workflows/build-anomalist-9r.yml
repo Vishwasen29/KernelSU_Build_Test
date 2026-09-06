@@ -1,0 +1,254 @@
+name: KSUN (legacy) + SUSFS + no mount Build Anomalist (Singularity) SM8250 Kernel [OnePlus 9R]
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  # This is now an Anomalist branch, not a LineageOS tag.
+  KERNEL_REPO: https://github.com/The-Anomalist/Singularity.git
+  KERNEL_BRANCH: event-horizon
+  # Device this Image is intended for. 9R = "lemonades" (SM8250-AC/SD870),
+  # which shares the kebab (8T) kernel tree/defconfig on SM8250.
+  TARGET_DEVICE: lemonades
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ks: [rsuntk]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    - name: Setup build environment
+      run: |
+        echo "BUILD_TIME=$(date +%y%m%d)" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(date +%Y-%m-%d)" >> $GITHUB_ENV
+
+        sudo apt-get update
+        sudo apt-get install -y \
+          git ccache automake flex lzop bison gperf build-essential \
+          zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool \
+          make squashfs-tools dpkg-dev libssl-dev python3 bc \
+          libc6-dev-i386 libncurses5-dev wget
+
+        mkdir -p kernel_workspace
+
+    - name: Cache Clang toolchain
+      id: cache-clang
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ env.CLANG_VERSION }}
+
+    - name: Download Clang (if cache miss)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd kernel_workspace
+        mkdir clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -xf ${CLANG_VERSION}.tar.gz -C clang-aosp
+
+    - name: Clone Anomalist kernel source (event-horizon)
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 --recursive \
+          "${{ env.KERNEL_REPO }}" \
+          -b "${{ env.KERNEL_BRANCH }}" android-kernel
+
+        # Sanity check: confirm the kebab/lemonades defconfig paths this
+        # workflow relies on still exist in Anomalist's tree before we
+        # spend build time on a config that isn't there.
+        test -f android-kernel/arch/arm64/configs/vendor/kona-perf_defconfig
+        test -f android-kernel/arch/arm64/configs/vendor/oplus.config
+
+    - name: Setup KernelSU-Next (legacy) + SUSFS + Baseband-guard + NoMount
+      run: |
+        cd kernel_workspace/android-kernel
+
+        # KernelSU-Next — legacy/manual-hook mode. This kernel (4.19,
+        # non-GKI) doesn't support newer KernelSU-Next's syscall-table
+        # hooking, so it has to be wired up in legacy mode.
+        curl -LSs \
+          https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+          | bash -s legacy
+
+        # ── SUSFS Integration ────────────────────────────────────────────
+        # Original susfs4ksu project (simonpunk), which ships a patch file
+        # specifically for kernel 4.19 in the same repo (no separate branch
+        # needed).
+        SUSFS_DIR="$GITHUB_WORKSPACE/kernel_workspace/susfs4ksu"
+        git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git "$SUSFS_DIR"
+
+        cp "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" KernelSU-Next/
+        cp "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.19.patch" .
+        cp "$SUSFS_DIR"/kernel_patches/fs/* fs/
+        cp "$SUSFS_DIR"/kernel_patches/include/linux/* include/linux/
+
+        (cd KernelSU-Next && patch -p1 --fuzz=10 < 10_enable_susfs_for_ksu.patch) || {
+          echo "[SUSFS] KernelSU-Next patch failed — check .rej files"; }
+        patch -p1 --fuzz=10 < 50_add_susfs_in_kernel-4.19.patch || {
+          echo "[SUSFS] kernel patch failed — check .rej files"; find . -name "*.rej"; }
+
+        echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        # We're already using manual/non-kprobe hooks (CONFIG_KSU_MANUAL_HOOK),
+        # so per susfs4ksu's own instructions, SUS_SU must be disabled to
+        # avoid conflicting with the manual hook.
+        echo "# CONFIG_KSU_SUSFS_SUS_SU is not set" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        # ── End SUSFS Integration ────────────────────────────────────────
+
+        # Baseband-guard
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+
+        # Fix LSM ordering safely
+        if grep -q "config LSM" security/Kconfig; then
+          sed -i '/^config LSM$/,/^help$/ {
+            /^[[:space:]]*default/ {
+              /baseband_guard/! s/selinux/selinux,baseband_guard/
+            }
+          }' security/Kconfig
+        fi
+
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19-patch.sh  || true
+
+        # ── NoMount Integration ────────────────────────────────────────────────
+        NOMOUNT_DIR="$GITHUB_WORKSPACE/kernel_workspace/nomount"
+
+        git clone --depth=1 https://github.com/maxsteeel/nomount.git "$NOMOUNT_DIR"
+
+        # Show actual repo layout so path issues are immediately visible in logs
+        echo "[NoMount] Repo contents:"
+        find "$NOMOUNT_DIR" -not -path '*/.git/*' | sort
+
+        # Kernel files live under kernel/ inside the repo
+        NOMOUNT_KERNEL_DIR="$NOMOUNT_DIR/kernel"
+
+        # Locate the 4.19 patch — filename may vary (nomount_4.19_*.patch)
+        PATCH_FILE=$(find "$NOMOUNT_KERNEL_DIR" -maxdepth 2 -name "*4.19*.patch" | head -1)
+
+        if [ -z "$PATCH_FILE" ]; then
+          echo "[NoMount] ERROR: No 4.19 patch file found under $NOMOUNT_KERNEL_DIR"
+          echo "[NoMount] Available patch files:"
+          find "$NOMOUNT_KERNEL_DIR" -name "*.patch" | sort
+          exit 1
+        fi
+
+        echo "[NoMount] Applying patch: $PATCH_FILE"
+        patch -p1 --fuzz=10 < "$PATCH_FILE" || {
+          echo "[NoMount] Patch failed — listing .rej files:"
+          find . -name "*.rej" | head -20
+          exit 1
+        }
+
+        # Copy NoMount source files (nomount.c, nomount.h) into kernel fs/
+        echo "[NoMount] Copying source files to fs/..."
+        cp "$NOMOUNT_KERNEL_DIR/src/"* fs/
+
+        echo "[NoMount] Installed files in fs/:"
+        ls -la fs/nomount.* 2>/dev/null || echo "[NoMount] WARNING: nomount files not found in fs/"
+        # ── End NoMount Integration ────────────────────────────────────────────
+
+        # Enable KernelSU manual hook
+        echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        # Enable NoMount subsystem
+        echo "CONFIG_NOMOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+        # Remove dirty tag
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
+        # Generate version
+        RSKSUVER=$(cd KernelSU-Next && expr $(git rev-list --count HEAD) + 30000)
+        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+
+    - name: Build kernel
+      run: |
+        cd kernel_workspace/android-kernel
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
+
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+
+    - name: Verify kernel output
+      run: |
+        cd kernel_workspace/android-kernel/out
+
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+        else
+          echo "Kernel output file is empty"
+          exit 1
+        fi
+
+    - name: Prepare AnyKernel3 and package
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+
+        cd AnyKernel3
+        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+          zip -r AK3-Anomalist-${{ env.KERNEL_BRANCH }}-OnePlus9R-SM8250-rsuntk_KSU_${{ env.RSKSUVER }}.zip ./*
+        else
+          zip -r AK3-Anomalist-${{ env.KERNEL_BRANCH }}-OnePlus9R-SM8250-backslashxx_KSU_${{ env.XXKSUVER }}.zip ./*
+        fi
+
+    - name: Upload Image artifact
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v6
+      with:
+        name: Image-${{ matrix.ks }}
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3 ZIP
+      uses: actions/upload-artifact@v6
+      with:
+        name: AK3-${{ matrix.ks }}
+        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-Anomalist-*-OnePlus9R-SM8250-${{ matrix.ks }}_KSU_*.zip
+
+    - name: Save build info
+      run: |
+        cd kernel_workspace
+        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+          {
+            echo "RSKSUVER=${{ env.RSKSUVER }}"
+            echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+            echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          } > build-info-${{ matrix.ks }}.txt
+        else
+          {
+            echo "XXKSUVER=${{ env.XXKSUVER }}"
+          } > build-info-${{ matrix.ks }}.txt
+        fi
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v6
+      with:
+        name: INFO-${{ matrix.ks }}
+        path: kernel_workspace/build-info-${{ matrix.ks }}.txt
