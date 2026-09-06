@@ -1,0 +1,761 @@
+name: OnePlus 9R LineageOS + Singularity Performance Kernel
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+
+  # ---------------------------------------------------------
+  # Base kernel
+  # ---------------------------------------------------------
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-23.2
+
+  KERNEL_REPO: https://github.com/LineageOS/android_kernel_oneplus_sm8250.git
+
+  # ---------------------------------------------------------
+  # Singularity
+  # ---------------------------------------------------------
+  SINGULARITY_REPO: https://github.com/The-Anomalist/Singularity.git
+  SINGULARITY_BRANCH: main
+
+  # ---------------------------------------------------------
+  # Device
+  # ---------------------------------------------------------
+  DEVICE: oneplus9r
+  PLATFORM: kona
+
+jobs:
+
+  build:
+    name: Build 9R Singularity Kernel (${{ matrix.ks }})
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+
+      matrix:
+        ks:
+          - rsuntk
+          - backslashxx
+
+    steps:
+
+    # ========================================================
+    # Checkout workflow repository
+    # ========================================================
+
+    - name: Checkout workflow
+      uses: actions/checkout@v6
+
+
+    # ========================================================
+    # Swap
+    # ========================================================
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+
+    # ========================================================
+    # Build dependencies
+    # ========================================================
+
+    - name: Setup build environment
+      run: |
+
+        echo "BUILD_TIME=$(TZ=Asia/Shanghai date '+%y%m%d')" >> "$GITHUB_ENV"
+        echo "BUILD_TIME_1=$(TZ=Asia/Shanghai date '+%Y-%m-%d')" >> "$GITHUB_ENV"
+
+        sudo apt-get update
+
+        sudo apt-get install -y \
+          git \
+          git-lfs \
+          ccache \
+          automake \
+          autoconf \
+          flex \
+          lzop \
+          bison \
+          gperf \
+          build-essential \
+          zip \
+          unzip \
+          curl \
+          wget \
+          zlib1g-dev \
+          g++-multilib \
+          bzip2 \
+          libbz2-dev \
+          liblz4-tool \
+          make \
+          squashfs-tools \
+          dpkg-dev \
+          libssl-dev \
+          python3 \
+          python3-pip \
+          bc \
+          libc6-dev-i386 \
+          libncurses5-dev \
+          libelf-dev \
+          dwarves
+
+        mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
+
+
+    # ========================================================
+    # Clang cache
+    # ========================================================
+
+    - name: Cache Clang
+      id: cache-clang
+      uses: actions/cache@v5
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ runner.os }}-${{ env.CLANG_VERSION }}
+
+
+    # ========================================================
+    # Download Clang
+    # ========================================================
+
+    - name: Download Clang
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+        mkdir -p clang-aosp
+
+        wget -O "${CLANG_VERSION}.tar.gz" \
+          "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz"
+
+        tar \
+          -C clang-aosp \
+          -zxvf "${CLANG_VERSION}.tar.gz"
+
+
+    # ========================================================
+    # Clone LineageOS SM8250 kernel
+    # ========================================================
+
+    - name: Clone OnePlus SM8250 kernel
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+        git clone \
+          --recursive \
+          --depth=1 \
+          --branch "$Lineage_VERSION" \
+          "$KERNEL_REPO" \
+          android-kernel
+
+        cd android-kernel
+
+        echo "=========================================="
+        echo "LINEAGE BASE"
+        echo "=========================================="
+
+        git rev-parse HEAD
+
+        git log -1 --oneline
+
+
+    # ========================================================
+    # Fetch Singularity
+    # ========================================================
+
+    - name: Fetch Singularity
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        git remote add singularity "$SINGULARITY_REPO"
+
+        # Fetch enough history to identify the common
+        # Lineage/SM8250 ancestry and Singularity changes.
+        git fetch \
+          --no-tags \
+          --depth=5000 \
+          singularity "$SINGULARITY_BRANCH"
+
+        echo "=========================================="
+        echo "SINGULARITY"
+        echo "=========================================="
+
+        git rev-parse "singularity/$SINGULARITY_BRANCH"
+
+        git log \
+          -1 \
+          --oneline \
+          "singularity/$SINGULARITY_BRANCH"
+
+
+    # ========================================================
+    # Analyze Singularity changes
+    #
+    # We DO NOT merge Singularity wholesale.
+    #
+    # Allowed:
+    #   drivers/
+    #   kernel/
+    #   mm/
+    #   fs/
+    #   net/
+    #   block/
+    #   include/
+    #   lib/
+    #   init/
+    #
+    # Explicitly excluded:
+    #   arch/arm64/boot/dts/
+    #   arch/arm64/boot/dts/vendor/
+    #   device-specific DTS
+    #   vendor device trees
+    #
+    # This keeps the 9R hardware configuration intact.
+    # ========================================================
+
+    - name: Generate Singularity performance patch
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        mkdir -p "$GITHUB_WORKSPACE/kernel_workspace/singularity-patches"
+
+        MERGE_BASE=$(git merge-base \
+          HEAD \
+          "singularity/$SINGULARITY_BRANCH")
+
+        echo "MERGE_BASE=$MERGE_BASE"
+
+        echo "$MERGE_BASE" \
+          > "$GITHUB_WORKSPACE/kernel_workspace/singularity-patches/merge-base.txt"
+
+
+        echo "=========================================="
+        echo "SINGULARITY COMMITS"
+        echo "=========================================="
+
+        git log \
+          --oneline \
+          --no-merges \
+          "$MERGE_BASE..singularity/$SINGULARITY_BRANCH" \
+          > "$GITHUB_WORKSPACE/kernel_workspace/singularity-patches/all-commits.txt"
+
+
+        cat \
+          "$GITHUB_WORKSPACE/kernel_workspace/singularity-patches/all-commits.txt"
+
+
+        # ----------------------------------------------------
+        # Create temporary Singularity tree.
+        #
+        # This gives us a clean representation of the
+        # Singularity source without changing the 9R base.
+        # ----------------------------------------------------
+
+        rm -rf "$GITHUB_WORKSPACE/kernel_workspace/singularity-tree"
+
+        git worktree add \
+          --detach \
+          "$GITHUB_WORKSPACE/kernel_workspace/singularity-tree" \
+          "singularity/$SINGULARITY_BRANCH"
+
+
+        # ----------------------------------------------------
+        # Generate the complete diff first.
+        # ----------------------------------------------------
+
+        git diff \
+          "$MERGE_BASE" \
+          "singularity/$SINGULARITY_BRANCH" \
+          -- \
+          ':!arch/arm64/boot/dts/**' \
+          ':!arch/arm64/boot/dts' \
+          ':!arch/arm64/configs/**' \
+          ':!arch/arm64/configs' \
+          ':!Documentation/**' \
+          ':!docs/**' \
+          > "$GITHUB_WORKSPACE/kernel_workspace/singularity-patches/singularity-performance.patch"
+
+
+        echo "=========================================="
+        echo "PATCH STAT"
+        echo "=========================================="
+
+        wc -l \
+          "$GITHUB_WORKSPACE/kernel_workspace/singularity-patches/singularity-performance.patch"
+
+        git diff \
+          --stat \
+          "$MERGE_BASE" \
+          "singularity/$SINGULARITY_BRANCH" \
+          -- \
+          ':!arch/arm64/boot/dts/**' \
+          ':!arch/arm64/configs/**' \
+          ':!Documentation/**' \
+          ':!docs/**'
+
+
+    # ========================================================
+    # Filter dangerous/device-specific Singularity files
+    # ========================================================
+
+    - name: Filter Singularity patch
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+        PATCH="singularity-patches/singularity-performance.patch"
+
+        if [ ! -s "$PATCH" ]; then
+          echo "ERROR: Singularity patch is empty."
+          exit 1
+        fi
+
+
+        echo "=========================================="
+        echo "FILTERING DEVICE-SPECIFIC CHANGES"
+        echo "=========================================="
+
+
+        # ----------------------------------------------------
+        # Remove any accidental device tree hunks.
+        # ----------------------------------------------------
+
+        sed -i \
+          '/^diff --git .*arch\/arm64\/boot\/dts\//,/^diff --git /{/^diff --git /!d}' \
+          "$PATCH" || true
+
+
+        # ----------------------------------------------------
+        # Show patch files.
+        # ----------------------------------------------------
+
+        grep '^diff --git' "$PATCH" \
+          | sed 's/^diff --git a\///;s/ b\/.*$//' \
+          | sort -u \
+          > singularity-patches/changed-files.txt
+
+
+        echo "=========================================="
+        echo "FILES BEING PORTED"
+        echo "=========================================="
+
+        cat singularity-patches/changed-files.txt
+
+
+        # ----------------------------------------------------
+        # Hard safety check.
+        #
+        # Do NOT allow device tree/config changes into the
+        # OnePlus 9R base.
+        # ----------------------------------------------------
+
+        if grep -E \
+          '(^|/)(dts|dts/vendor|kona.*\.dts|kona.*\.dtsi)' \
+          singularity-patches/changed-files.txt; then
+
+          echo ""
+          echo "ERROR: Device-tree change detected."
+          echo "The patch must be reviewed before continuing."
+          exit 1
+
+        fi
+
+
+    # ========================================================
+    # Apply Singularity generic performance changes
+    # ========================================================
+
+    - name: Apply Singularity performance changes
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        PATCH="$GITHUB_WORKSPACE/kernel_workspace/singularity-patches/singularity-performance.patch"
+
+        echo "=========================================="
+        echo "Applying Singularity performance layer"
+        echo "=========================================="
+
+
+        git apply \
+          --3way \
+          --whitespace=fix \
+          "$PATCH"
+
+
+        echo "=========================================="
+        echo "Singularity changes applied"
+        echo "=========================================="
+
+        git status --short
+
+
+    # ========================================================
+    # Inspect ICC / scheduler / GPU / memory changes
+    # ========================================================
+
+    - name: Verify Singularity performance layer
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        echo "=========================================="
+        echo "INTERCONNECT"
+        echo "=========================================="
+
+        find drivers/interconnect \
+          -type f \
+          2>/dev/null \
+          | head -100 || true
+
+
+        echo ""
+        echo "=========================================="
+        echo "DEVFREQ"
+        echo "=========================================="
+
+        find drivers/devfreq \
+          -type f \
+          2>/dev/null \
+          | head -100 || true
+
+
+        echo ""
+        echo "=========================================="
+        echo "CPUFREQ"
+        echo "=========================================="
+
+        find drivers/cpufreq \
+          -type f \
+          2>/dev/null \
+          | head -100 || true
+
+
+        echo ""
+        echo "=========================================="
+        echo "ADRENO"
+        echo "=========================================="
+
+        find drivers/gpu \
+          -type f \
+          2>/dev/null \
+          | grep -Ei \
+          'adreno|kgsl|a6|a650' \
+          | head -100 || true
+
+
+        echo ""
+        echo "=========================================="
+        echo "SCHEDULER"
+        echo "=========================================="
+
+        git diff \
+          --stat \
+          -- kernel/
+
+
+        echo ""
+        echo "=========================================="
+        echo "MEMORY"
+        echo "=========================================="
+
+        git diff \
+          --stat \
+          -- mm/
+
+
+        echo ""
+        echo "=========================================="
+        echo "FINAL CHANGES"
+        echo "=========================================="
+
+        git diff --stat
+
+
+    # ========================================================
+    # KernelSU
+    # ========================================================
+
+    - name: Set up KernelSU (${{ matrix.ks }})
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        if [ "${{ matrix.ks }}" = "rsuntk" ]; then
+
+          echo "Installing rsuntk KernelSU"
+
+          curl -LSs \
+            https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh \
+            | bash -s main
+
+
+          if [ -f "$GITHUB_WORKSPACE/patches/kernel-4.19-patch.sh" ]; then
+
+            bash \
+              "$GITHUB_WORKSPACE/patches/kernel-4.19-patch.sh" \
+              || true
+
+          fi
+
+
+          if ! grep -q \
+            '^CONFIG_KSU_MANUAL_HOOK=' \
+            arch/arm64/configs/vendor/kona-perf_defconfig; then
+
+            echo "CONFIG_KSU_MANUAL_HOOK=y" \
+              >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+          fi
+
+
+          RSKSUVER=$(cd KernelSU && \
+            expr "$(git rev-list --count HEAD)" + 29971)
+
+          echo "RSKSUVER=$RSKSUVER" >> "$GITHUB_ENV"
+
+
+        else
+
+          echo "Installing backslashxx KernelSU"
+
+          curl -LSs \
+            https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh \
+            | bash -s master
+
+
+          if ! grep -q \
+            '^CONFIG_KSU_TAMPER_SYSCALL_TABLE=' \
+            arch/arm64/configs/vendor/kona-perf_defconfig; then
+
+            echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" \
+              >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+          fi
+
+
+          XXKSUVER=$(grep -oP \
+            'KSU_VERSION\s*=\s*\K\d+' \
+            KernelSU/kernel/Makefile \
+            | tail -n1)
+
+
+          echo "XXKSUVER=$XXKSUVER" >> "$GITHUB_ENV"
+
+        fi
+
+
+    # ========================================================
+    # Baseband Guard
+    # ========================================================
+
+    - name: Install Baseband Guard
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        wget -O- \
+          https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh \
+          | bash
+
+
+        if grep -q "^config LSM" security/Kconfig; then
+
+          sed -i '/^config LSM$/,/^help$/ {
+            /^[[:space:]]*default/ {
+              /baseband_guard/! s/selinux/selinux,baseband_guard/
+            }
+          }' security/Kconfig
+
+        fi
+
+
+    # ========================================================
+    # Remove -dirty
+    # ========================================================
+
+    - name: Clean kernel version
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        sed -i \
+          's/ -dirty//g' \
+          scripts/setlocalversion
+
+
+    # ========================================================
+    # Configure
+    # ========================================================
+
+    - name: Configure OnePlus 9R kernel
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+
+        export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
+
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CROSS_COMPILE=aarch64-linux-android-
+
+        export KBUILD_BUILD_HOST=Github-Action
+
+        export KBUILD_BUILD_USER="$(
+          echo "${{ github.actor }}" | tr 'A-Z' 'a-z'
+        )"
+
+
+        echo "=========================================="
+        echo "Generating 9R configuration"
+        echo "=========================================="
+
+
+        make \
+          O=out \
+          CC=clang \
+          LD=ld.lld \
+          LLVM=1 \
+          CLANG_TRIPLE="$CLANG_TRIPLE" \
+          vendor/kona-perf_defconfig
+
+
+        make \
+          O=out \
+          CC=clang \
+          LD=ld.lld \
+          LLVM=1 \
+          CLANG_TRIPLE="$CLANG_TRIPLE" \
+          oplus.config
+
+
+        # Reconcile all Kconfig dependencies.
+        make \
+          O=out \
+          CC=clang \
+          LD=ld.lld \
+          LLVM=1 \
+          CLANG_TRIPLE="$CLANG_TRIPLE" \
+          olddefconfig
+
+
+        echo ""
+        echo "=========================================="
+        echo "IMPORTANT CONFIG"
+        echo "=========================================="
+
+        grep -E \
+          'CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KSU_TAMPER|CONFIG_INTERCONNECT|CONFIG_QCOM_ICC|CONFIG_MSM_BUS|CONFIG_CPU_FREQ|CONFIG_DEVFREQ' \
+          out/.config \
+          || true
+
+
+    # ========================================================
+    # Build
+    # ========================================================
+
+    - name: Build kernel
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+
+        export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH"
+
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CROSS_COMPILE=aarch64-linux-android-
+
+        export KBUILD_BUILD_HOST=Github-Action
+
+        export KBUILD_BUILD_USER="$(
+          echo "${{ github.actor }}" | tr 'A-Z' 'a-z'
+        )"
+
+
+        echo "=========================================="
+        echo "BUILDING"
+        echo "=========================================="
+
+        echo "Device:       $DEVICE"
+        echo "Platform:     $PLATFORM"
+        echo "Lineage:      $Lineage_VERSION"
+        echo "Singularity:  enabled"
+        echo "KernelSU:     ${{ matrix.ks }}"
+
+
+        make \
+          -j"$(nproc --all)" \
+          O=out \
+          CC=clang \
+          LD=ld.lld \
+          LLVM=1 \
+          CLANG_TRIPLE="$CLANG_TRIPLE"
+
+
+    # ========================================================
+    # Verify Image
+    # ========================================================
+
+    - name: Check kernel output
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel/out"
+
+        if [ -s arch/arm64/boot/Image ]; then
+
+          echo "CHECK_IMAGE=true" >> "$GITHUB_ENV"
+
+          KERNEL_VERSION=$(
+            cat include/config/kernel.release
+          )
+
+          echo "KERNEL_VERSION=$KERNEL_VERSION" \
+            >> "$GITHUB_ENV"
+
+
+          echo "=========================================="
+          echo "BUILD SUCCESS"
+          echo "=========================================="
+
+          ls -lh \
+            arch/arm64/boot/Image
+
+          echo ""
+          echo "Kernel release:"
+          cat include/config/kernel.release
+
+        else
+
+          echo "ERROR: Image was not generated."
+          exit 1
+
+        fi
+
+
+    # ========================================================
+    # Collect build information
+    # ========================================================
+
+    - name: Save build information
+      run: |
+
+        cd "$GITHUB_WORKSPACE/kernel_workspace/android-kernel"
+
+        {
+
+          echo "=========================================="
+          echo "ONEPLUS
