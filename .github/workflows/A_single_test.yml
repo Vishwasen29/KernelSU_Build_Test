@@ -18,7 +18,7 @@ env:
   # Singularity
   # ---------------------------------------------------------
   SINGULARITY_REPO: https://github.com/The-Anomalist/Singularity.git
-  SINGULARITY_BRANCH: main
+  SINGULARITY_BRANCH: event-horizon
 
   # ---------------------------------------------------------
   # Device
