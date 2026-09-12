@@ -1,4 +1,4 @@
-name: Zues Kernel Build LineageOS OPlus SM8250 Kernel
+name: AAA Zues Kernel Build LineageOS OPlus SM8250 Kernel
 
 on:
   workflow_dispatch:
