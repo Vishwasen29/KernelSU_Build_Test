@@ -1,0 +1,362 @@
+name: Zues Kernel (KSU-Next fork + SUSFS only) Build LineageOS OPlus SM8250 Kernel
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly check — cheap "did anomalist move?" job decides if a real build runs.
+    - cron: '0 3 * * 1'
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-24.0
+  ANOMALIST_REPO: https://github.com/The-Anomalist/Singularity.git
+  ANOMALIST_BRANCH: event-horizon
+
+jobs:
+  check-upstream:
+    name: Check anomalist for updates
+    runs-on: ubuntu-22.04
+    outputs:
+      should_build: ${{ steps.gate.outputs.should_build }}
+      anomalist_sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Get latest event-horizon SHA
+        id: sha
+        run: |
+          SHA=$(git ls-remote "${ANOMALIST_REPO}" "refs/heads/${ANOMALIST_BRANCH}" | cut -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Latest ${ANOMALIST_BRANCH}: $SHA"
+
+      # Cache entry keyed on the SHA itself. Hit = we've already built this
+      # exact commit before, so a scheduled run can skip. A manual
+      # workflow_dispatch always builds regardless (see gate step below).
+      - name: Check if already built
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/anomalist-built-marker
+          key: anomalist-built-${{ steps.sha.outputs.sha }}
+          lookup-only: true
+
+      - name: Decide whether to build
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+            echo "No new commits on ${ANOMALIST_BRANCH} since last build — skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build Kernel
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ks: [zues]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    - name: Setup build environment
+      run: |
+        echo "BUILD_TIME=$(date +%y%m%d)" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(date +%Y-%m-%d)" >> $GITHUB_ENV
+
+        sudo apt-get update
+        sudo apt-get install -y \
+          git ccache automake flex lzop bison gperf build-essential \
+          zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool \
+          make squashfs-tools dpkg-dev libssl-dev python3 bc \
+          libc6-dev-i386 libncurses5-dev wget rsync
+
+        mkdir -p kernel_workspace
+
+    - name: Cache Clang toolchain
+      id: cache-clang
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ runner.os }}-clang-${{ env.CLANG_VERSION }}
+
+    - name: Download Clang (if cache miss)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd kernel_workspace
+        mkdir clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -xf ${CLANG_VERSION}.tar.gz -C clang-aosp
+
+    - name: Clone kernel source
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 \
+           https://github.com/LineageOS/android_kernel_oneplus_sm8250.git \
+          -b ${{ env.Lineage_VERSION }} android-kernel
+
+    - name: Integrate KernelSU-Next + SUSFS only (skip QoS/thermal/scheduler/interconnect/wireguard)
+      env:
+        ANOMALIST_SHA: ${{ needs.check-upstream.outputs.anomalist_sha }}
+      run: |
+        cd kernel_workspace
+
+        # Promote to job-level env so later steps (RSKSUVER, build-info) see it.
+        echo "ANOMALIST_SHA=${ANOMALIST_SHA}" >> $GITHUB_ENV
+
+        # Fetch anomalist at the exact commit check-upstream resolved, as a
+        # standalone shallow fetch (not `clone -b branch`) so this job builds
+        # precisely what was detected even if event-horizon moves again
+        # mid-run. GitHub allows fetching an arbitrary reachable commit SHA
+        # directly, not just branch tips/tags.
+        mkdir anomalist && cd anomalist && git init -q
+        git remote add origin "${ANOMALIST_REPO}"
+        git fetch --depth=1 origin "${ANOMALIST_SHA}"
+        git checkout -q FETCH_HEAD
+        cd ..
+
+        # Discover which KernelSU-Next fork + commit anomalist currently
+        # references, instead of hardcoding it — this is what keeps the fork
+        # in sync automatically as anomalist updates it.
+        KSUN_URL=$(git -C anomalist config -f .gitmodules submodule.KernelSU-Next.url)
+        KSUN_SHA=$(git -C anomalist ls-tree HEAD -- KernelSU-Next | awk '{print $3}')
+        echo "[KSU/SUSFS] KSU-Next fork: ${KSUN_URL} @ ${KSUN_SHA}"
+
+        cd android-kernel
+
+        # Fetch KernelSU-Next as its own standalone, self-contained repo
+        # (genuine .git directory, not a submodule pointer file).
+        rm -rf KernelSU-Next
+        mkdir KernelSU-Next && cd KernelSU-Next && git init -q
+        git remote add origin "${KSUN_URL}"
+        git fetch --depth=1 origin "${KSUN_SHA}"
+        git checkout -q FETCH_HEAD
+        cd ..
+
+        # anomalist's own repo isn't a wholesale overlay this time — only
+        # named files come across. The rest of anomalist's tree (QoS,
+        # cpufreq_atlas, singularity-iosched, smooth_step thermal governor,
+        # the interconnect bandwidth-voting backport, wireguard, the Adreno
+        # governor) is intentionally left untouched.
+        ln -sf ../KernelSU-Next/kernel drivers/kernelsu
+        test -e drivers/kernelsu/Kconfig || { echo "drivers/kernelsu did not resolve"; exit 1; }
+
+        # ── New files: susfs core ────────────────────────────────────────
+        # fs/sus_su.c / include/linux/sus_su.h are deliberately excluded:
+        # verified dead code even in anomalist's own tree (never wired into
+        # fs/Makefile there), and the one symbol it calls
+        # (ksu_escape_to_root) doesn't exist even in anomalist's own
+        # KernelSU-Next fork. Porting it adds nothing but an unused file.
+        for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+          mkdir -p "$(dirname "$f")"
+          cp "../anomalist/$f" "$f"
+          echo "[KSU/SUSFS] Added $f"
+        done
+
+        # ── Modified files: KSU manual-hook + SUSFS hook insertions ──────
+        # Every file below was individually verified (against the full
+        # anomalist/target diff) to contain ONLY KSU/SUSFS-guarded lines —
+        # no QoS/scheduler/thermal/interconnect content leaks in through
+        # any of them. Two files that superficially matched a "ksu"
+        # substring search were checked and excluded as false positives:
+        # README (a documentation sentence) and mm/ksm.c (the substring
+        # is inside "check_ksum" — unrelated to KernelSU).
+        KSU_SUSFS_PATCH_FILES="fs/exec.c fs/open.c fs/stat.c fs/statfs.c fs/namei.c fs/dcache.c fs/namespace.c fs/readdir.c fs/read_write.c kernel/sys.c kernel/kallsyms.c kernel/reboot.c mm/memfd.c fs/notify/fdinfo.c fs/proc/base.c fs/proc/fd.c fs/proc/task_mmu.c fs/proc/cmdline.c fs/overlayfs/inode.c fs/overlayfs/readdir.c fs/overlayfs/super.c security/selinux/hooks.c security/selinux/selinuxfs.c drivers/input/input.c"
+
+        for f in $KSU_SUSFS_PATCH_FILES; do
+          echo "[KSU/SUSFS] Patching $f"
+          diff -u --label "a/$f" --label "b/$f" "$f" "../anomalist/$f" | patch -p1 --fuzz=3 || {
+            echo "[KSU/SUSFS] FAILED to patch $f — listing .rej files:"
+            find . -name "*.rej"
+            exit 1
+          }
+        done
+
+        # ── Wiring: targeted single-line additions, not full-file diffs ──
+        # drivers/Kconfig and drivers/Makefile each carry a SECOND, unrelated
+        # line in anomalist's version (an interconnect/ source/obj line) —
+        # a full diff+patch here would silently pull that in too, so these
+        # three lines are added directly instead.
+        grep -qxF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
+          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+        grep -qxF 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
+          echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+        grep -qxF 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile || \
+          echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+
+        echo "[KSU/SUSFS] KSU-Next fork pinned at:"
+        git -C KernelSU-Next rev-parse HEAD
+
+        cd ..
+        rm -rf anomalist
+
+    - name: Apply Baseband-guard + NoMount
+      run: |
+        cd kernel_workspace/android-kernel
+
+        # Baseband-guard
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+
+        # Fix LSM ordering safely
+        if grep -q "config LSM" security/Kconfig; then
+          sed -i '/^config LSM$/,/^help$/ {
+            /^[[:space:]]*default/ {
+              /baseband_guard/! s/selinux/selinux,baseband_guard/
+            }
+          }' security/Kconfig
+        fi
+
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19-patch.sh || true
+
+        # ── NoMount Integration ────────────────────────────────────────────────
+        # nomount dropped the old patch-file workflow. It now ships a setup.sh
+        # that clones itself and wires in via a symlink (fs/nomount ->
+        # NoMount/kernel/src) plus one-line additions to fs/Makefile and
+        # fs/Kconfig — no patch to apply, so no fuzz/conflict risk from the
+        # KSU/SUSFS file changes made in the previous step.
+        curl -LSs https://raw.githubusercontent.com/maxsteeel/nomount/master/kernel/setup.sh \
+          -o "$GITHUB_WORKSPACE/kernel_workspace/nomount-setup.sh"
+        sh "$GITHUB_WORKSPACE/kernel_workspace/nomount-setup.sh"
+
+        echo "[NoMount] Verifying integration..."
+        ls -la fs/nomount
+        grep -q "CONFIG_NOMOUNT" fs/Makefile || { echo "[NoMount] fs/Makefile not wired"; exit 1; }
+        grep -q 'source "fs/nomount/Kconfig"' fs/Kconfig || { echo "[NoMount] fs/Kconfig not wired"; exit 1; }
+        # ── End NoMount Integration ────────────────────────────────────────────
+
+        # This defconfig was NOT overlaid wholesale this time (no rsync of
+        # anomalist's full kona-perf_defconfig, which also carries the
+        # QoS/scheduler/thermal/interconnect/wireguard config we're skipping)
+        # — so KSU/SUSFS's own options need adding explicitly. This is the
+        # exact 14-line set found in anomalist's defconfig diff, nothing more:
+        {
+          echo "CONFIG_KSU=y"
+          echo "CONFIG_KSU_MANUAL_HOOK=y"
+          echo "# CONFIG_KSU_KPROBES_HOOK is not set"
+          echo "CONFIG_KSU_SUSFS=y"
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y"
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+          echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+          echo "CONFIG_NOMOUNT=y"
+        } >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # Pristine LineageOS defaults to CONFIG_LOCALVERSION="-perf" here (this
+        # workflow never copies anomalist's own defconfig, so their
+        # "-Singularity" branding was never in play to begin with). Kconfig
+        # takes the LAST occurrence of a symbol when a defconfig fragment is
+        # parsed, so appending this after the existing "-perf" line replaces
+        # it — no need to sed out the original.
+        echo 'CONFIG_LOCALVERSION="-zues"' >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # Remove dirty tag
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
+        # Generate version from the (now genuinely git-tracked) KernelSU-Next
+        # fork — real history, so no manual re-clone/fetch needed anymore.
+        RSKSUVER=$(expr $(git -C KernelSU-Next rev-list --count HEAD) + 30000)
+        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+
+    - name: Build kernel
+      run: |
+        cd kernel_workspace/android-kernel
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
+
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+
+    - name: Verify kernel output
+      run: |
+        cd kernel_workspace/android-kernel/out
+
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+        else
+          echo "Kernel output file is empty"
+          exit 1
+        fi
+
+    - name: Prepare AnyKernel3 and package
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's/kernel.string=.*/kernel.string=zues Kernel/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+
+        cd AnyKernel3
+        zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-zues_KSU_${{ env.RSKSUVER }}.zip ./*
+
+    - name: Upload Image artifact
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v6
+      with:
+        name: Image-${{ matrix.ks }}
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3 ZIP
+      uses: actions/upload-artifact@v6
+      with:
+        name: AK3-${{ matrix.ks }}
+        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-zues_KSU_*.zip
+
+    - name: Save build info
+      run: |
+        cd kernel_workspace
+        {
+          echo "RSKSUVER=${{ env.RSKSUVER }}"
+          echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+          echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          echo "ANOMALIST_SHA=${{ needs.check-upstream.outputs.anomalist_sha }}"
+        } > build-info-${{ matrix.ks }}.txt
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v6
+      with:
+        name: INFO-${{ matrix.ks }}
+        path: kernel_workspace/build-info-${{ matrix.ks }}.txt
+
+    # Record that this anomalist commit was successfully built, so a future
+    # scheduled run only rebuilds when event-horizon actually moves again.
+    - name: Mark anomalist commit as built
+      if: success()
+      run: mkdir -p /tmp/marker && date > /tmp/anomalist-built-marker
+    - uses: actions/cache/save@v4
+      if: success()
+      with:
+        path: /tmp/anomalist-built-marker
+        key: anomalist-built-${{ needs.check-upstream.outputs.anomalist_sha }}
+        
