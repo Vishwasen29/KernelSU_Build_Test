@@ -1,0 +1,430 @@
+name: AAA Zues Kernel Build LineageOS OPlus SM8250 Kernel
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly check — cheap "did anomalist move?" job decides if a real build runs.
+    - cron: '0 3 * * 1'
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-24.0
+  ANOMALIST_REPO: https://github.com/The-Anomalist/Singularity.git
+  ANOMALIST_BRANCH: event-horizon
+  # JackA1ltman/NonGKI_Kernel_Build_2nd — source of the SUSFS patch set.
+  JACK_REPO: https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git
+  JACK_BRANCH: mainline
+  # 'true' = fail the build if a repo patch can't be applied cleanly.
+  # 'false' = warn (annotation + step summary) and keep what Singularity ships.
+  JACK_STRICT: 'false'
+  # Optional extra patches from the repo, space-separated, relative to the repo
+  # root (the build log prints the full Patches/ file list to pick from).
+  JACK_EXTRA_PATCHES: ''
+
+jobs:
+  check-upstream:
+    name: Check anomalist for updates
+    runs-on: ubuntu-22.04
+    outputs:
+      should_build: ${{ steps.gate.outputs.should_build }}
+      anomalist_sha: ${{ steps.sha.outputs.sha }}
+      jack_sha: ${{ steps.jack.outputs.sha }}
+      jack_patches_tree: ${{ steps.jack.outputs.tree }}
+    steps:
+      - name: Get latest event-horizon SHA
+        id: sha
+        run: |
+          SHA=$(git ls-remote "${ANOMALIST_REPO}" "refs/heads/${ANOMALIST_BRANCH}" | cut -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Latest ${ANOMALIST_BRANCH}: $SHA"
+
+      # Resolve the NonGKI repo commit (to pin the build) AND the tree hash of
+      # its Patches/ directory (for the "already built?" key). The tree hash only
+      # moves when something under Patches/ changes, so README/Supported_list
+      # commits don't trigger a rebuild. Blobless fetch = trees only, tiny.
+      - name: Get latest NonGKI_Kernel_Build_2nd SHA + Patches/ tree
+        id: jack
+        run: |
+          JACK_SHA=$(git ls-remote "${JACK_REPO}" "refs/heads/${JACK_BRANCH}" | cut -f1)
+          [ -n "$JACK_SHA" ] || { echo "Could not resolve ${JACK_REPO} @ ${JACK_BRANCH}"; exit 1; }
+
+          d=$(mktemp -d)
+          TREE=$(cd "$d" && git init -q \
+            && git remote add origin "${JACK_REPO}" \
+            && git fetch -q --depth=1 --filter=blob:none origin "${JACK_SHA}" \
+            && git rev-parse "FETCH_HEAD:Patches") || TREE=""
+          [ -n "$TREE" ] || TREE="$JACK_SHA"   # fallback: any commit triggers a build
+
+          echo "sha=$JACK_SHA" >> "$GITHUB_OUTPUT"
+          echo "tree=$TREE" >> "$GITHUB_OUTPUT"
+          echo "Latest ${JACK_BRANCH}: $JACK_SHA (Patches/ tree: $TREE)"
+
+      # Cache entry keyed on the anomalist SHA + JackA1ltman Patches/ tree.
+      # Hit = we've already built this exact combination, so a scheduled run
+      # can skip. A manual
+      # workflow_dispatch always builds regardless (see gate step below).
+      - name: Check if already built
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/anomalist-built-marker
+          key: nongki-built-${{ steps.sha.outputs.sha }}-${{ steps.jack.outputs.tree }}
+          lookup-only: true
+
+      - name: Decide whether to build
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+            echo "No new commits on ${ANOMALIST_BRANCH} and no change in JackA1ltman Patches/ since last build — skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build Kernel
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ks: [zues]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    - name: Setup build environment
+      run: |
+        echo "BUILD_TIME=$(date +%y%m%d)" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(date +%Y-%m-%d)" >> $GITHUB_ENV
+
+        sudo apt-get update
+        sudo apt-get install -y \
+          git ccache automake flex lzop bison gperf build-essential \
+          zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool \
+          make squashfs-tools dpkg-dev libssl-dev python3 bc \
+          libc6-dev-i386 libncurses5-dev wget rsync
+
+        mkdir -p kernel_workspace
+
+    - name: Cache Clang toolchain
+      id: cache-clang
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ runner.os }}-clang-${{ env.CLANG_VERSION }}
+
+    - name: Download Clang (if cache miss)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd kernel_workspace
+        mkdir clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -xf ${CLANG_VERSION}.tar.gz -C clang-aosp
+
+    - name: Clone kernel source
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 \
+           https://github.com/LineageOS/android_kernel_oneplus_sm8250.git \
+          -b ${{ env.Lineage_VERSION }} android-kernel
+
+    - name: Integrate Singularity (SUSFS + KernelSU-Next + QoS/thermal)
+      env:
+        ANOMALIST_SHA: ${{ needs.check-upstream.outputs.anomalist_sha }}
+      run: |
+        cd kernel_workspace
+
+        # Promote to job-level env so later steps (RSKSUVER, build-info) see it.
+        echo "ANOMALIST_SHA=${ANOMALIST_SHA}" >> $GITHUB_ENV
+
+        # Fetch anomalist at the exact commit check-upstream resolved, as a
+        # standalone shallow fetch (not `clone -b branch`) so this job builds
+        # precisely what was detected even if event-horizon moves again
+        # mid-run. GitHub allows fetching an arbitrary reachable commit SHA
+        # directly, not just branch tips/tags.
+        mkdir anomalist && cd anomalist && git init -q
+        git remote add origin "${ANOMALIST_REPO}"
+        git fetch --depth=1 origin "${ANOMALIST_SHA}"
+        git checkout -q FETCH_HEAD
+        cd ..
+
+        # Discover which KernelSU-Next fork + commit anomalist currently
+        # references, instead of hardcoding it — this is what keeps the fork
+        # in sync automatically as anomalist updates it.
+        KSUN_URL=$(git -C anomalist config -f .gitmodules submodule.KernelSU-Next.url)
+        KSUN_SHA=$(git -C anomalist ls-tree HEAD -- KernelSU-Next | awk '{print $3}')
+        echo "[Singularity] KSU-Next fork: ${KSUN_URL} @ ${KSUN_SHA}"
+
+        echo "[Singularity] Overlaying onto android-kernel..."
+        # A plain (non-submodule-initialized) clone leaves KernelSU-Next as an
+        # empty directory, so nothing sensitive to exclude here — just drop
+        # anomalist's own top-level .git, which we don't want copied in.
+        rsync -a --exclude='/.git' --exclude='/.gitmodules' anomalist/ android-kernel/
+
+        cd android-kernel
+
+        # Fetch KernelSU-Next as its own standalone, self-contained repo
+        # (genuine .git directory, not a submodule pointer file) — avoids any
+        # dependency on anomalist's .git surviving the overlay above.
+        rm -rf KernelSU-Next
+        #mkdir KernelSU-Next && cd KernelSU-Next && git init -q
+        #git remote add origin "${KSUN_URL}"
+        #git fetch --depth=1 origin "${KSUN_SHA}"
+        #git checkout -q FETCH_HEAD
+        curl -LSs \
+          https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+          | bash -s legacy
+
+        # NOTE: stay inside android-kernel here. setup.sh clones KernelSU-Next
+        # and creates drivers/kernelsu relative to the kernel root, and the
+        # checks below (plus the final `cd ..` before `rm -rf anomalist`)
+        # expect to run from there.
+
+        echo "[Singularity] Verifying symlink resolves..."
+        ls -la drivers/kernelsu
+        test -e drivers/kernelsu/Kconfig || { echo "drivers/kernelsu did not resolve"; exit 1; }
+
+        echo "[Singularity] KSU-Next fork pinned at:"
+        git -C KernelSU-Next rev-parse HEAD
+
+        echo "[Singularity] KSU/SUSFS config already present in kona-perf_defconfig:"
+        grep -iE "ksu|susfs" arch/arm64/configs/vendor/kona-perf_defconfig || true
+
+        cd ..
+        rm -rf anomalist
+
+    # Runs BEFORE Baseband-guard/NoMount so fs/Makefile & fs/Kconfig context is
+    # still pristine for the repo's hunks.
+    - name: Integrate JackA1ltman NonGKI patches (SUSFS + extras)
+      env:
+        JACK_SHA: ${{ needs.check-upstream.outputs.jack_sha }}
+      run: |
+        cd kernel_workspace
+        echo "JACK_SHA=${JACK_SHA}" >> $GITHUB_ENV
+
+        # Sparse, blobless fetch of just Patches/ at the exact commit that
+        # check-upstream resolved (same pinning idea as the anomalist fetch).
+        rm -rf jack-nongki && mkdir jack-nongki && cd jack-nongki
+        git init -q
+        git remote add origin "${JACK_REPO}"
+        git sparse-checkout init --cone
+        git sparse-checkout set Patches
+        git fetch -q --depth=1 --filter=blob:none origin "${JACK_SHA}"
+        git checkout -q FETCH_HEAD
+        JACK_DIR="$PWD"
+        cd ../android-kernel
+
+        echo "[JackA1ltman] Patches/ @ ${JACK_SHA:0:9}:"
+        (cd "$JACK_DIR" && find Patches -type f | sort)
+
+        KVER=$(make -s kernelversion | cut -d. -f1,2)
+        echo "[JackA1ltman] kernel base: ${KVER}"
+
+        {
+          echo "### JackA1ltman/NonGKI_Kernel_Build_2nd @ \`${JACK_SHA:0:9}\`"
+          echo "| Patch | Result |"
+          echo "|---|---|"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # Never blindly applies: already-present hunks are skipped (Singularity
+        # already ships SUSFS), only a fully clean dry-run is applied, anything
+        # else is reported instead of leaving .rej/.orig files in the tree.
+        apply_jack_patch() {
+          local rel="$1" p="${JACK_DIR}/$1"
+          RESULT=""
+          if [ ! -f "$p" ]; then
+            RESULT="missing-in-repo"
+          elif patch -p1 -R --dry-run -s -f < "$p" >/dev/null 2>&1; then
+            RESULT="already-present"
+          elif patch -p1 --dry-run -s < "$p" >/dev/null 2>&1; then
+            patch -p1 --no-backup-if-mismatch < "$p" && RESULT="applied" || RESULT="apply-failed"
+          else
+            RESULT="conflict"
+          fi
+          echo "[JackA1ltman] ${rel}: ${RESULT}"
+          echo "| \`${rel}\` | ${RESULT} |" >> "$GITHUB_STEP_SUMMARY"
+          case "$RESULT" in
+            missing-in-repo|conflict|apply-failed)
+              echo "::warning::[JackA1ltman] ${rel}: ${RESULT}"
+              [ "$RESULT" = "conflict" ] && { patch -p1 --dry-run < "$p" | tail -n 40 || true; }
+              [ "${JACK_STRICT}" = "true" ] && exit 1
+              ;;
+          esac
+          return 0
+        }
+
+        # Core SUSFS hooks for this kernel version. Needs SUSFS's own source
+        # files (fs/susfs.c etc.) to already be in the tree — Singularity ships
+        # them; without them the Makefile hunk would point at a missing object.
+        if [ -f fs/susfs.c ] && [ -f include/linux/susfs.h ]; then
+          apply_jack_patch "Patches/Patch/susfs_patch_to_${KVER}.patch"
+        else
+          RESULT="skipped-no-susfs-core"
+          echo "::warning::[JackA1ltman] fs/susfs.c / include/linux/susfs.h missing — SUSFS core not in tree, skipping susfs_patch_to_${KVER}.patch"
+          echo "| \`susfs_patch_to_${KVER}.patch\` | ${RESULT} |" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        echo "JACK_SUSFS_STATUS=${RESULT}" >> $GITHUB_ENV
+
+        # Optional extras (JACK_EXTRA_PATCHES at the top of this file).
+        for rel in ${JACK_EXTRA_PATCHES}; do
+          apply_jack_patch "$rel"
+        done
+
+        echo "[JackA1ltman] SUSFS version in tree:"
+        grep -rn "SUSFS_VERSION" include/linux/susfs*.h 2>/dev/null | head -n 5 || true
+
+        cd ..
+        rm -rf jack-nongki
+
+    - name: Apply Baseband-guard + NoMount on top of Singularity
+      run: |
+        cd kernel_workspace/android-kernel
+
+        # Baseband-guard
+        wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+
+        # Fix LSM ordering safely
+        if grep -q "config LSM" security/Kconfig; then
+          sed -i '/^config LSM$/,/^help$/ {
+            /^[[:space:]]*default/ {
+              /baseband_guard/! s/selinux/selinux,baseband_guard/
+            }
+          }' security/Kconfig
+        fi
+
+        bash $GITHUB_WORKSPACE/patches/kernel-4.19-patch.sh || true
+
+        # ── NoMount Integration ────────────────────────────────────────────────
+        # nomount dropped the old patch-file workflow. It now ships a setup.sh
+        # that clones itself and wires in via a symlink (fs/nomount ->
+        # NoMount/kernel/src) plus one-line additions to fs/Makefile and
+        # fs/Kconfig — no patch to apply, so no fuzz/conflict risk from the
+        # Singularity overlay here.
+        curl -LSs https://raw.githubusercontent.com/maxsteeel/nomount/master/kernel/setup.sh \
+          -o "$GITHUB_WORKSPACE/kernel_workspace/nomount-setup.sh"
+        sh "$GITHUB_WORKSPACE/kernel_workspace/nomount-setup.sh"
+
+        echo "[NoMount] Verifying integration..."
+        ls -la fs/nomount
+        grep -q "CONFIG_NOMOUNT" fs/Makefile || { echo "[NoMount] fs/Makefile not wired"; exit 1; }
+        grep -q 'source "fs/nomount/Kconfig"' fs/Kconfig || { echo "[NoMount] fs/Kconfig not wired"; exit 1; }
+        # ── End NoMount Integration ────────────────────────────────────────────
+
+        # Enable NoMount subsystem (KSU manual hook + SUSFS configs already set
+        # by Singularity's kona-perf_defconfig — no need to append those here)
+        echo "CONFIG_NOMOUNT=y" >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # Override anomalist's "-Singularity" branding. Kconfig takes the LAST
+        # occurrence of a symbol when a defconfig fragment is parsed, so
+        # appending this after the file already contains the original line
+        # replaces it — no need to sed out the original.
+        echo 'CONFIG_LOCALVERSION="-zues"' >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # Remove dirty tag
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
+        # Generate version from the (now genuinely git-tracked) KernelSU-Next
+        # fork — real history, so no manual re-clone/fetch needed anymore.
+        RSKSUVER=$(expr $(git -C KernelSU-Next rev-list --count HEAD) + 30000)
+        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+
+    - name: Build kernel
+      run: |
+        cd kernel_workspace/android-kernel
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
+
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+
+    - name: Verify kernel output
+      run: |
+        cd kernel_workspace/android-kernel/out
+
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+        else
+          echo "Kernel output file is empty"
+          exit 1
+        fi
+
+    - name: Prepare AnyKernel3 and package
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's/kernel.string=.*/kernel.string=zues Kernel/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+
+        cd AnyKernel3
+        zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-zues_KSU_${{ env.RSKSUVER }}.zip ./*
+
+    - name: Upload Image artifact
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v6
+      with:
+        name: Image-${{ matrix.ks }}
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3 ZIP
+      uses: actions/upload-artifact@v6
+      with:
+        name: AK3-${{ matrix.ks }}
+        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-zues_KSU_*.zip
+
+    - name: Save build info
+      run: |
+        cd kernel_workspace
+        {
+          echo "RSKSUVER=${{ env.RSKSUVER }}"
+          echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+          echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          echo "ANOMALIST_SHA=${{ needs.check-upstream.outputs.anomalist_sha }}"
+          echo "JACK_SHA=${{ env.JACK_SHA }}"
+          echo "JACK_SUSFS_STATUS=${{ env.JACK_SUSFS_STATUS }}"
+        } > build-info-${{ matrix.ks }}.txt
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v6
+      with:
+        name: INFO-${{ matrix.ks }}
+        path: kernel_workspace/build-info-${{ matrix.ks }}.txt
+
+    # Record that this anomalist commit + JackA1ltman Patches/ tree was
+    # successfully built, so a future scheduled run only rebuilds when either
+    # event-horizon or the repo's Patches/ actually moves again.
+    - name: Mark anomalist commit as built
+      if: success()
+      run: mkdir -p /tmp/marker && date > /tmp/anomalist-built-marker
+    - uses: actions/cache/save@v4
+      if: success()
+      with:
+        path: /tmp/anomalist-built-marker
+        key: nongki-built-${{ needs.check-upstream.outputs.anomalist_sha }}-${{ needs.check-upstream.outputs.jack_patches_tree }}
+        
