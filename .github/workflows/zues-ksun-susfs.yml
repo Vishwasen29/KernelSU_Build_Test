@@ -1,0 +1,386 @@
+name: G Kernel Build LineageOS OPlus SM8250 (KernelSU-Next + SUSFS)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly check — cheap "did the patch source move?" job decides if a real build runs.
+    - cron: '0 3 * * 1'
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VERSION: clang-r547379
+  Lineage_VERSION: lineage-24.0
+  KERNEL_REPO: https://github.com/LineageOS/android_kernel_oneplus_sm8250.git
+  KSUN_REPO: https://github.com/KernelSU-Next/KernelSU-Next.git
+  KSUN_BRANCH: next
+  NONGKI_REPO: https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git
+  NONGKI_BRANCH: mainline
+
+jobs:
+  check-upstream:
+    name: Check NonGKI_Kernel_Build_2nd (mainline) for updates
+    runs-on: ubuntu-22.04
+    outputs:
+      should_build: ${{ steps.gate.outputs.should_build }}
+      nongki_sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Get latest NonGKI_Kernel_Build_2nd mainline SHA
+        id: sha
+        run: |
+          SHA=$(git ls-remote "${NONGKI_REPO}" "refs/heads/${NONGKI_BRANCH}" | cut -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Latest ${NONGKI_BRANCH}: $SHA"
+
+      # Cache entry keyed on the SHA itself. Hit = we've already built against this
+      # exact commit before, so a scheduled run can skip. A manual
+      # workflow_dispatch always builds regardless (see gate step below).
+      - name: Check if already built
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/nongki-built-marker
+          key: nongki-built-${{ steps.sha.outputs.sha }}
+          lookup-only: true
+
+      - name: Decide whether to build
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+            echo "No new commits on ${NONGKI_BRANCH} since last build — skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build Kernel
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ks: [zues]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    - name: Setup build environment
+      run: |
+        echo "BUILD_TIME=$(date +%y%m%d)" >> $GITHUB_ENV
+        echo "BUILD_TIME_1=$(date +%Y-%m-%d)" >> $GITHUB_ENV
+
+        sudo apt-get update
+        sudo apt-get install -y \
+          git ccache automake flex lzop bison gperf build-essential \
+          zip curl zlib1g-dev g++-multilib bzip2 libbz2-dev liblz4-tool \
+          make squashfs-tools dpkg-dev libssl-dev python3 bc \
+          libc6-dev-i386 libncurses5-dev wget rsync
+
+        mkdir -p kernel_workspace
+
+    - name: Cache Clang toolchain
+      id: cache-clang
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/kernel_workspace/clang-aosp
+        key: ${{ runner.os }}-clang-${{ env.CLANG_VERSION }}
+
+    - name: Download Clang (if cache miss)
+      if: steps.cache-clang.outputs.cache-hit != 'true'
+      run: |
+        cd kernel_workspace
+        mkdir clang-aosp
+        wget -O ${CLANG_VERSION}.tar.gz \
+          https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz
+        tar -xf ${CLANG_VERSION}.tar.gz -C clang-aosp
+
+    - name: Clone kernel source
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 \
+          "${{ env.KERNEL_REPO }}" \
+          -b ${{ env.Lineage_VERSION }} android-kernel
+
+    - name: Integrate KernelSU-Next
+      run: |
+        cd kernel_workspace/android-kernel
+
+        # Official installer — same convention KernelSU-Next inherited from
+        # upstream KernelSU: drop a real, self-contained repo under
+        # KernelSU-Next/ and wire the drivers/kernelsu symlink.
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ env.KSUN_BRANCH }}/kernel/setup.sh" \
+          | bash -s ${{ env.KSUN_BRANCH }}
+
+        echo "[KernelSU-Next] Verifying symlink resolves..."
+        ls -la drivers/kernelsu
+        test -e drivers/kernelsu/Kconfig || { echo "drivers/kernelsu did not resolve"; exit 1; }
+
+        echo "[KernelSU-Next] Pinned at:"
+        git -C KernelSU-Next rev-parse HEAD
+
+        RSKSUVER=$(expr $(git -C KernelSU-Next rev-list --count HEAD) + 30000)
+        echo "RSKSUVER=$RSKSUVER" >> $GITHUB_ENV
+
+    - name: Clone NonGKI_Kernel_Build_2nd (mainline)
+      env:
+        NONGKI_SHA: ${{ needs.check-upstream.outputs.nongki_sha }}
+      run: |
+        cd kernel_workspace
+
+        # Promote to job-level env so later steps (build-info) see it.
+        echo "NONGKI_SHA=${NONGKI_SHA}" >> $GITHUB_ENV
+
+        # Fetch at the exact commit check-upstream resolved on mainline, as a
+        # standalone shallow fetch — pins this run to a specific commit even
+        # if mainline moves again mid-run.
+        mkdir nongki-src && cd nongki-src && git init -q
+        git remote add origin "${{ env.NONGKI_REPO }}"
+        git fetch --depth=1 origin "${NONGKI_SHA}"
+        git checkout -q FETCH_HEAD
+        cd ..
+
+    - name: Apply SUSFS patches from NonGKI_Kernel_Build_2nd
+      run: |
+        cd kernel_workspace
+
+        echo "[SUSFS] Searching NonGKI_Kernel_Build_2nd (mainline) for susfs patch files..."
+        # KernelSU-side patches (susfs4ksu convention: patches meant to be
+        # applied inside the KernelSU-Next tree live under a KernelSU/ path).
+        mapfile -t KSU_PATCHES < <(find nongki-src -iname '*.patch' -ipath '*kernelsu*' | sort)
+        # Everything else susfs-named is a kernel-tree patch (fs/, include/, defconfig, etc).
+        mapfile -t KERNEL_PATCHES < <(find nongki-src -iname '*susfs*.patch' -not -ipath '*kernelsu*' | sort)
+
+        echo "KernelSU-side patches found: ${#KSU_PATCHES[@]}"
+        printf '  %s\n' "${KSU_PATCHES[@]}"
+        echo "Kernel-side patches found: ${#KERNEL_PATCHES[@]}"
+        printf '  %s\n' "${KERNEL_PATCHES[@]}"
+
+        if [ ${#KSU_PATCHES[@]} -eq 0 ] && [ ${#KERNEL_PATCHES[@]} -eq 0 ]; then
+          echo "::error::No susfs patch files were found under NonGKI_Kernel_Build_2nd's mainline tree."
+          echo "The repo's layout may not match the *.patch discovery heuristic used here —"
+          echo "inspect the checked-out nongki-src/ directory and point this step at the right files."
+          exit 1
+        fi
+
+        cd android-kernel
+
+        for p in "${KSU_PATCHES[@]}"; do
+          echo "[SUSFS] Applying to KernelSU-Next: $p"
+          (cd KernelSU-Next && patch -p1 --forward < "$GITHUB_WORKSPACE/kernel_workspace/$p") \
+            || { echo "::error::$p failed to apply to KernelSU-Next"; exit 1; }
+        done
+
+        for p in "${KERNEL_PATCHES[@]}"; do
+          echo "[SUSFS] Applying to kernel tree: $p"
+          patch -p1 --forward < "$GITHUB_WORKSPACE/kernel_workspace/$p" \
+            || { echo "::error::$p failed to apply to the kernel tree"; exit 1; }
+        done
+
+    - name: Apply Baseband-guard from NonGKI_Kernel_Build_2nd
+      run: |
+        cd kernel_workspace
+
+        echo "[Baseband-guard] Looking for how NonGKI_Kernel_Build_2nd (mainline) wires this in..."
+        mapfile -t BBG_PATCHES < <(find nongki-src -iname '*baseband*.patch' | sort)
+
+        if [ ${#BBG_PATCHES[@]} -gt 0 ]; then
+          echo "[Baseband-guard] Found ${#BBG_PATCHES[@]} patch file(s) in the repo — applying directly."
+          cd android-kernel
+          for p in "${BBG_PATCHES[@]}"; do
+            echo "  applying $p"
+            patch -p1 --forward < "$GITHUB_WORKSPACE/kernel_workspace/$p" \
+              || { echo "::error::$p failed to apply"; exit 1; }
+          done
+          cd ..
+        else
+          BBG_URL=$(grep -rhoiE 'https://[^"'"'"' ]*baseband[-_]?guard[^"'"'"' ]*setup\.sh' nongki-src | head -n1 || true)
+          if [ -z "$BBG_URL" ]; then
+            echo "[Baseband-guard] No reference found in NonGKI_Kernel_Build_2nd; falling back to upstream vc-teahouse/Baseband-guard."
+            BBG_URL="https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh"
+          else
+            echo "[Baseband-guard] Using the setup script NonGKI_Kernel_Build_2nd references: $BBG_URL"
+          fi
+
+          cd android-kernel
+          wget -O- "$BBG_URL" | bash
+          cd ..
+        fi
+
+        cd android-kernel
+
+        # Fix LSM ordering safely
+        if grep -q "config LSM" security/Kconfig; then
+          sed -i '/^config LSM$/,/^help$/ {
+            /^[[:space:]]*default/ {
+              /baseband_guard/! s/selinux/selinux,baseband_guard/
+            }
+          }' security/Kconfig
+        fi
+
+    - name: Apply NoMount from NonGKI_Kernel_Build_2nd
+      run: |
+        cd kernel_workspace
+
+        echo "[NoMount] Looking for how NonGKI_Kernel_Build_2nd (mainline) wires this in..."
+        mapfile -t NOMOUNT_PATCHES < <(find nongki-src -iname '*nomount*.patch' | sort)
+
+        if [ ${#NOMOUNT_PATCHES[@]} -gt 0 ]; then
+          echo "[NoMount] Found ${#NOMOUNT_PATCHES[@]} patch file(s) in the repo — applying directly."
+          cd android-kernel
+          for p in "${NOMOUNT_PATCHES[@]}"; do
+            echo "  applying $p"
+            patch -p1 --forward < "$GITHUB_WORKSPACE/kernel_workspace/$p" \
+              || { echo "::error::$p failed to apply"; exit 1; }
+          done
+          cd ..
+        else
+          NOMOUNT_URL=$(grep -rhoiE 'https://[^"'"'"' ]*nomount[^"'"'"' ]*setup\.sh' nongki-src | head -n1 || true)
+          if [ -z "$NOMOUNT_URL" ]; then
+            echo "[NoMount] No reference found in NonGKI_Kernel_Build_2nd; falling back to upstream maxsteeel/nomount."
+            NOMOUNT_URL="https://raw.githubusercontent.com/maxsteeel/nomount/master/kernel/setup.sh"
+          else
+            echo "[NoMount] Using the setup script NonGKI_Kernel_Build_2nd references: $NOMOUNT_URL"
+          fi
+
+          cd android-kernel
+          curl -LSs "$NOMOUNT_URL" -o "$GITHUB_WORKSPACE/kernel_workspace/nomount-setup.sh"
+          sh "$GITHUB_WORKSPACE/kernel_workspace/nomount-setup.sh"
+          cd ..
+        fi
+
+        cd android-kernel
+        echo "[NoMount] Verifying integration..."
+        ls -la fs/nomount
+        grep -q "CONFIG_NOMOUNT" fs/Makefile || { echo "[NoMount] fs/Makefile not wired"; exit 1; }
+        grep -q 'source "fs/nomount/Kconfig"' fs/Kconfig || { echo "[NoMount] fs/Kconfig not wired"; exit 1; }
+
+        cd ..
+        rm -rf nongki-src
+
+    - name: Enable KSU/SUSFS/NoMount config
+      run: |
+        cd kernel_workspace/android-kernel
+
+        # Baseline set for KernelSU-Next + SUSFS. Exact CONFIG_KSU_SUSFS_*
+        # symbol names have shifted across SUSFS versions — verify these
+        # against whichever version the patches above actually apply, and
+        # trim/extend as needed.
+        printf '%s\n' \
+          'CONFIG_KSU=y' \
+          'CONFIG_KSU_SUSFS=y' \
+          'CONFIG_KSU_SUSFS_SUS_PATH=y' \
+          'CONFIG_KSU_SUSFS_SUS_MOUNT=y' \
+          'CONFIG_KSU_SUSFS_SUS_KSTAT=y' \
+          'CONFIG_KSU_SUSFS_TRY_UMOUNT=y' \
+          'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y' \
+          'CONFIG_KSU_SUSFS_SPOOF_UNAME=y' \
+          'CONFIG_KSU_SUSFS_ENABLE_LOG=y' \
+          'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y' \
+          'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y' \
+          'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y' \
+          'CONFIG_NOMOUNT=y' \
+          >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        grep -iE "ksu|susfs|nomount" arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # Override branding. Kconfig takes the LAST occurrence of a symbol
+        # when a defconfig fragment is parsed, so appending after the file
+        # already contains the original line replaces it.
+        echo 'CONFIG_LOCALVERSION="-zues"' >> arch/arm64/configs/vendor/kona-perf_defconfig
+
+        # Remove dirty tag
+        sed -i 's/ -dirty//g' scripts/setlocalversion
+
+    - name: Build kernel
+      run: |
+        cd kernel_workspace/android-kernel
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export BRAND_SHOW_FLAG=oneplus
+        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$PATH
+        export KBUILD_BUILD_HOST=Github-Action
+        export KBUILD_BUILD_USER=$(echo ${{ github.actor }} | tr A-Z a-z)
+
+        BA_CMD="CLANG_TRIPLE=aarch64-linux-gnu-"
+        EX_CMD="LD=ld.lld LLVM=1"
+        DEFCONFIG="vendor/kona-perf_defconfig vendor/oplus.config"
+
+        make O=out CC=clang $BA_CMD $EX_CMD $DEFCONFIG
+        make -j$(nproc --all) O=out CC=clang $BA_CMD $EX_CMD
+
+    - name: Verify kernel output
+      run: |
+        cd kernel_workspace/android-kernel/out
+
+        if [ -f arch/arm64/boot/Image ]; then
+          echo "CHECK_IMAGE=true" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(cat include/config/kernel.release)" >> $GITHUB_ENV
+        else
+          echo "Kernel output file is empty"
+          exit 1
+        fi
+
+    - name: Prepare AnyKernel3 and package
+      run: |
+        cd kernel_workspace
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+        sed -i 's/kernel.string=.*/kernel.string=zues Kernel/g' AnyKernel3/anykernel.sh
+        sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' AnyKernel3/anykernel.sh
+        sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=auto;/g' AnyKernel3/anykernel.sh
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        cp android-kernel/out/arch/arm64/boot/Image AnyKernel3/
+
+        cd AnyKernel3
+        zip -r AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-zues_KSUN_${{ env.RSKSUVER }}.zip ./*
+
+    - name: Upload Image artifact
+      if: env.CHECK_IMAGE == 'true'
+      uses: actions/upload-artifact@v6
+      with:
+        name: Image-${{ matrix.ks }}
+        path: kernel_workspace/android-kernel/out/arch/arm64/boot/Image
+
+    - name: Upload AnyKernel3 ZIP
+      uses: actions/upload-artifact@v6
+      with:
+        name: AK3-${{ matrix.ks }}
+        path: ${{ github.workspace }}/kernel_workspace/AnyKernel3/AK3-${{ env.Lineage_VERSION }}-OPlus-SM8250-zues_KSUN_*.zip
+
+    - name: Save build info
+      run: |
+        cd kernel_workspace
+        {
+          echo "RSKSUVER=${{ env.RSKSUVER }}"
+          echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+          echo "BUILD_TIME_1=${{ env.BUILD_TIME_1 }}"
+          echo "NONGKI_SHA=${{ needs.check-upstream.outputs.nongki_sha }}"
+        } > build-info-${{ matrix.ks }}.txt
+
+    - name: Upload build info
+      uses: actions/upload-artifact@v6
+      with:
+        name: INFO-${{ matrix.ks }}
+        path: kernel_workspace/build-info-${{ matrix.ks }}.txt
+
+    # Record that this NonGKI_Kernel_Build_2nd mainline commit was successfully
+    # built, so a future scheduled run only rebuilds when mainline actually moves.
+    - name: Mark NonGKI_Kernel_Build_2nd commit as built
+      if: success()
+      run: mkdir -p /tmp/marker && date > /tmp/nongki-built-marker
+    - uses: actions/cache/save@v4
+      if: success()
+      with:
+        path: /tmp/nongki-built-marker
+        key: nongki-built-${{ needs.check-upstream.outputs.nongki_sha }}
