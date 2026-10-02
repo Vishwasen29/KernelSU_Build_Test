@@ -1,4 +1,4 @@
-name: AAA Zues Kernel Build LineageOS OPlus SM8250 Kernel (KSUN + SUSFS from 17-ksun)
+name: 😇 Build LineageOS OPlus SM8250 Kernel (KSUN + SUSFS from 17-ksun)
 
 on:
   workflow_dispatch:
